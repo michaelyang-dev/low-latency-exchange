@@ -1,0 +1,62 @@
+# Build output
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+/.cache/
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dSYM/
+*.gch
+*.pch
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+
+# Market data and captures (NASDAQ ITCH sample files are multi-GB; never commit them)
+/data/
+*.NASDAQ_ITCH50
+*.NASDAQ_ITCH50.gz
+*.itch
+*.itch.gz
+*.pcap
+*.pcapng
+
+# Profiling output
+perf.data*
+*.profraw
+*.profdata
+callgrind.out.*
+
+# libFuzzer artifacts
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
+
+# TLA+ / TLC model-checker output
+states/
+*_TTrace_*.tla
+*_TTrace_*.bin
+
+# Python tooling
+__pycache__/
+*.pyc
+.venv/
+
+# Logs
+*.log
