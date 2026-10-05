@@ -210,11 +210,14 @@ TEST(SockTcp, PrivateReactorWorksWithoutExternalPolling) {
   auto cid = client.connect(*at);
   ASSERT_TRUE(cid.has_value());
   Recorder s, c;
+  // Send exactly once: on a loaded machine the server may read only after several pump
+  // iterations, and writing on every iteration until then made it receive "hihi...".
+  bool sent = false;
   ASSERT_TRUE(pump_until(
       [&] {
         server.poll(s);
         client.poll(c);
-        if (c.count(StreamEventKind::Connected) == 1 && c.data.empty() && s.data.empty()) (void)client.write(*cid, bytes("hi"));
+        if (!sent && c.count(StreamEventKind::Connected) == 1) sent = client.write(*cid, bytes("hi")) == 2;
       },
       [&] { return s.data == "hi"; }, 200'000));
   EXPECT_EQ(s.count(StreamEventKind::Accepted), 1);
