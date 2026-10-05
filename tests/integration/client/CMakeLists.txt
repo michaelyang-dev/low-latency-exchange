@@ -45,6 +45,9 @@ set_tests_properties(client_feed_lossy_dual_lines client_loadgen_loopback_server
                      client_refclient_ha_takeover client_itch2ouch_synthetic_day client_ttt_loop_variants
                      client_refclient_glimpse_retry
                      PROPERTIES LABELS integration TIMEOUT 300)
+if(LLE_SANITIZE)
+  set_tests_properties(client_ttt_loop_variants PROPERTIES ENVIRONMENT "LLE_TTT_RATE=20000;LLE_TTT_WAIT=90" TIMEOUT 900)
+endif()
 # The variants that need root and veth (busypoll's CAP_NET_ADMIN socket options, IRQ
 # suspend on netdevsim, AF_XDP copy mode with utcp, the harness's AF_XDP feed):
 #   sudo ctest --test-dir <build> -L vm -R client_xsk --output-on-failure

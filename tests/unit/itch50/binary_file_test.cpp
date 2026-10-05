@@ -42,7 +42,7 @@ std::string temp_path(const std::string& name) {
 void write_file(const std::string& path, std::span<const std::byte> data) {
   std::FILE* f = std::fopen(path.c_str(), "wb");
   ASSERT_NE(f, nullptr);
-  ASSERT_EQ(std::fwrite(data.data(), 1, data.size(), f), data.size());
+  if (!data.empty()) ASSERT_EQ(std::fwrite(data.data(), 1, data.size(), f), data.size());
   std::fclose(f);
 }
 

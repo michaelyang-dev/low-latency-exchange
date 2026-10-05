@@ -8,8 +8,12 @@
 # INVALID because no hardware timestamps exist here (software stamps on Linux, none on
 # macOS); `analyze` then merges the client log and keeps the verdict.
 # usage: ttt_loop_test.sh ITCH_SYNTH TTT_HARNESS REFCLIENT WORK_DIR PORT_BASE VARIANT...
+# LLE_TTT_RATE (messages/s, default 100000) and LLE_TTT_WAIT (s, default 30) are lowered
+# and raised for sanitizer builds, whose client cannot take the full rate over UDP.
 source "$(dirname "$0")/common.sh"
 SYNTH=$1; HARNESS=$2; CLIENT=$3; W=$4; P=$5; shift 5
+RATE=${LLE_TTT_RATE:-100000}
+WAIT=${LLE_TTT_WAIT:-30}
 VARIANTS=("$@")
 [ ${#VARIANTS[@]} -gt 0 ] || VARIANTS=(epoll)
 rm -rf "$W"; mkdir -p "$W"
@@ -40,10 +44,10 @@ for V in "${VARIANTS[@]}"; do
     continue
   fi
   "$HARNESS" run --file "$W/day.bin" --line-a :$((B+1)) --line-b :$((B+2)) --listen :$((B+30)) \
-    --rerequest :$((B+11)) --timestamps $TS --rate 100000 --trigger-rate 2000 --duration 3s --warmup 1s --min-triggers 100 \
+    --rerequest :$((B+11)) --timestamps $TS --rate "$RATE" --trigger-rate 2000 --duration 3s --warmup 1s --min-triggers 100 \
     --start-delay 1s --linger 1500ms --seed 7 --out "$D" --run-name run-01 > /dev/null 2> "$D/harness.err" \
     || fail "$V: harness exited with an error: $(tail -2 "$D/harness.err")"
-  wait_for "$D/client.json" 30
+  wait_for "$D/client.json" "$WAIT"
   H="$D/run-01.json"; C="$D/client.json"
   grep -q '"feed_ended": true' "$C" || fail "$V: client feed did not end"
   [ "$(json_num "$C" delivered)" = "$(json_num "$H" messages)" ] || fail "$V: client delivered $(json_num "$C" delivered) of $(json_num "$H" messages)"

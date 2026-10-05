@@ -65,7 +65,7 @@ void write_header(MemJournalDevice& d, const SegmentHeader& h) {
   std::vector<std::byte> b(kSegmentHeaderBytes);
   encode_segment_header(std::span<std::byte, kSegmentHeaderBytes>(b.data(), kSegmentHeaderBytes), h);
   auto t = d.tamper();
-  std::memcpy(t.data(), b.data(), std::min<std::size_t>(t.size(), b.size()));
+  if (!t.empty()) std::memcpy(t.data(), b.data(), std::min<std::size_t>(t.size(), b.size()));
   d.sync_tamper();
 }
 
@@ -170,7 +170,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         const std::size_t len = (in.n - in.i) / (parts - k);
         auto h = dir.create("raw-" + std::to_string(k) + ".seg", len);
         auto t = dir.device(*h).tamper();
-        std::memcpy(t.data(), in.p + in.i, len);
+        if (len != 0) std::memcpy(t.data(), in.p + in.i, len);  // an empty segment has no buffer
         in.i += len;
         dir.device(*h).sync_tamper();
       }
@@ -186,7 +186,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
       auto hd = dir.create("a.seg", kSegmentHeaderBytes + (in.n - in.i));
       write_header(dir.device(*hd), h);
       auto t = dir.device(*hd).tamper();
-      std::memcpy(t.data() + kSegmentHeaderBytes, in.p + in.i, in.n - in.i);
+      if (in.n > in.i) std::memcpy(t.data() + kSegmentHeaderBytes, in.p + in.i, in.n - in.i);
       dir.device(*hd).sync_tamper();
       break;
     }
@@ -226,7 +226,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     for (std::size_t i = 0; i < dir.count(); ++i) {
       const auto a = dir.device(i).image();
       const auto b = before.device(i).image();
-      CHECK(a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0);
+      CHECK(a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size()) == 0));
     }
   }
   return 0;
