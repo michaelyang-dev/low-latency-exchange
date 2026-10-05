@@ -775,10 +775,16 @@ TEST(ExchangeHa, RestartLoopGuardRefusesTheSameExitFromTheSameJournal) {
   EXPECT_NE(b.output().find("refusing to start: the last 3 starts from this journal"), std::string::npos) << b.output();
   EXPECT_NE(b.output().find("*.seg"), std::string::npos) << b.output();
   // Below the limit (or another journal) it starts and rejoins; a clean stop removes it.
+  // The primary has noticed its lost backup first and runs solo: the rejoin meets a
+  // settled epoch, not a SOLO granted in the middle of its handshake (which exits 5 to
+  // restart it, as the runbook expects, but this test has no supervisor to restart it).
+  for (int i = 0; i < 3000 && role(a) != "SP"; ++i) std::this_thread::sleep_for(10ms);
+  ASSERT_EQ(role(a), "SP") << a.status();
   write_guard(2);
   b.launch();
   ASSERT_TRUE(b.wait_ready(30s)) << b.output();
-  ASSERT_TRUE(wait_roles("SP", "B") || wait_roles("P", "B")) << a.status() << "\n" << b.status();
+  ASSERT_TRUE(wait_roles("SP", "B") || wait_roles("P", "B"))
+      << a.status() << "\n" << b.status() << "\n" << b.output();
   for (int i = 0; i < 3000 && role(a) != "P"; ++i) std::this_thread::sleep_for(10ms);
   EXPECT_EQ(role(a), "P") << a.status();
   EXPECT_EQ(b.stop(), 0) << b.output();

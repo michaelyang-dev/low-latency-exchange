@@ -19,7 +19,8 @@
 // Next to every snapshot it writes `<P>.snap.out` (out_digest.h): digests of the ITCH
 // stream and of each session's OUCH stream up to P, which it regenerates while it
 // replays; recovery uses a snapshot only if the node's output log matches them.
-// At exit it reports how much of the journal it read (bytes, records, segments,
+// Following, it prints "caught up at index N" each time a pass finds nothing new after
+// progress. At exit it reports how much of the journal it read (bytes, records, segments,
 // directory listings): following never re-reads what it has read.
 // Exit status: 0 done (or stopped by a signal), 1 a snapshot could not be written or
 // loaded, 2 usage or an unreadable journal.
@@ -126,10 +127,18 @@ int main(int argc, char** argv) {
   if (!s.start(~std::uint64_t{0})) return 1;
   std::printf("snapshotd: following %s\n", o.journal.c_str());
   std::fflush(stdout);
+  std::uint64_t seen = s.applied(), reported = ~std::uint64_t{0};
   for (;;) {
     if (!s.pass()) return 1;
     if (o.stop_after != 0 && s.applied() >= o.stop_after) break;
     if (!o.follow || g_stop != 0) break;
+    // A pass that found nothing new after some did: at the journal's end for now.
+    if (s.applied() == seen && seen != reported) {
+      std::printf("snapshotd: caught up at index %" PRIu64 "\n", seen);
+      std::fflush(stdout);
+      reported = seen;
+    }
+    seen = s.applied();
     std::this_thread::sleep_for(std::chrono::milliseconds(opt.poll_ms));
   }
   std::printf("snapshotd: applied %" PRIu64 " records, wrote %" PRIu64 " snapshots\n", s.applied(), s.written());

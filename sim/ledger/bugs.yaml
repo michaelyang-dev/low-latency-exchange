@@ -631,7 +631,10 @@ bugs:
       past the end of the output log (RecoveredDay::deferred) instead of writing them, and
       the engine stage hands them, then a recovered DayEnd marker, to egress before any new
       record (stage_deferred); the release-gated egress stages pass them on only once
-      released, so the output log, the stores and the lines keep the Output Rule.
+      released, so the output log, the stores and the lines keep the Output Rule. Until
+      they are all in the ring, egress keeps every consumer's done watermark below them
+      (EgressState::hold); the engine's applied position is unchanged, since the
+      replication stage compares it with a truncation point.
     fix_sha: uncommitted
     regression_test: tests/sim_regressions/DST-013_rejoin_unreleased_outputs
     counted: true

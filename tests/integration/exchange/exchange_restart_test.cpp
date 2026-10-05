@@ -669,6 +669,10 @@ TEST(ExchangeRestart, SnapshotdFollowsTheRunningNode) {
   ASSERT_GE(sum.segments, 2u) << "the day must span segments for this test";
   ASSERT_GE(marks.size(), 2u);
   ASSERT_TRUE(snapd->wait_output("at index " + std::to_string(marks.back()) + " ", 60s)) << snapd->output();
+  // The records after the last mark too: stopped before it walked them, it would report
+  // fewer records and segments than the journal holds.
+  ASSERT_TRUE(snapd->wait_output("caught up at index " + std::to_string(sum.chain.last_index) + "\n", 60s))
+      << snapd->output();
   snapd->kill(SIGTERM);
   const std::string out = snapd->output();
   // A snapshot at every mark, each the engine state of a full replay to its index.
