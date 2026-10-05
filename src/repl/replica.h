@@ -1784,6 +1784,13 @@ class Replica {
       case Role::kBackup:
         w = std::min(tail, commit_ann_);
         break;
+      case Role::kRecovering:
+        // A catching-up joiner applies what the primary has released, and its node holds
+        // every output in its egress ring until release covers it (it transmits nothing:
+        // no line, mirror gateways). Held at 0, a catch-up longer than the egress ring and
+        // L2 together stopped the applier, then L2, then the catch-up (DST-011).
+        if (reloaded_ && !(snap_rx_.active && !snap_rx_.installed)) w = std::min(tail, commit_ann_);
+        break;
       default:
         break;
     }
