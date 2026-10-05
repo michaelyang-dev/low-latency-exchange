@@ -73,6 +73,26 @@ class BasicEngineStage {
   }
 
   [[nodiscard]] std::uint64_t applied() const noexcept { return applied_; }
+
+  // A rejoin's reloaded outputs that egress has not had yet (RecoveredDay::deferred:
+  // records <= the recovered index, in emission order, possibly the DayEnd marker last).
+  // They go to the egress ring before any new record, through the overflow staging, so
+  // the release-gated egress stages hand them on only once released (DST-013). Until
+  // they are all in the ring, egress holds every consumer's `done` below the first
+  // (EgressState::hold); `applied` stays the engine's own position, which the
+  // replication stage compares with a truncation point. Call before the stages run.
+  template <class Range>
+  void stage_deferred(const Range& outs) {
+    for (const auto& o : outs) {
+      ov_entries_.push_back(Staged{o.index, o.session, o.kind, static_cast<std::uint32_t>(ov_bytes_.size()),
+                                   static_cast<std::uint32_t>(o.bytes.size())});
+      ov_bytes_.insert(ov_bytes_.end(), o.bytes.begin(), o.bytes.end());
+    }
+    if (!ov_entries_.empty()) {
+      sh_->egress_state.hold.store(ov_entries_.front().index - 1);
+      holding_ = true;
+    }
+  }
   [[nodiscard]] const EngineStats& stats() const noexcept { return stats_; }
   [[nodiscard]] const md::WorkStats& work() const noexcept { return work_.stats(); }
   [[nodiscard]] const engine::Engine& engine() const noexcept { return *eng_; }
@@ -84,6 +104,10 @@ class BasicEngineStage {
       if (!flush_overflow()) return true;
       publish_applied();
       did = true;
+    }
+    if (holding_) {  // the staged reloaded outputs are all in the ring
+      sh_->egress_state.hold.store(~std::uint64_t{0});
+      holding_ = false;
     }
     const std::uint64_t limit = sh_->apply_limit.load();
     for (std::size_t n = 0; n < cfg_.batch; ++n) {
@@ -237,6 +261,7 @@ class BasicEngineStage {
   engine::Engine* eng_;
   EngineStageConfig cfg_;
   std::uint64_t applied_ = 0;
+  bool holding_ = false;  // EgressState::hold is set for staged reloaded outputs
   std::uint64_t itch_total_ = 0;
   std::uint64_t soup_total_ = 0;
   std::vector<Staged> ov_entries_;
