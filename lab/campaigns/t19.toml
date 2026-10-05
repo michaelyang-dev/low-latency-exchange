@@ -1,0 +1,60 @@
+# T19: p99 ratio, variant (i) epoll over the AF_XDP headline cell (METHODOLOGY §14; plan
+# 07 §4 "T16 and T19"). Both cells at their pre-registered coalescing cell and the
+# pre-registered load point, R=10 per cell, the T18 instrument (lab/campaigns/t18_rep.sh).
+# Statistic (tools/results/summarize.py): median across runs of per-run TTT_raw p99 of
+# epoll / the same for the AF_XDP cell, with a 95% BCa bootstrap CI over runs.
+# Pass: ratio >= 3.1. The measured ratio and its CI are published either way.
+target = "t19"
+methodology = "methodology-v2"
+profile = "host-a"
+ifaces = ["TBD_BY_LAB"]
+preset = "bench"
+repetitions = 10
+sources = ["src/client", "src/net", "src/proto/moldudp64", "src/proto/soupbin", "src/proto/ouch50",
+           "src/proto/itch50", "src/book", "apps/refclient", "apps/ttt_harness", "bpf"]
+ratio_numerator = "epoll"
+ratio_denominator = "afxdp"
+ratio_metric = "ttt_raw_p99_ns"
+pass_ratio = 3.1
+
+host_c = "TBD_BY_LAB"
+client_build = "TBD_BY_LAB"
+a_if = "TBD_BY_LAB"
+c_if = "TBD_BY_LAB"
+a_ip = "TBD_BY_LAB"
+c_ip = "TBD_BY_LAB"
+harness_cpu = "TBD_BY_LAB"
+harness_rx_cpu = "TBD_BY_LAB"
+client_cpu = "TBD_BY_LAB"
+napi_cpu = "TBD_BY_LAB"
+line_a = "239.18.0.1:31001"
+line_b = "239.18.0.2:31002"
+desk_port = 31030
+
+input = "data/itch/01302019.NASDAQ_ITCH50.bin"
+input_sha256 = "1d0972ffc25b35902ccc3f9069aae517da56903d5795f872902b8697315f30c3"
+background_rate = "TBD_BY_PILOT"         # the pre-registered load point (§18)
+trigger_rate = 10000
+duration = "112s"
+warmup = "10s"
+min_triggers = 1000000
+seed_base = 20261019
+symbol = "LLTRG"
+trigger_price = "10.00"
+afxdp_variant = "TBD_BY_PILOT"           # (iv) or (iv-t)
+
+setup = [
+  "echo '{input_sha256}  {input}' | sha256sum -c --quiet -",
+  "lab/campaigns/t18_calibrate.sh out={out} build={build} host_c={host_c} client_build={client_build} a_if={a_if} c_if={c_if} c_ip={c_ip}",
+]
+commands = [
+  "lab/campaigns/t18_rep.sh out={out} rep={rep} cell={cell} build={build} host_c={host_c} client_build={client_build} a_if={a_if} c_if={c_if} a_ip={a_ip} line_a={line_a} line_b={line_b} desk_port={desk_port} input={input} variant={cell} afxdp_variant={afxdp_variant} coalescing_map=epoll:{coalescing.epoll},xsk:{coalescing.xsk},xsk-threaded:{coalescing.xsk-threaded} rate={background_rate} trigger_rate={trigger_rate} duration={duration} warmup={warmup} min_triggers={min_triggers} seed_base={seed_base} symbol={symbol} trigger_price={trigger_price} harness_cpu={harness_cpu} harness_rx_cpu={harness_rx_cpu} client_cpu={client_cpu} napi_cpu={napi_cpu}",
+]
+
+[matrix]
+cell = ["epoll", "afxdp"]
+
+[coalescing]
+epoll = "TBD_BY_PILOT"
+xsk = "TBD_BY_PILOT"
+xsk-threaded = "TBD_BY_PILOT"

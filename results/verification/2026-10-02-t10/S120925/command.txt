@@ -1,0 +1,1 @@
+build/client-rel/apps/mold_replay/mold_replay --file data/itch/S120925-v50.txt.gz --seed 20261004 --loss-a 3% --loss-b 4% --dup 0.1% --reorder 0.1% --rate 1000000 --outage-every 100000000 --outage-len 50000

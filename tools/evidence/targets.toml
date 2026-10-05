@@ -1,0 +1,220 @@
+# Evidence ledger definitions (docs/plan/README.md evidence matrix, docs/plan/12 §8).
+# Numeric targets name the campaign target, the summary metric, the comparison
+# and threshold; the statement is generated from the measured value.
+# Non-numeric targets name the artifact(s) whose existence/green status is the evidence.
+
+[T11a]
+statement = "Textbook baseline B0 (tag lob-b0): sampled median {value:.1f} ns per message on 01302019"
+campaign_target = "t11a"
+metric = "net_p50_ns"
+coarse_metric = "net_mean_ns"
+coarse_threshold_ns = 2.0
+kind = "published"
+
+[T11b]
+statement = "Optimized LOB: sampled median {value:.1f} ns per message on 01302019"
+campaign_target = "t11"
+metric = "net_p50_ns"
+coarse_metric = "net_mean_ns"
+coarse_threshold_ns = 2.0
+op = "<="
+threshold = 42.0
+
+[T12]
+statement = "{value_m:.2f}M msgs/s single core replaying 01302019"
+campaign_target = "t12"
+metric = "msgs_per_s"
+op = ">="
+threshold = 18.0e6
+
+[T18]
+statement = "Tick-to-trade (TTT_raw, AF_XDP): p50 {p50:.2f} us / p99 {p99:.2f} us"
+campaign_target = "t18"
+metrics = ["ttt_raw_p50_us", "ttt_raw_p99_us"]
+op = "<="
+thresholds = [14.0, 38.0]
+
+[T19]
+statement = "p99 tick-to-trade {value:.2f}x lower than epoll"
+campaign_target = "t18"
+metric = "p99_ratio_epoll_over_afxdp"
+op = ">="
+threshold = 3.1
+
+[T20]
+statement = "{value_m:.2f}M msgs/s end to end on 8 cores (single node, solo mode)"
+campaign_target = "t20"
+metric = "max_valid_msgs_per_s"
+op = ">="
+threshold = 4.2e6
+
+[T25]
+statement = "Takeover max {value:.1f} ms across fault classes F1-F5, F9, F10"
+campaign_target = "t25"
+metric = "takeover_max_ms"
+op = "<"
+threshold = 50.0
+
+[T31]
+statement = "nlog hot-path call: net median {value:.2f} ns (M1a)"
+campaign_target = "t31"
+metric = "m1a_net_p50_ns"
+coarse_metric = "m1a_net_mean_ns"
+coarse_threshold_ns = 1.0
+op = "<="
+threshold = 9.0
+
+[T13]
+artifacts = ["docs/perf/experiments"]
+statement = "Logged optimization experiments (EXP-*.md)"
+count_glob = "docs/perf/experiments/EXP-*.md"
+op = ">="
+threshold = 14
+
+[T14]
+kind = "fuzz_ops"
+ledger = "fuzz/ledger/runs.jsonl"
+threshold = 2.0e9
+sanitizer_threshold = 2.0e8
+statement = "Differential fuzzing (random ops)"
+
+[[T14.groups]]
+label = "ITCH books"
+harnesses = ["lobdiff", "lobfuzz"]
+tree_dirs = ["src/lob", "src/book", "src/common"]
+books = ["b0", "vec_list_std", "vec_intr_std", "vec_intr_flat", "opt", "opt_huge", "win", "map_intr_flat", "win_list_flat"]
+
+[[T14.groups]]
+label = "matching engine"
+harnesses = ["enginediff"]
+tree_dirs = ["src/engine", "src/lob", "src/common", "src/proto/ouch50", "src/proto/itch50"]
+books = ["engine"]
+
+[T23b]
+kind = "bug_count"
+ledger = "sim/ledger/bugs.yaml"
+threshold = 23
+statement = "Counted simulator bugs"
+
+[T27]
+artifacts = ["verify/tla/HotStandby.tla", "verify/tla/HotStandbyLive.tla", "docs/verification/tla-results.md"]
+status_from = "docs/verification/tla-results.md"
+statement = "TLA+ safety and liveness models pass; every safety and liveness mutant fails"
+
+[T29]
+artifacts = ["verify/genmc", "docs/verification/queues-genmc.md"]
+status_from = "docs/verification/queues-genmc.md"
+statement = "GenMC: queue harnesses pass under RC11 and IMM"
+
+# ---- every other target: an evidence document owned by the track, carrying
+# <!-- evidence-status: met | partial | pending --> (PENDING until it exists).
+
+[T01]
+kind = "command"
+command = "bash tools/ci/check_deps.sh"
+statement = "Dependency audit: only the approved infrastructure libraries; exchange code in-repo"
+
+[T02]
+artifacts = ["docs/verification/engine.md"]
+status_from = "docs/verification/engine.md"
+statement = "Matching engine: golden tests per feature row; enginediff >=2B records clean on the release tree"
+
+[T03]
+artifacts = ["docs/verification/engine.md"]
+status_from = "docs/verification/engine.md"
+statement = "Auctions: rule-derived goldens, >=1e8 brute-force cross agreements, exact NOII cadence"
+
+[T04]
+artifacts = ["docs/verification/engine.md"]
+status_from = "docs/verification/engine.md"
+statement = "Pre-trade risk: one test per reject code, risk property test, journaled limit changes"
+
+[T05]
+artifacts = ["docs/verification/journal.md"]
+status_from = "docs/verification/journal.md"
+statement = "Event-sourced journal: byte-identical regeneration, >=1e4 snapshot equivalences, clean crash loops"
+
+[T06]
+artifacts = ["docs/verification/protocols.md"]
+status_from = "docs/verification/protocols.md"
+statement = "ITCH 5.0: golden vectors, byte-exact round trips over >=5 real days, validator clean on our feed"
+
+[T07]
+artifacts = ["docs/verification/protocols.md"]
+status_from = "docs/verification/protocols.md"
+statement = "OUCH 5.0: golden vectors, >=1e7 messages agree with an independent decoder, tag matrix enforced"
+
+[T08]
+artifacts = ["docs/verification/protocols.md"]
+status_from = "docs/verification/protocols.md"
+statement = "MoldUDP64: gap-free after induced loss; interop (nassau, tshark)"
+
+[T09]
+artifacts = ["docs/verification/protocols.md"]
+status_from = "docs/verification/protocols.md"
+statement = "SoupBinTCP: property tests, interop, utcp soak"
+
+[T10]
+artifacts = ["docs/verification/protocols.md"]
+status_from = "docs/verification/protocols.md"
+statement = "A/B arbitration: O-ARB/O-LINE green, file digest reproduced through lossy dual lines"
+
+[T15]
+artifacts = ["docs/verification/network.md"]
+status_from = "docs/verification/network.md"
+statement = "AF_XDP zero-copy path with utcp: assertions, XSK stats, interop and soak"
+
+[T16]
+artifacts = ["docs/results/network.md"]
+status_from = "docs/verification/network.md"
+statement = "Six I/O variants compared, every pilot and headline cell, identical setup"
+
+[T17]
+artifacts = ["docs/verification/network.md"]
+status_from = "docs/verification/network.md"
+statement = "NIC hardware timestamps: >=99.9% hardware pairs, 0 software stamps, same-PHC intervals"
+
+[T21]
+artifacts = ["docs/testing/dst.md"]
+status_from = "docs/testing/dst.md"
+statement = "Deterministic simulation: purity audit, SimEnv builds, determinism CI green"
+
+[T22]
+artifacts = ["docs/testing/dst.md"]
+status_from = "docs/testing/dst.md"
+statement = "Fault injection: every fault class >=1e3 firings; probes hit at their cadence"
+
+[T23a]
+artifacts = ["docs/testing/bug-ledger.md", "sim/ledger/verified.jsonl"]
+status_from = "docs/testing/dst.md"
+statement = "Every counted bug reproduces from its seed and its fix passes"
+
+[T24]
+artifacts = ["docs/verification/replication.md"]
+status_from = "docs/verification/replication.md"
+statement = "Hot-standby failover: F1-F10 suites pass"
+
+[T26]
+artifacts = ["docs/verification/replication.md"]
+status_from = "docs/verification/replication.md"
+statement = "No lost or duplicated fills: 0 oracle violations in simulation, TLC and hardware trials"
+
+[T28]
+artifacts = ["docs/verification/queues-stress.md", "tools/genmc/check_queue_dwarf.sh", "docs/verification/queues-genmc.md"]
+status_from = "docs/verification/queues-stress.md"
+statement = "SPSC/MPSC queues on the production path; stress tests green"
+
+[T30]
+artifacts = ["docs/verification/logger.md"]
+status_from = "docs/verification/logger.md"
+statement = "Logger: compile-time format checks, no runtime registration, golden decoder"
+
+[T32]
+artifacts = ["docs/verification/logger.md"]
+status_from = "docs/verification/logger.md"
+statement = "Logger in situ: every listed event emitted, <=3% overhead, 0 drops at T20 load"
+
+[T33]
+artifacts = ["docs/verification/technology.md"]
+status_from = "docs/verification/technology.md"
+statement = "Each technology linked to substantive code and results"

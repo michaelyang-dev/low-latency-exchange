@@ -1,0 +1,30 @@
+# T31: logger call cost (METHODOLOGY §9; plan 11). bench/log/nlog_bench (M1a, M1b, EV, M2,
+# M4, DRAIN) and bench/log/nlog_insitu_bench (M3), bench build, --json for tools/results.
+# Shape NLOG_INFO("order {} accepted px {} qty {} side {}", u64, i64, u32, u8); M1a: 10M
+# calls spaced by about 200 ns of work; 4 MiB per-thread rings; the drain thread live on a
+# sibling isolated core, 20 us between polls once caught up; stamps LFENCE;RDTSC;LFENCE ...
+# RDTSCP;LFENCE minus the calibrated floor. Headline m1a_net_p50_ns <= 9.0 ns; coarse-counter
+# rule: if tsc_min_step_ns > 1 the headline is m1a_net_mean_ns (tools/evidence/build_evidence.py).
+# A run with any dropped record is invalid and excluded (count published).
+# Host: the headline host is fixed by owner decision D3 before measurement; the other
+# host's number is always published alongside (run this file once per host).
+target = "t31"
+methodology = "methodology-v2"
+profile = "TBD_BY_OWNER"                 # D3: host-c (Intel P-core, recommended) or host-a
+ifaces = []
+preset = "bench"
+repetitions = 15
+sources = ["src/log", "src/common", "bench/log"]
+pass_ns = 9.0
+cpu = "TBD_BY_LAB"                       # the isolated measurement core of the chosen host
+drain_cpu = "TBD_BY_LAB"                 # its sibling isolated core
+
+drain_sleep_us = 20                      # the drain waits 20 us between polls once caught up
+
+# Pinning to the measurement core and its sibling: nlog_bench pins its producer (--cpu)
+# and the drain thread (--drain-cpu); taskset confines the in-situ bench, which has no
+# pinning option.
+commands = [
+  "{build}/bench/log/nlog_bench --cpu {cpu} --drain-cpu {drain_cpu} --drain-sleep-us {drain_sleep_us} --json {out}/run-{rep}.json",
+  "taskset -c {cpu},{drain_cpu} {build}/bench/log/nlog_insitu_bench --json {out}/run-{rep}-m3.json",
+]

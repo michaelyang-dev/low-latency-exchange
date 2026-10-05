@@ -1,0 +1,24 @@
+file: data/itch/10302019.NASDAQ_ITCH50.gz (gzip)
+  records 293989079  messages 293989079  end_of_session 0  bytes(incl 2B prefix) 9035016843
+  framing_errors 0  io_errors 0  unknown_types 0  length_mismatches 0  roundtrip_diffs 0
+  per-type counts:
+    A AddOrder                      127214649
+    B BrokenTrade                           1
+    C OrderExecutedWithPrice           129729
+    D OrderDelete                   123296742
+    E OrderExecuted                   7316703
+    F AddOrderMpid                    1423908
+    H StockTradingAction                 8897
+    I Noii                            3740140
+    J LuldAuctionCollar                     2
+    L MarketParticipantPosition        214865
+    P Trade                           1525363
+    Q CrossTrade                        17775
+    R StockDirectory                     8887
+    S SystemEvent                           6
+    U OrderReplace                   25513651
+    V MwcbDeclineLevel                      1
+    X OrderCancel                     3568735
+    Y RegShoRestriction                  9025
+  elapsed 13.3 s (22.10 M records/s, 679 MB/s decompressed)
+RESULT PASS

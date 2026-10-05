@@ -1,0 +1,22 @@
+Running main() from build/coord-nassau/_deps/googletest-src/googletest/src/gtest_main.cc
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from NassauInterop
+[ RUN      ] NassauInterop.SoupBinTcpSessionAndMoldUdp64WithLoss
+nassau MoldUDP64: eos delivered=4050 eos_seq=4051 relayed=219 dropped=21 requests=104 requested_messages=35662 gap_fills=1 complete=true
+nassau SoupBinTCP:
+login-accepted session='LLE0000001' seq=1
+sent 50
+received 51
+idle-ok ms=17000 received 51
+logout
+login-accepted session='LLE0000001' seq=1
+replay-identical n=51
+eos received 102
+done
+[       OK ] NassauInterop.SoupBinTcpSessionAndMoldUdp64WithLoss (18899 ms)
+[----------] 1 test from NassauInterop (18899 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (18899 ms total)
+[  PASSED  ] 1 test.

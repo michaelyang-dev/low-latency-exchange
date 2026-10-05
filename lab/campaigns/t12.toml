@@ -1,0 +1,14 @@
+# T12: single-core replay throughput of the optimized book (docs/perf/METHODOLOGY.md §4).
+target = "t12"
+methodology = "methodology-v1"
+profile = "host-a"
+ifaces = []
+preset = "bench"
+repetitions = 15
+input = "data/itch/01302019.NASDAQ_ITCH50.bin"
+input_sha256 = "1d0972ffc25b35902ccc3f9069aae517da56903d5795f872902b8697315f30c3"
+variant = "opt"
+prefetch = 0
+commands = [
+  "GLIBC_TUNABLES=glibc.malloc.trim_threshold=137438953472 lab/perf_wrap.sh {out}/run-{rep}.perf.csv {build}/apps/lob_replay/lob_replay --file {input} --expect-sha256 {input_sha256} --variant {variant} --mode throughput --prefetch {prefetch} --cpu 11 --huge 1g --warmup 1 --strict-faults --env-json {out}/env.json --out {out} --run-name run-{rep} && tools/results/merge_perf.py {out}/run-{rep}.json {out}/run-{rep}.perf.csv",
+]

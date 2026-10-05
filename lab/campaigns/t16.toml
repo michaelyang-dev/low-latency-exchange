@@ -1,0 +1,69 @@
+# T16: variant comparison with identical workload, pinning and queues (METHODOLOGY §14;
+# plan 07 §1, §4 "T16 and T19"). The T18 instrument and refclient over every variant:
+#   (i) epoll, (ii) busypoll, (iii) uring, (iii-n) uring-napi, (iv) xsk, (iv-t) xsk-threaded,
+# plus the IRQ-suspend form of (ii) as a labelled extra sub-variant (not one of the six).
+# A variant the lab kernel cannot run is reported missing, never replaced (continue_on_error).
+#
+# Two parts, both published:
+#   1. Coalescing pilots (labelled, before the headline campaign): each variant over
+#      {driver-default or adaptive, rx-usecs-0} at the initial load point, e.g.
+#        lab/run_campaign.sh --pilot --set coalescing.epoll=adaptive ... --set background_rate=1000000 lab/campaigns/t16.toml
+#      The best pilot cell of each variant is then fixed below (§18): the epoll baseline is
+#      its best cell, never a strawman.
+#   2. Load sweep (this file): background 0.1-5M msgs/s, 10 s warm-up + 60 s measured per
+#      point, R=5 per point. A point whose generator lateness p99.9 exceeds 1 us fails (it
+#      is not dropped).
+target = "t16"
+methodology = "methodology-v2"
+profile = "host-a"
+ifaces = ["TBD_BY_LAB"]
+preset = "bench"
+repetitions = 5
+continue_on_error = true
+sources = ["src/client", "src/net", "src/proto/moldudp64", "src/proto/soupbin", "src/proto/ouch50",
+           "src/proto/itch50", "src/book", "apps/refclient", "apps/ttt_harness", "bpf"]
+
+host_c = "TBD_BY_LAB"
+client_build = "TBD_BY_LAB"
+a_if = "TBD_BY_LAB"
+c_if = "TBD_BY_LAB"
+a_ip = "TBD_BY_LAB"
+c_ip = "TBD_BY_LAB"
+harness_cpu = "TBD_BY_LAB"
+harness_rx_cpu = "TBD_BY_LAB"
+client_cpu = "TBD_BY_LAB"
+napi_cpu = "TBD_BY_LAB"
+line_a = "239.18.0.1:31001"
+line_b = "239.18.0.2:31002"
+desk_port = 31030
+
+input = "data/itch/01302019.NASDAQ_ITCH50.bin"
+input_sha256 = "1d0972ffc25b35902ccc3f9069aae517da56903d5795f872902b8697315f30c3"
+trigger_rate = 10000
+duration = "70s"                         # 10 s warm-up + 60 s measured (§14)
+warmup = "10s"
+min_triggers = 590000                    # 60 s x 10k/s, less the Poisson spread
+seed_base = 20261016
+symbol = "LLTRG"
+trigger_price = "10.00"
+
+setup = [
+  "echo '{input_sha256}  {input}' | sha256sum -c --quiet -",
+  "lab/campaigns/t18_calibrate.sh out={out} build={build} host_c={host_c} client_build={client_build} a_if={a_if} c_if={c_if} c_ip={c_ip}",
+]
+commands = [
+  "lab/campaigns/t18_rep.sh out={out} rep={rep} cell={cell} build={build} host_c={host_c} client_build={client_build} a_if={a_if} c_if={c_if} a_ip={a_ip} line_a={line_a} line_b={line_b} desk_port={desk_port} input={input} variant={variant} coalescing_map=epoll:{coalescing.epoll},busypoll:{coalescing.busypoll},busypoll-irq-suspend:{coalescing.busypoll-irq-suspend},uring:{coalescing.uring},uring-napi:{coalescing.uring-napi},xsk:{coalescing.xsk},xsk-threaded:{coalescing.xsk-threaded} rate={rate} trigger_rate={trigger_rate} duration={duration} warmup={warmup} min_triggers={min_triggers} seed_base={seed_base} symbol={symbol} trigger_price={trigger_price} harness_cpu={harness_cpu} harness_rx_cpu={harness_rx_cpu} client_cpu={client_cpu} napi_cpu={napi_cpu}",
+]
+
+[matrix]
+variant = ["epoll", "busypoll", "uring", "uring-napi", "xsk", "xsk-threaded", "busypoll-irq-suspend"]
+rate = [100000, 250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000]
+
+[coalescing]                             # the best pilot cell of each variant (§14, §18)
+epoll = "TBD_BY_PILOT"
+busypoll = "TBD_BY_PILOT"
+busypoll-irq-suspend = "TBD_BY_PILOT"
+uring = "TBD_BY_PILOT"
+uring-napi = "TBD_BY_PILOT"
+xsk = "TBD_BY_PILOT"
+xsk-threaded = "TBD_BY_PILOT"

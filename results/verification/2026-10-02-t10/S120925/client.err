@@ -1,0 +1,122 @@
+refclient: 27.925 s: snapshot needed: next 25982689 known_end 26065439 buffered 62173 delivered 25982688 request timeouts A/B 16/0 overflows 0
+refclient: 28.261 s: snapshot spliced: next 26225742, 895026 spin messages so far, buffered 193573
+refclient: 35.757 s: snapshot needed: next 33468301 known_end 33567025 buffered 78693 delivered 33230027 request timeouts A/B 53/0 overflows 0
+refclient: 36.492 s: snapshot needed: next 33689380 known_end 34623569 buffered 846066 delivered 33234338 request timeouts A/B 53/0 overflows 0
+refclient: 36.492 s: snapshot spliced: next 33689380, 4799659 spin messages so far, buffered 846066
+refclient: 37.287 s: snapshot spliced: next 34751050, 8654504 spin messages so far, buffered 646243
+refclient: 102.804 s: snapshot needed: next 99999973 known_end 100050047 buffered 44 delivered 98501404 request timeouts A/B 53/0 overflows 0
+refclient: 103.532 s: snapshot spliced: next 100050762, 12340070 spin messages so far, buffered 716781
+refclient: 204.485 s: snapshot needed: next 199999993 known_end 200050008 buffered 8 delivered 198450988 request timeouts A/B 53/0 overflows 0
+refclient: 205.553 s: snapshot spliced: next 200051523, 16129320 spin messages so far, buffered 1046445
+refclient: 295.976 s: snapshot needed: next 289601319 known_end 289637113 buffered 35768 delivered 288001894 request timeouts A/B 57/1 overflows 0
+refclient: 298.513 s: snapshot needed: next 289654558 known_end 291425945 buffered 1205997 delivered 288018436 request timeouts A/B 57/1 overflows 0
+refclient: 298.513 s: snapshot spliced: next 289654558, 19965022 spin messages so far, buffered 1205997
+refclient: 300.246 s: snapshot needed: next 291917937 known_end 293302271 buffered 1198815 delivered 288021215 request timeouts A/B 57/1 overflows 0
+refclient: 300.246 s: snapshot spliced: next 291917937, 23803173 spin messages so far, buffered 1198815
+refclient: 301.771 s: snapshot spliced: next 293456087, 27643318 spin messages so far, buffered 1226818
+refclient: 307.126 s: snapshot needed: next 299999999 known_end 300050021 buffered 16 delivered 294572897 request timeouts A/B 57/1 overflows 0
+refclient: 308.234 s: snapshot spliced: next 300051338, 31485447 spin messages so far, buffered 1076652
+refclient: 409.253 s: snapshot needed: next 399999997 known_end 400050014 buffered 7 delivered 394522690 request timeouts A/B 60/1 overflows 0
+refclient: 410.496 s: snapshot needed: next 400063386 known_end 401172278 buffered 1087723 delivered 394535124 request timeouts A/B 60/1 overflows 0
+refclient: 410.496 s: snapshot spliced: next 400063386, 35351938 spin messages so far, buffered 1087723
+refclient: 411.784 s: snapshot spliced: next 401391432, 39217525 spin messages so far, buffered 1081065
+refclient: 511.244 s: snapshot needed: next 499999990 known_end 500050043 buffered 22 delivered 493161774 request timeouts A/B 64/1 overflows 0
+refclient: 513.192 s: snapshot needed: next 500075674 known_end 501586619 buffered 1106902 delivered 493186891 request timeouts A/B 64/1 overflows 0
+refclient: 513.192 s: snapshot spliced: next 500075674, 43108990 spin messages so far, buffered 1106902
+refclient: 514.972 s: snapshot needed: next 502037126 known_end 503459718 buffered 1088521 delivered 493199014 request timeouts A/B 64/1 overflows 0
+refclient: 514.972 s: snapshot spliced: next 502037126, 47001220 spin messages so far, buffered 1088521
+refclient: 516.718 s: snapshot needed: next 503786559 known_end 505101969 buffered 1085125 delivered 493221753 request timeouts A/B 64/1 overflows 0
+refclient: 516.718 s: snapshot spliced: next 503786559, 50895272 spin messages so far, buffered 1085125
+refclient: 518.398 s: snapshot needed: next 505495735 known_end 506808477 buffered 1084281 delivered 493254893 request timeouts A/B 64/1 overflows 0
+refclient: 518.398 s: snapshot spliced: next 505495735, 54790889 spin messages so far, buffered 1084281
+refclient: 520.091 s: snapshot needed: next 507113068 known_end 508390262 buffered 1106359 delivered 493256929 request timeouts A/B 64/1 overflows 0
+refclient: 520.091 s: snapshot spliced: next 507113068, 58687359 spin messages so far, buffered 1106359
+refclient: 521.694 s: snapshot needed: next 508769248 known_end 510009630 buffered 1102174 delivered 493264380 request timeouts A/B 64/1 overflows 0
+refclient: 521.694 s: snapshot spliced: next 508769248, 62585369 spin messages so far, buffered 1102174
+refclient: 523.353 s: snapshot needed: next 510347572 known_end 511632809 buffered 1090929 delivered 493278771 request timeouts A/B 64/1 overflows 0
+refclient: 523.353 s: snapshot spliced: next 510347572, 66483540 spin messages so far, buffered 1090929
+refclient: 525.026 s: snapshot needed: next 511972988 known_end 513262288 buffered 1117079 delivered 493286305 request timeouts A/B 64/1 overflows 0
+refclient: 525.026 s: snapshot spliced: next 511972988, 70378962 spin messages so far, buffered 1117079
+refclient: 526.670 s: snapshot needed: next 513605137 known_end 514854816 buffered 1111252 delivered 493294481 request timeouts A/B 64/1 overflows 0
+refclient: 526.670 s: snapshot spliced: next 513605137, 74270648 spin messages so far, buffered 1111252
+refclient: 528.279 s: snapshot needed: next 515218680 known_end 516470544 buffered 1106500 delivered 493295747 request timeouts A/B 64/1 overflows 0
+refclient: 528.279 s: snapshot spliced: next 515218680, 78163825 spin messages so far, buffered 1106500
+refclient: 529.943 s: snapshot needed: next 516801909 known_end 518054269 buffered 1089363 delivered 493313249 request timeouts A/B 64/1 overflows 0
+refclient: 529.943 s: snapshot spliced: next 516801909, 82055646 spin messages so far, buffered 1089363
+refclient: 531.445 s: snapshot needed: next 518460636 known_end 519629966 buffered 1066455 delivered 493348257 request timeouts A/B 64/1 overflows 0
+refclient: 531.445 s: snapshot spliced: next 518460636, 85948320 spin messages so far, buffered 1066455
+refclient: 533.087 s: snapshot needed: next 519916387 known_end 521189641 buffered 1088043 delivered 493377118 request timeouts A/B 64/1 overflows 0
+refclient: 533.087 s: snapshot spliced: next 519916387, 89837997 spin messages so far, buffered 1088043
+refclient: 534.579 s: snapshot needed: next 521528175 known_end 522710412 buffered 1075439 delivered 493410050 request timeouts A/B 64/1 overflows 0
+refclient: 534.579 s: snapshot spliced: next 521528175, 93730688 spin messages so far, buffered 1075439
+refclient: 536.135 s: snapshot needed: next 522959816 known_end 524219628 buffered 1097479 delivered 493412018 request timeouts A/B 64/1 overflows 0
+refclient: 536.135 s: snapshot spliced: next 522959816, 97625024 spin messages so far, buffered 1097479
+refclient: 537.782 s: snapshot needed: next 524485286 known_end 525793268 buffered 1108892 delivered 493427448 request timeouts A/B 64/1 overflows 0
+refclient: 537.782 s: snapshot spliced: next 524485286, 101517650 spin messages so far, buffered 1108892
+refclient: 539.508 s: snapshot needed: next 526117040 known_end 527481898 buffered 1170063 delivered 493434875 request timeouts A/B 64/1 overflows 0
+refclient: 539.508 s: snapshot spliced: next 526117040, 105640057 spin messages so far, buffered 1170063
+refclient: 541.236 s: snapshot needed: next 527805338 known_end 529159447 buffered 1194112 delivered 493436178 request timeouts A/B 64/1 overflows 0
+refclient: 541.236 s: snapshot spliced: next 527805338, 109840652 spin messages so far, buffered 1194112
+refclient: 542.936 s: snapshot needed: next 529507125 known_end 530880221 buffered 1187235 delivered 493452110 request timeouts A/B 64/1 overflows 0
+refclient: 542.936 s: snapshot spliced: next 529507125, 114045965 spin messages so far, buffered 1187235
+refclient: 544.673 s: snapshot needed: next 531158324 known_end 532513113 buffered 1211975 delivered 493455734 request timeouts A/B 64/1 overflows 0
+refclient: 544.673 s: snapshot spliced: next 531158324, 118251357 spin messages so far, buffered 1211975
+refclient: 546.462 s: snapshot needed: next 532857758 known_end 534261392 buffered 1194895 delivered 493459119 request timeouts A/B 64/1 overflows 0
+refclient: 546.462 s: snapshot spliced: next 532857758, 122456154 spin messages so far, buffered 1194895
+refclient: 548.259 s: snapshot needed: next 534610375 known_end 536011532 buffered 1207513 delivered 493464232 request timeouts A/B 64/1 overflows 0
+refclient: 548.259 s: snapshot spliced: next 534610375, 126684467 spin messages so far, buffered 1207513
+refclient: 550.141 s: snapshot needed: next 536357241 known_end 537797541 buffered 1223266 delivered 493468847 request timeouts A/B 64/1 overflows 0
+refclient: 550.141 s: snapshot spliced: next 536357241, 130941029 spin messages so far, buffered 1223266
+refclient: 552.045 s: snapshot needed: next 538205110 known_end 539642767 buffered 1236553 delivered 493474641 request timeouts A/B 64/1 overflows 0
+refclient: 552.045 s: snapshot spliced: next 538205110, 135221434 spin messages so far, buffered 1236553
+refclient: 553.932 s: snapshot needed: next 540074703 known_end 541501916 buffered 1189156 delivered 493496798 request timeouts A/B 64/1 overflows 0
+refclient: 553.932 s: snapshot spliced: next 540074703, 139439915 spin messages so far, buffered 1189156
+refclient: 555.840 s: snapshot needed: next 541895723 known_end 543338950 buffered 1197284 delivered 493496798 request timeouts A/B 64/1 overflows 0
+refclient: 555.840 s: snapshot spliced: next 541895723, 143643243 spin messages so far, buffered 1197284
+refclient: 557.626 s: snapshot needed: next 543773920 known_end 545173767 buffered 1210304 delivered 493507751 request timeouts A/B 64/1 overflows 0
+refclient: 557.626 s: snapshot spliced: next 543773920, 147863155 spin messages so far, buffered 1210304
+refclient: 559.323 s: snapshot needed: next 545504953 known_end 546842207 buffered 1201724 delivered 493509085 request timeouts A/B 64/1 overflows 0
+refclient: 559.323 s: snapshot spliced: next 545504953, 152097783 spin messages so far, buffered 1201724
+refclient: 561.165 s: snapshot needed: next 547162263 known_end 548595718 buffered 1220170 delivered 493509085 request timeouts A/B 64/1 overflows 0
+refclient: 561.165 s: snapshot spliced: next 547162263, 156329707 spin messages so far, buffered 1220170
+refclient: 563.074 s: snapshot needed: next 548981938 known_end 550395957 buffered 1189797 delivered 493527914 request timeouts A/B 64/1 overflows 0
+refclient: 563.074 s: snapshot spliced: next 548981938, 160564494 spin messages so far, buffered 1189797
+refclient: 565.027 s: snapshot needed: next 550862367 known_end 552281519 buffered 1173680 delivered 493566241 request timeouts A/B 64/1 overflows 0
+refclient: 565.027 s: snapshot spliced: next 550862367, 164802117 spin messages so far, buffered 1173680
+refclient: 567.103 s: snapshot needed: next 552756658 known_end 554201003 buffered 1234787 delivered 493568343 request timeouts A/B 64/1 overflows 0
+refclient: 567.103 s: snapshot spliced: next 552756658, 169072399 spin messages so far, buffered 1234787
+refclient: 568.979 s: snapshot needed: next 554741866 known_end 556129213 buffered 1156489 delivered 493568343 request timeouts A/B 64/1 overflows 0
+refclient: 568.979 s: snapshot spliced: next 554741866, 173321355 spin messages so far, buffered 1156489
+refclient: 570.905 s: snapshot needed: next 556612172 known_end 558067127 buffered 1175024 delivered 493590595 request timeouts A/B 64/1 overflows 0
+refclient: 570.905 s: snapshot spliced: next 556612172, 177726323 spin messages so far, buffered 1175024
+refclient: 572.947 s: snapshot needed: next 558475396 known_end 560072933 buffered 1276752 delivered 493590595 request timeouts A/B 64/1 overflows 0
+refclient: 572.947 s: snapshot spliced: next 558475396, 182285637 spin messages so far, buffered 1276752
+refclient: 574.880 s: snapshot needed: next 560493996 known_end 562007334 buffered 1276026 delivered 493610348 request timeouts A/B 64/1 overflows 0
+refclient: 574.880 s: snapshot spliced: next 560493996, 186930657 spin messages so far, buffered 1276026
+refclient: 576.844 s: snapshot needed: next 562355931 known_end 563870092 buffered 1311247 delivered 493610348 request timeouts A/B 64/1 overflows 0
+refclient: 576.844 s: snapshot spliced: next 562355931, 191679266 spin messages so far, buffered 1311247
+refclient: 578.806 s: snapshot needed: next 564271341 known_end 565792250 buffered 1336623 delivered 493628033 request timeouts A/B 64/1 overflows 0
+refclient: 578.806 s: snapshot spliced: next 564271341, 196582644 spin messages so far, buffered 1336623
+refclient: 580.807 s: snapshot needed: next 566172927 known_end 567782625 buffered 1436674 delivered 493634225 request timeouts A/B 64/1 overflows 0
+refclient: 580.807 s: snapshot spliced: next 566172927, 201650174 spin messages so far, buffered 1436674
+refclient: 582.860 s: snapshot needed: next 568131490 known_end 569792247 buffered 1458670 delivered 493637028 request timeouts A/B 64/1 overflows 0
+refclient: 582.860 s: snapshot spliced: next 568131490, 206835316 spin messages so far, buffered 1458670
+refclient: 584.949 s: snapshot needed: next 570130523 known_end 571778845 buffered 1512603 delivered 493641482 request timeouts A/B 64/1 overflows 0
+refclient: 584.949 s: snapshot spliced: next 570130523, 212158995 spin messages so far, buffered 1512603
+refclient: 587.030 s: snapshot needed: next 572203323 known_end 573830742 buffered 1493364 delivered 493658548 request timeouts A/B 64/1 overflows 0
+refclient: 587.030 s: snapshot spliced: next 572203323, 217473312 spin messages so far, buffered 1493364
+refclient: 589.313 s: snapshot needed: next 574247744 known_end 575971681 buffered 1510270 delivered 493684248 request timeouts A/B 64/1 overflows 0
+refclient: 589.313 s: snapshot spliced: next 574247744, 222780430 spin messages so far, buffered 1510270
+refclient: 592.990 s: snapshot needed: next 576472454 known_end 579010875 buffered 1775251 delivered 493684248 request timeouts A/B 64/1 overflows 0
+refclient: 592.990 s: snapshot spliced: next 576472454, 228053699 spin messages so far, buffered 1775251
+refclient: 595.716 s: snapshot needed: next 579017689 known_end 581819314 buffered 1899452 delivered 493701964 request timeouts A/B 64/1 overflows 0
+refclient: 595.716 s: snapshot spliced: next 579017689, 232340452 spin messages so far, buffered 1899452
+refclient: 596.776 s: snapshot needed: next 581876393 known_end 583043036 buffered 803533 delivered 493710547 request timeouts A/B 64/1 overflows 0
+refclient: 596.776 s: snapshot spliced: next 581876393, 233892696 spin messages so far, buffered 803533
+refclient: 597.304 s: snapshot spliced: next 583481627, 234288440 spin messages so far, buffered 0
+refclient: 597.400 s: snapshot needed: next 583606451 known_end 583724771 buffered 11345 delivered 493835371 request timeouts A/B 64/1 overflows 0
+refclient: 597.847 s: snapshot spliced: next 584042936, 234690712 spin messages so far, buffered 110266
+refclient: 598.048 s: snapshot needed: next 584372692 known_end 584412986 buffered 8459 delivered 494168404 request timeouts A/B 64/1 overflows 0
+refclient: 598.488 s: snapshot spliced: next 584709429, 235106656 spin messages so far, buffered 15454
+refclient: 598.631 s: snapshot needed: next 584919527 known_end 584954617 buffered 12731 delivered 494407938 request timeouts A/B 64/1 overflows 0
+refclient: 599.021 s: snapshot spliced: next 585263663, 235520490 spin messages so far, buffered 109393

@@ -1,0 +1,25 @@
+== itch_validate --strict Thu Oct  1 11:02:57 CDT 2026
+file: data/itch/01302019.NASDAQ_ITCH50.gz (strict mode)
+  records 368366634  messages 368366634  end_of_session 0  truncated_records 0
+  violations 0
+RESULT PASS
+exit=0
+file: data/itch/S120925-v50.txt.gz (strict mode)
+  records 589560010  messages 589560010  end_of_session 0  truncated_records 0
+  violations 0
+RESULT PASS
+exit=0
+file: data/itch/S061226-v50.txt.gz (strict mode)
+  records 1304894064  messages 1304894064  end_of_session 0  truncated_records 0
+  violations 0
+RESULT PASS
+exit=0
+file: data/itch/S050922-v50-NOII.txt.gz (strict mode)
+  records 5954783  messages 5954783  end_of_session 0  truncated_records 0
+  violations 0
+RESULT PASS
+exit=0
+file: data/itch/10302019.NASDAQ_ITCH50.gz (strict mode)
+  records 293989079  messages 293989079  end_of_session 0  truncated_records 0
+  violations 0
+RESULT PASS

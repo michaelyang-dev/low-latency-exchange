@@ -1,0 +1,24 @@
+file: data/itch/S061226-v50.txt.gz (gzip)
+  records 1304894064  messages 1304894064  end_of_session 0  bytes(incl 2B prefix) 41662444846
+  framing_errors 0  io_errors 0  unknown_types 0  length_mismatches 0  roundtrip_diffs 0
+  per-type counts:
+    A AddOrder                      450612715
+    C OrderExecutedWithPrice          1090052
+    D OrderDelete                   438765434
+    E OrderExecuted                  19232537
+    F AddOrderMpid                    4908319
+    H StockTradingAction                12979
+    I Noii                            6044629
+    J LuldAuctionCollar                   132
+    K IpoQuotingPeriodUpdate                1
+    L MarketParticipantPosition        270943
+    P Trade                           8596422
+    Q CrossTrade                        25686
+    R StockDirectory                    12809
+    S SystemEvent                           6
+    U OrderReplace                  361712117
+    V MwcbDeclineLevel                      1
+    X OrderCancel                    13595987
+    Y RegShoRestriction                 13295
+  elapsed 61.3 s (21.30 M records/s, 680 MB/s decompressed)
+RESULT PASS

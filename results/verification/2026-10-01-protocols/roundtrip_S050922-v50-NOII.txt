@@ -1,0 +1,8 @@
+file: data/itch/S050922-v50-NOII.txt.gz (gzip)
+  records 5954783  messages 5954783  end_of_session 0  bytes(incl 2B prefix) 309648488
+  framing_errors 0  io_errors 0  unknown_types 0  length_mismatches 0  roundtrip_diffs 0
+  per-type counts:
+    I Noii                            5954777
+    S SystemEvent                           6
+  elapsed 0.3 s (20.81 M records/s, 1082 MB/s decompressed)
+RESULT PASS

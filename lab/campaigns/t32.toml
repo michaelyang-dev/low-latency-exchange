@@ -1,0 +1,44 @@
+# T32: logger overhead in situ (METHODOLOGY §16; plan 11). M3 overhead = (per-message cost
+# with nlog on - with nlog off) / with nlog off, where the per-message cost is the summed
+# work time of the exchange's stage threads (<stage>_work_tsc: polls that processed at
+# least one item) over inbound messages in the measured window, from the metrics segment.
+# Both arms run the T20 configuration at the T20 headline rate, in ABBA order, R=5 per arm
+# (the slot matrix below: A = nlog on, B = nlog off).
+# Pass: overhead <= 3% (mean over runs) and 0 logger drops in every logging-on run; the
+# event census of the logging-on runs covers every event of plan 11 §3. Also published:
+# the offline M3 (journal replay with logging on and off), an lle-top recording and a
+# metrics-segment dump from a T20 run.
+target = "t32"
+methodology = "methodology-v2"
+profile = "host-a"
+ifaces = ["TBD_BY_LAB"]
+preset = "bench"
+repetitions = 1
+sources = ["src/log", "src/client", "src/net", "src/gateway", "src/md", "src/engine", "src/sequencer",
+           "src/journal", "apps/exchanged", "apps/loadgen"]
+pass_overhead_pct = 3.0
+
+rate = "TBD_BY_T20"                      # the T20 headline rate
+duration = "70s"
+warmup = "10s"
+loadgen_profile = "lab/campaigns/t20_profile.conf"
+exch_conf_on = "TBD_BY_PILOT"            # the T20 exchanged config (nlog = true)
+exch_conf_off = "TBD_BY_PILOT"           # the same with nlog = false
+nlog_glob = "TBD_BY_LAB"                 # the node's nlog files of a run (for drops and the census)
+loadgen_threads = "TBD_BY_PILOT"
+
+host_c = "TBD_BY_LAB"
+client_build = "TBD_BY_LAB"
+c_out = "/tmp/lle-t32"
+a_ip = "TBD_BY_LAB"
+gw_port = "TBD_BY_LAB"
+node = "exA"
+c_if = "TBD_BY_LAB"
+loadgen_cpus = "TBD_BY_LAB"
+
+commands = [
+  "lab/campaigns/t32_rep.sh out={out} slot={slot} build={build} host_c={host_c} client_build={client_build} a_ip={a_ip} gw_port={gw_port} profile={loadgen_profile} rate={rate} duration={duration} warmup={warmup} exch_conf_on={exch_conf_on} exch_conf_off={exch_conf_off} node={node} threads={loadgen_threads} cpus={loadgen_cpus} loadgen_variant=xsk c_if={c_if} c_out={c_out} nlog_glob={nlog_glob}",
+]
+
+[matrix]
+slot = ["A1", "B1", "B2", "A2", "A3", "B3", "B4", "A4", "A5", "B5"]

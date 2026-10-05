@@ -1,0 +1,67 @@
+# T18: tick-to-trade of refclient (METHODOLOGY §12, §13; plan 07 §3 "ttt_harness", §4
+# "T18"; plan 12 §3; ADR-013). The headline cell: the AF_XDP headline variant at the
+# pre-registered load point, R=10. Other variants' cells (R=5) are in t16.toml.
+#
+# Per repetition (lab/campaigns/t18_rep.sh): refclient on host C (port C.p0) with
+# hardware timestamps and its order-stamp log; ttt_harness on host A (port A.p0) replays
+# the day on both lines from one port with Poisson triggers and takes the orders on its
+# kernel TCP desk; `ttt_harness analyze` merges both sides with the calibration.
+# Headline: TTT_raw = RX_hw(order frame at A.p0) - min(TX_hw(trigger, line A), TX_hw(trigger,
+# line B)) at A.p0; also TTT_cal = TTT_raw - 2c and TTT_client. Validity: >= 99.9%
+# hardware pairs, 0 software stamps, one PHC per interval, generator lateness p99.9
+# <= 1 us, >= 10^6 measured triggers, a gap-free feed on the client, and the consistency
+# rule |median(TTT_raw) - median(TTT_client) - 2c| <= 250 ns.
+# Pass (tools/results/summarize.py): median across runs of per-run p50 <= 14 us and of
+# per-run p99 <= 38 us.
+target = "t18"
+methodology = "methodology-v2"
+profile = "host-a"
+ifaces = ["TBD_BY_LAB"]                 # A.p0 (lab/hosts/host-a.md)
+preset = "bench"
+repetitions = 10                         # headline cell (§13)
+sources = ["src/client", "src/net", "src/proto/moldudp64", "src/proto/soupbin", "src/proto/ouch50",
+           "src/proto/itch50", "src/book", "apps/refclient", "apps/ttt_harness", "bpf"]
+pass_p50_ns = 14000
+pass_p99_ns = 38000
+
+# Hosts and ports (lab facts, recorded at bring-up; not pilot values).
+host_c = "TBD_BY_LAB"                    # ssh alias of host C
+client_build = "TBD_BY_LAB"              # the same commit built on host C (preset bench)
+a_if = "TBD_BY_LAB"
+c_if = "TBD_BY_LAB"
+a_ip = "TBD_BY_LAB"
+c_ip = "TBD_BY_LAB"
+harness_cpu = "TBD_BY_LAB"               # host A: the harness's transmit thread
+harness_rx_cpu = "TBD_BY_LAB"            # host A: its order desk
+client_cpu = "TBD_BY_LAB"                # host C: refclient's hot thread
+napi_cpu = "TBD_BY_LAB"                  # host C: the (iv-t) NAPI kthread
+line_a = "239.18.0.1:31001"
+line_b = "239.18.0.2:31002"
+desk_port = 31030
+
+# Workload (§13).
+input = "data/itch/01302019.NASDAQ_ITCH50.bin"
+input_sha256 = "1d0972ffc25b35902ccc3f9069aae517da56903d5795f872902b8697315f30c3"
+background_rate = "TBD_BY_PILOT"         # §18 load point; initial value 1000000 (1.0M msgs/s)
+trigger_rate = 10000                     # Poisson, per second
+duration = "112s"                        # 10 s warm-up + ~102 s measured: >= 10^6 triggers
+warmup = "10s"
+min_triggers = 1000000
+seed_base = 20261018
+symbol = "LLTRG"
+trigger_price = "10.00"
+
+# Pre-registered selections (§18).
+afxdp_variant = "TBD_BY_PILOT"           # xsk (iv) or xsk-threaded (iv-t): the better pilot
+
+setup = [
+  "echo '{input_sha256}  {input}' | sha256sum -c --quiet -",
+  "lab/campaigns/t18_calibrate.sh out={out} build={build} host_c={host_c} client_build={client_build} a_if={a_if} c_if={c_if} c_ip={c_ip}",
+]
+commands = [
+  "lab/campaigns/t18_rep.sh out={out} rep={rep} build={build} host_c={host_c} client_build={client_build} a_if={a_if} c_if={c_if} a_ip={a_ip} line_a={line_a} line_b={line_b} desk_port={desk_port} input={input} variant=afxdp afxdp_variant={afxdp_variant} coalescing_map=xsk:{coalescing.xsk},xsk-threaded:{coalescing.xsk-threaded} rate={background_rate} trigger_rate={trigger_rate} duration={duration} warmup={warmup} min_triggers={min_triggers} seed_base={seed_base} symbol={symbol} trigger_price={trigger_price} harness_cpu={harness_cpu} harness_rx_cpu={harness_rx_cpu} client_cpu={client_cpu} napi_cpu={napi_cpu}",
+]
+
+[coalescing]                             # SUT port, per variant: driver-default | adaptive | rx-usecs-0 (§14)
+xsk = "TBD_BY_PILOT"
+xsk-threaded = "TBD_BY_PILOT"

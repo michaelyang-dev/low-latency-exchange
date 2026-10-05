@@ -1,0 +1,9 @@
+TShark (Wireshark) 4.6.4.
+== /tmp/pcap/mold_01302019_mid.pcap
+frames: 285718
+malformed or expert >= warning: 0
+messages: 2000000, heartbeats: 0, end-of-session: 3, sequence gaps: 0
+== /tmp/pcap/mold_noii.pcap
+frames: 196328
+malformed or expert >= warning: 0
+messages: 2000000, heartbeats: 39924, end-of-session: 3, sequence gaps: 0

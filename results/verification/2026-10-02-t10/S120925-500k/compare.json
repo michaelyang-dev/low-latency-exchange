@@ -1,0 +1,13 @@
+{
+  "mode": "compare",
+  "match": true,
+  "client_checkpoints": 75,
+  "reference_checkpoints": 83,
+  "compared_books": 75,
+  "compared_streams": 51,
+  "compared_bbo": 9,
+  "missing_in_reference": 0,
+  "mismatches": 0,
+  "reached_end": true,
+  "details": ""
+}

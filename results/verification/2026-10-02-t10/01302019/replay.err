@@ -1,0 +1,7 @@
+mold_replay: 50.634 s: snapshot spin 1: 1619328 messages, G=50051069 (built in 0.079 s)
+mold_replay: 101.105 s: snapshot spin 2: 1655289 messages, G=100051278 (built in 0.078 s)
+mold_replay: 151.648 s: snapshot spin 3: 1668118 messages, G=150050423 (built in 0.086 s)
+mold_replay: 202.147 s: snapshot spin 4: 1692569 messages, G=200050381 (built in 0.085 s)
+mold_replay: 252.951 s: snapshot spin 5: 1632064 messages, G=250050479 (built in 0.086 s)
+mold_replay: 304.580 s: snapshot spin 6: 1662780 messages, G=300050094 (built in 0.093 s)
+mold_replay: 356.017 s: snapshot spin 7: 1737196 messages, G=350050195 (built in 0.101 s)

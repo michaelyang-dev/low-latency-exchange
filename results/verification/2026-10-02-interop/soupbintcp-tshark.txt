@@ -1,0 +1,22 @@
+# Capture: sudo dumpcap -i lo -f tcp during LLE_E2E_BACKEND=uring nassau_interop_test (Linux 7.0, clang 21 Release), 11,256 frames, 0 dropped
+# Gateway ports from the run: gw0=37865 gw1=46587 (exchanged output)
+TShark (Wireshark) 4.6.4.
+== /tmp/lle-cap/soup.pcapng (SoupBinTCP on tcp ports 37865 46587)
+soupbintcp packets: 9481
+malformed: 0
+soupbintcp warnings (invalid sequence numbers): 0
+by type:
+      4 'A'
+    235 'H'
+      4 'L'
+      1 'O'
+     27 'R'
+   6157 'S'
+   3050 'U'
+      3 'Z'
+tcp analysis notes (information only):
+     42 This frame is a (suspected) retransmission
+      8 Duplicate ACK (#1)
+      8 D-SACK Sequence
+      3 This frame is a (suspected) spurious retransmission
+      3 Ambiguous ACK following Karn's definition

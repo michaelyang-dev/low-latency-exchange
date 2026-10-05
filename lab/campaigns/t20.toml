@@ -1,0 +1,66 @@
+# T20: end-to-end throughput on 8 cores (METHODOLOGY §15; plan 07 §4 "T20"; ADR-014).
+# One exchanged node, solo mode, durable L3 journal, on exactly CPUs 8-15 of host A
+# (with the kernel threads doing its I/O); snapshotd and the GLIMPSE server off during the
+# window; nlog on. loadgen v2 on host C: 16 sessions, about 2,000 symbols, the
+# pre-registered mix and risk profile (t20_profile.conf), open loop, latency from
+# scheduled send to ack RX.
+#
+# Search (loadgen search, run here; each run's loadgen executes on host C): an ascending
+# ladder of offered rates; at each, R=5 runs of 10 s warm-up + 60 s measured. A run is
+# valid when (tools/results/merge_t20.py)
+#   1-2. every inbound message got its expected response type (0 Rejected, 0 Cancel
+#        Reject) and none is unanswered                               (responses_valid)
+#   3.   bounded backlog from the node's metrics segment: per ring, peak of the last 10 s
+#        <= that of the first 10 s + 1% of capacity, and no ring above 50%  (backlog_ok)
+#   4.   p99 latency <= the solo-mode SLO                             (slo_ok)
+#   and  generator lateness p99.9 <= 1 us                             (lateness_ok)
+#   and  no exchange-attributable interrupt or softirq on CPUs 0-7    (irq_clean)
+# The result is the highest rate at which all R runs are valid, below the first rate where
+# one is not (search.json). mpstat -P ALL, the pinning map and the interrupt deltas are
+# kept per run. Pass: >= 4.2M msgs/s.
+target = "t20"
+methodology = "methodology-v2"
+profile = "host-a"
+ifaces = ["TBD_BY_LAB"]
+preset = "bench"
+repetitions = 1                          # the search runs R per rate itself
+sources = ["src/client", "src/net", "src/gateway", "src/md", "src/engine", "src/sequencer", "src/journal",
+           "src/concurrent", "src/log", "src/metrics", "apps/exchanged", "apps/loadgen"]
+pass_rate = 4200000
+
+# The ladder (pre-registered): 3.0M to 7.0M msgs/s in steps of 0.1M.
+rate_lo = 3000000
+rate_step = 100000
+rate_hi = 7000000
+runs_per_point = 5
+duration = "70s"
+warmup = "10s"
+seed = 20261020
+
+# Pre-registered selections (§18).
+loadgen_profile = "lab/campaigns/t20_profile.conf"   # mix and risk profile (status in the file)
+solo_slo = "TBD_BY_PILOT"                # from the RWF_DSYNC commit-latency benchmark; initial proposal 1ms
+exch_conf = "TBD_BY_PILOT"               # exchanged config: gateway backend (uring or xsk+utcp) and md backend,
+                                         # e.g. a T20 copy of lab/exchanged/variants/<backend>.conf
+loadgen_threads = "TBD_BY_PILOT"         # from the capacity self-test (one thread if it holds 6M msgs/s)
+
+# Hosts and the loadgen instrument (lab facts).
+host_c = "TBD_BY_LAB"
+client_build = "TBD_BY_LAB"
+c_out = "/tmp/lle-t20"
+a_ip = "TBD_BY_LAB"
+gw_port = "TBD_BY_LAB"                   # gw0's SoupBinTCP port in exch_conf
+node = "exA"
+c_if = "TBD_BY_LAB"
+loadgen_cpus = "TBD_BY_LAB"              # host C CPUs of the generator threads
+loadgen_variant = "xsk"                  # utcp over AF_XDP on host C (07 §3 "loadgen v2")
+nic_sample = 1000                        # every 1,000th message is a NIC-to-NIC probe (W2W_ack, secondary)
+capacity_rate = 6000000                  # the self-test rate (07 §3)
+capacity_port = 31500
+
+setup = [
+  "lab/campaigns/t20_node.sh capacity build={build} host_c={host_c} client_build={client_build} a_ip={a_ip} port={capacity_port} rate={capacity_rate} profile={loadgen_profile} threads={loadgen_threads} cpus={loadgen_cpus} out={out}",
+]
+commands = [
+  "{build}/apps/loadgen/loadgen search --rate-lo {rate_lo} --rate-step {rate_step} --rate-hi {rate_hi} --reps {runs_per_point} --out {c_out} --results {out} --runner 'ssh {host_c} {client_build}/apps/loadgen/loadgen' --before-run 'ssh {host_c} mkdir -p {c_out}; lab/campaigns/t20_node.sh start {name} build={build} exch_conf={exch_conf} node={node} out={out}' --after-run 'lab/campaigns/t20_node.sh stop {name} build={build} node={node} out={out} host_c={host_c} c_out={c_out}' -- --server {a_ip}:{gw_port} --profile {loadgen_profile} --duration {duration} --warmup {warmup} --seed {seed} --threads {loadgen_threads} --cpus {loadgen_cpus} --variant {loadgen_variant} --ifname {c_if} --timestamps hardware --nic-sample {nic_sample} --slo-p99 {solo_slo} --max-lateness 1us",
+]

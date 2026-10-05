@@ -1,0 +1,29 @@
+# T25: takeover time (METHODOLOGY §17; plan 10 §7). Full tier: A primary, B backup, C the
+# witness, clients and the hardware-timestamped capture, all on the managed switch; faults
+# needing power or console go through the BMC or PiKVM. The primary emits >= 1 packet per
+# 20 us. T_takeover = t_rx(first line-A MoldUDP64 packet sourced by B) - t_rx(last packet
+# sourced by A before the fault), one capture NIC (one PHC); a trial with any capture drop
+# is invalid. Also reported: T_new (probe orders every 100 us), T_first_new_order_ack, and
+# the detection/promotion breakdown from nlog. Every trial needs 0 oracle violations
+# (bench/failover/check_trial_oracles.py: client exactly-once ledgers, MoldUDP64
+# continuity, journal comparison after rejoin).
+# Pass: F1-F5, F9, F10 with >= 1,000 trials each (F5 >= 100), max T_takeover < 50 ms; F6-F8
+# judged on their own criteria. Per class: p50, p90, p99, max with N, per-trial JSON, pcaps.
+target = "t25"
+methodology = "methodology-v2"
+profile = "host-c"
+ifaces = ["TBD_BY_LAB"]                  # the capture port of host C
+preset = "bench"
+repetitions = 1                          # trials are counted per class below
+sources = ["src/repl", "src/journal", "src/gateway", "src/md", "apps/exchanged", "apps/witnessd", "bench/failover"]
+pass_max_ms = 50
+classes = "F1,F2,F3,F4,F5,F9,F10"
+trials = 1000
+trials_f5 = 100
+t_d_ms = "TBD_BY_PILOT"                  # detector timeout T_d: measured stall distribution (R-09), 24 h stall run
+t_w_ms = "TBD_BY_PILOT"                  # witness timeout T_w
+lab_harness = "TBD_BY_LAB"               # the lab trial driver (bench/failover/run_trials.py drives one host only)
+
+commands = [
+  "{lab_harness} --bin {build} --out {out}/trials --classes {classes} --trials {trials} --trials-F5 {trials_f5} --t-d-ms {t_d_ms} --t-w-ms {t_w_ms} --label t25 && cp {out}/trials/summary.json {out}/run-{rep}.json",
+]

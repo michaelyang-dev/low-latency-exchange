@@ -1,0 +1,1 @@
+build/client-rel/apps/mold_replay/mold_replay --file data/itch/01302019.NASDAQ_ITCH50.gz --seed 20261003 --loss-a 0.1% --loss-b 1% --dup 0.1% --reorder 0.1% --rate 1000000 

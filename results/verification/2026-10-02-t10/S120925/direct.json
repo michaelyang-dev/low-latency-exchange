@@ -1,0 +1,14 @@
+{
+  "mode": "direct",
+  "file": "data/itch/S120925-v50.txt.gz",
+  "variant": "opt",
+  "messages": 589560010,
+  "elapsed_ns": 175531164291,
+  "malformed": 0,
+  "final_books_digest": "aacfde361e3290e5",
+  "final_live_orders": 0,
+  "bbo_digest": "ecbd633a8dd680f7",
+  "bbo_events": 244791817,
+  "stream_hash_all": "1e1dae1a56c8b719",
+  "checkpoints": 120
+}

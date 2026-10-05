@@ -1,0 +1,3 @@
+== ouch50_diff Thu Oct  1 11:04:45 CDT 2026
+ouch50 differential test: messages=10000000 disagreements=0 shards=4 seed=20261001 elapsed=10.9s
+exit=0

@@ -1,0 +1,14 @@
+{
+  "mode": "direct",
+  "file": "data/itch/01302019.NASDAQ_ITCH50.gz",
+  "variant": "opt",
+  "messages": 368366634,
+  "elapsed_ns": 102269279209,
+  "malformed": 0,
+  "final_books_digest": "aacfde361e3290e5",
+  "final_live_orders": 0,
+  "bbo_digest": "59782bbd24c3a514",
+  "bbo_events": 174890436,
+  "stream_hash_all": "6f76eab379f2f441",
+  "checkpoints": 37
+}
