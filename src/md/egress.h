@@ -28,6 +28,7 @@
 //
 // Include rules: this header is shared by the engine, io, md and gateway stages;
 // it allocates only in init() (startup).
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -147,6 +148,10 @@ struct alignas(kFalseSharingBytes) Watermark {
 struct EgressState {
   Watermark release;   // Output Rule: outputs of records <= release may leave the node
   Watermark applied;   // the engine has applied (and emitted the outputs of) records <= applied
+  // Outputs of records above `hold` may still be staged outside the ring: a rejoin's
+  // reloaded outputs the engine stage hands on before new records (DST-013). No consumer
+  // is done beyond it; the maximum when nothing is staged.
+  Watermark hold{~std::uint64_t{0}};
   // done[c]: every output of a record <= done[c] has been handed on by consumer c
   // (written to a socket / packetized / appended to the output log).
   Watermark done[kConsumers];
@@ -158,7 +163,8 @@ struct EgressState {
 // F returns false to stop before releasing that entry (e.g. its output path is full).
 template <class F>
 std::size_t drain_released(EgressRing& ring, EgressState& st, std::size_t c, std::size_t max, F&& f) {
-  const std::uint64_t applied = st.applied.load();  // read before peeking: see done[] above
+  // Read before peeking: see done[] above.
+  const std::uint64_t applied = std::min(st.applied.load(), st.hold.load());
   const std::uint64_t release = st.release.load();
   std::size_t n = 0;
   OutEntry e;
