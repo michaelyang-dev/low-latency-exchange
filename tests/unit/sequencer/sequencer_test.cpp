@@ -512,6 +512,36 @@ TEST(Sequencer, ReinjectedInputGoesAheadOfTheQueueAfterDueTimers) {
   EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[1]))->msg[0], std::byte{0xD0});
 }
 
+// DST-008: a node that takes over, joins or resumes after the close resumes the sequencer
+// after the new EpochStart, but the journal already holds DayEnd: day_already_ended()
+// keeps it stopped, with queued input, due timers and its lists, and no second DayEnd.
+TEST(Sequencer, NothingIsSequencedOnceTheDayAlreadyEnded) {
+  const Nanos t0 = 1'790'000'000'000'000'000;
+  std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::Cross, 1}};
+  Rig rig(std::size_t{1} << 20, sched);
+  rig.clock.real = t0;
+  rig.start();
+  ASSERT_TRUE(rig.seq->end_day(0, 0).has_value());
+  const auto day = rig.take();
+  ASSERT_EQ(RecordView(day.back()).type(), RecordType::DayEnd);
+  // The resync of a takeover after the close.
+  rig.seq->resume(rig.seq->chain(), rig.seq->next_timer(), rig.seq->next_snapshot_id(), rig.seq->config_digest());
+  rig.seq->reserve_first(1);
+  rig.seq->reserve_ahead(1);
+  ASSERT_TRUE(rig.seq->inject_first(SessionEventMsg{1, 0, journal::SessionEventKind::InstanceDown, 0}));
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(1, 1)));
+  ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(2, 2)));
+  rig.seq->day_already_ended();
+  EXPECT_FALSE(rig.seq->started());
+  EXPECT_EQ(rig.seq->first_pending(), 0u);
+  EXPECT_EQ(rig.seq->ahead_pending(), 0u);
+  rig.clock.real = t0 + 5000;  // the cross is due
+  EXPECT_FALSE(rig.seq->poll());
+  EXPECT_TRUE(rig.take().empty());
+  EXPECT_FALSE(rig.seq->end_day(0, 0).has_value());
+  EXPECT_TRUE(rig.take().empty());
+}
+
 TEST(Sequencer, BackpressureStopsPoppingAndLosesNothing) {
   Rig rig(256 * 1024);
   rig.start();

@@ -291,6 +291,19 @@ class Sequencer {
     return {};
   }
 
+  // The journal already holds the day's DayEnd (a node that took over, joined or resumed
+  // after the close: resume() put it after the new EpochStart): nothing more is journaled
+  // (06 §10, DST-008). The sequencer stays stopped, and what was waiting to go first or
+  // ahead of the queue is dropped (the close cancelled every Day order and ended every
+  // session).
+  void day_already_ended() noexcept {
+    started_ = false;
+    first_.clear();
+    first_next_ = 0;
+    ahead_.clear();
+    ahead_next_ = 0;
+  }
+
   // The last record of the day (06 §10).
   std::expected<void, SeqError> end_day(std::uint64_t itch_messages, std::uint64_t soup_messages) {
     if (!started_) return std::unexpected(SeqError::NotStarted);
