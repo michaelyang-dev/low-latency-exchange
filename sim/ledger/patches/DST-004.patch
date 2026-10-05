@@ -1,19 +1,33 @@
 diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
 --- a/apps/exchanged/repl_stage.h
 +++ b/apps/exchanged/repl_stage.h
-@@ -482,8 +482,9 @@
-   // ---- sequencer side -------------------------------------------------------------------
+@@ -532,16 +532,16 @@
+   // behind it they would carry lower UserRefNums than orders already taken and be
+   // ignored as resends (Sequencer::inject_ahead).
    bool inject(const repl::wire::Forward& f) {
-     if (f.kind == repl::wire::ForwardKind::kSessionEvent) {
--      return sh_->ouch.try_push(seq::session_event_inbound(seq::SessionEventMsg{
--          f.session_id, f.instance, static_cast<journal::SessionEventKind>(f.event), f.requested_seq}));
++    if (f.kind == repl::wire::ForwardKind::kSessionEvent) {
 +      return sh_->events.try_push(seq::SessionEventMsg{f.session_id, f.instance,
 +                                                       static_cast<journal::SessionEventKind>(f.event),
 +                                                       f.requested_seq});
-     }
++    }
      seq::InboundMsg m;
-     gw::make_inbound(m, f.session_id, f.account, f.instance, f.bytes, 0);
-@@ -525,8 +526,7 @@
+-    if (f.kind == repl::wire::ForwardKind::kSessionEvent) {
+-      m = seq::session_event_inbound(seq::SessionEventMsg{f.session_id, f.instance,
+-                                                          static_cast<journal::SessionEventKind>(f.event), f.requested_seq});
+-    } else {
+-      gw::make_inbound(m, f.session_id, f.account, f.instance, f.bytes, 0);
+-      // The backup's gateway flagged it (an over-long packet, truncated there): the record
+-      // carries exactly the flags a direct submission would have (wire::Forward::record_flags).
+-      m.flags = static_cast<std::uint16_t>(m.flags | f.record_flags);
+-    }
++    gw::make_inbound(m, f.session_id, f.account, f.instance, f.bytes, 0);
++    // The backup's gateway flagged it (an over-long packet, truncated there): the record
++    // carries exactly the flags a direct submission would have (wire::Forward::record_flags).
++    m.flags = static_cast<std::uint16_t>(m.flags | f.record_flags);
+     if (reinjecting()) return queue_ahead(m);
+     return sh_->ouch.try_push(m);
+   }
+@@ -619,8 +619,7 @@
    // first one's): through the input queue, in order, behind any due Timer.
    bool push_instance_down() {
      bool did = false;
@@ -23,7 +37,7 @@ diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
        work_.start();
        work_.add();
        ++down_next_;
-@@ -554,8 +554,7 @@
+@@ -648,8 +647,7 @@
        if (!staged_) {
          if (sh_->ouch.try_pop(staged_msg_)) {
            staged_ = true;
@@ -33,20 +47,21 @@ diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
          } else if (sh_->events.try_pop(staged_ev_)) {
            staged_ = true;
            staged_event_ = true;
-@@ -595,8 +594,7 @@
+@@ -689,8 +687,8 @@
    // behind whatever the core re-injects (its pending FORWARDs, in order).
    bool reinject_staged() {
      if (!staged_ || replica_->pending_forwards() != 0) return false;
--    const bool ok = staged_event_ ? sh_->ouch.try_push(seq::session_event_inbound(staged_ev_))
--                                  : sh_->ouch.try_push(staged_msg_);
-+    const bool ok = staged_event_ ? sh_->events.try_push(staged_ev_) : sh_->ouch.try_push(staged_msg_);
+-    const seq::InboundMsg m = staged_event_ ? seq::session_event_inbound(staged_ev_) : staged_msg_;
+-    const bool ok = reinjecting() ? queue_ahead(m) : sh_->ouch.try_push(m);
++    const bool ok = staged_event_ ? sh_->events.try_push(staged_ev_)
++                                  : (reinjecting() ? queue_ahead(staged_msg_) : sh_->ouch.try_push(staged_msg_));
      if (ok) {
        work_.start();
        work_.add();
 diff --git a/apps/exchanged/shared.h b/apps/exchanged/shared.h
 --- a/apps/exchanged/shared.h
 +++ b/apps/exchanged/shared.h
-@@ -71,8 +71,8 @@
+@@ -72,8 +72,8 @@
  };
  
  struct Shared {
@@ -197,22 +212,22 @@ diff --git a/src/gateway/gateway.h b/src/gateway/gateway.h
 diff --git a/src/sequencer/sequencer.h b/src/sequencer/sequencer.h
 --- a/src/sequencer/sequencer.h
 +++ b/src/sequencer/sequencer.h
-@@ -7,12 +7,8 @@
- //      partner, emitted ahead of every due Timer and every queued input, so they are
- //      the first records after the recovered prefix or the new epoch's EpochStart;
- //   1. raw inbound OUCH messages (the gateways' SCQ MPSC; the backup's repl stage
--//      FORWARDs mirror-session input into the same queue), and the session events of
+@@ -10,12 +10,8 @@
+ //      (inject_ahead: after a promotion, the backup's own mirror-session input the old
+ //      primary never committed, which is older than anything still queued), then the
+ //      gateways' SCQ MPSC (the backup's repl stage FORWARDs mirror-session input into the
+-//      same queue), and the session events of
 -//      the same producers, tagged (session_event_inbound): one ordered channel per
 -//      producer, so a connection's Disconnect follows every OUCH it sent before it and
 -//      the next connection's Login precedes its orders (cancel-on-disconnect; DST-004);
 -//   2. session events from the separate queue (tools and harnesses that push there;
 -//      exchanged's producers use the tagged path);
-+//      FORWARDs mirror-session input into the same queue);
++//      same queue);
 +//   2. session events (login, logout, disconnect, mirror-attach, instance-down);
  //   3. admin commands (the authenticated lle-admin channel);
  //   4. the schedule: a Timer record when the clock passes an entry's time.
  // Timers are also checked before every record is stamped, with the same clock reading
-@@ -46,7 +42,6 @@
+@@ -49,7 +45,6 @@
  #include <vector>
  
  #include "common/assert.h"
@@ -220,7 +235,7 @@ diff --git a/src/sequencer/sequencer.h b/src/sequencer/sequencer.h
  #include "common/hash.h"
  #include "common/types.h"
  #include "env/concepts.h"
-@@ -83,39 +78,6 @@
+@@ -86,39 +81,6 @@
    journal::SessionEventKind event = journal::SessionEventKind::Login;
    std::uint64_t requested_seq = 0;
  };
@@ -260,9 +275,9 @@ diff --git a/src/sequencer/sequencer.h b/src/sequencer/sequencer.h
  
  template <std::size_t MaxArgs>
  struct BasicAdminMsg {
-@@ -335,16 +297,6 @@
+@@ -382,16 +344,6 @@
      for (std::uint32_t i = 0; i < cfg_.ouch_batch; ++i) {
-       if (!have_ouch_ && !ouch_q_->try_pop(ouch_)) break;
+       if (!have_ouch_ && !next_ouch()) break;
        have_ouch_ = true;
 -      if (is_session_event(ouch_)) {  // in order with the producer's OUCH (DST-004)
 -        const SessionEventMsg e = session_event_of(ouch_);
@@ -478,7 +493,7 @@ diff --git a/tests/unit/gateway/gateway_test.cpp b/tests/unit/gateway/gateway_te
 diff --git a/tests/unit/sequencer/sequencer_test.cpp b/tests/unit/sequencer/sequencer_test.cpp
 --- a/tests/unit/sequencer/sequencer_test.cpp
 +++ b/tests/unit/sequencer/sequencer_test.cpp
-@@ -164,75 +164,6 @@
+@@ -182,75 +182,6 @@
    EXPECT_EQ(std::memcmp(ad->args.data(), "HALT!", 5), 0);
  }
  
@@ -554,3 +569,65 @@ diff --git a/tests/unit/sequencer/sequencer_test.cpp b/tests/unit/sequencer/sequ
  TEST(Sequencer, TimersAreInjectedWhenTheClockPassesThem) {
    const Nanos t0 = 1'790'000'000'000'000'000;
    std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::SystemEvent, 1},
+@@ -457,61 +388,6 @@
+   EXPECT_EQ(rig.seq->first_pending(), 0u);
+ }
+ 
+-// A promotion's re-injected input (the backup's pending FORWARDs) goes ahead of the OUCH
+-// queue, where a gateway may have queued newer input of the same session meanwhile; after
+-// the session events that go first and after due timers, like all input. A full ring
+-// holds it back without reordering.
+-TEST(Sequencer, ReinjectedInputGoesAheadOfTheQueueAfterDueTimers) {
+-  const Nanos t0 = 1'790'000'000'000'000'000;
+-  std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::Cross, 1}};
+-  Rig rig(256 * 1024, sched);
+-  rig.clock.real = t0;
+-  rig.start();
+-  (void)rig.take(0);
+-  (void)rig.take(1);
+-  ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(4, 0xC0)));  // queued first, but newer
+-  rig.seq->reserve_ahead(3);
+-  rig.seq->reserve_first(1);
+-  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(4, 0xA0)));
+-  ASSERT_TRUE(rig.seq->inject_ahead(session_event_inbound(SessionEventMsg{4, 1, journal::SessionEventKind::Disconnect, 0})));
+-  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(4, 0xB0)));
+-  ASSERT_TRUE(rig.seq->inject_first(SessionEventMsg{9, 0, journal::SessionEventKind::InstanceDown, 0}));
+-  EXPECT_EQ(rig.seq->ahead_pending(), 3u);
+-  rig.clock.real = t0 + 5000;  // the cross is due
+-  EXPECT_TRUE(rig.seq->poll());
+-  const auto recs = rig.take(0);
+-  using enum RecordType;
+-  ASSERT_EQ(types(recs), (std::vector<RecordType>{SessionEvent, Timer, OuchInbound, SessionEvent, OuchInbound, OuchInbound}));
+-  EXPECT_EQ(journal::decode_session_event(RecordView(recs[0]))->event, journal::SessionEventKind::InstanceDown);
+-  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[2]))->msg[0], std::byte{0xA0});
+-  EXPECT_EQ(journal::decode_session_event(RecordView(recs[3]))->event, journal::SessionEventKind::Disconnect);
+-  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[4]))->msg[0], std::byte{0xB0});
+-  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[5]))->msg[0], std::byte{0xC0});
+-  EXPECT_EQ(rig.seq->stats().ahead, 3u);
+-  EXPECT_EQ(rig.seq->ahead_pending(), 0u);
+-  EXPECT_GE(rig.seq->ahead_capacity(), 3u);
+-  // A full ring: the list waits, staged, and keeps its place ahead of the queue.
+-  std::uint32_t pushed = 0;
+-  for (int round = 0; round < 100 && rig.seq->stats().backpressure == 0; ++round) {
+-    while (rig.ouch->try_push(Rig::ouch_msg(pushed % 3, 1))) ++pushed;
+-    (void)rig.seq->poll();
+-    (void)rig.take(0);
+-  }
+-  ASSERT_GT(rig.seq->stats().backpressure, 0u);
+-  std::vector<std::vector<std::byte>> drained;
+-  (void)rig.take(0);
+-  // Whatever the queue still holds was queued before; the re-injected one goes before it.
+-  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(7, 0xD0)));
+-  (void)rig.take(1);
+-  EXPECT_TRUE(rig.seq->poll());
+-  const auto after = rig.take(0);
+-  ASSERT_GE(after.size(), 2u);
+-  // The order staged when the ring filled is emitted first (it was taken before the
+-  // re-injection), then the re-injected one, then the rest of the queue.
+-  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[0]))->msg[0], std::byte{1});
+-  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[1]))->msg[0], std::byte{0xD0});
+-}
+-
+ // DST-008: a node that takes over, joins or resumes after the close resumes the sequencer
+ // after the new EpochStart, but the journal already holds DayEnd: day_already_ended()
+ // keeps it stopped, with queued input, due timers and its lists, and no second DayEnd.

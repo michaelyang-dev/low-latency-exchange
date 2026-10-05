@@ -424,6 +424,13 @@ std::expected<ExchangeConfig, std::string> parse_config(const std::string& text)
     else if (k == "md.max_packet_a") r = set_num(c.max_packet_a, 72, 65'507);
     else if (k == "md.max_packet_b") r = set_num(c.max_packet_b, 72, 65'507);
     else if (k == "md.heartbeat_ms") r = set_ms(c.md_heartbeat);
+    // Microseconds, for a takeover trial's line load (T25: >= 1 packet per 20 us, so the
+    // last packet before a fault is at most 20 us before it). The later key wins.
+    else if (k == "md.heartbeat_us") {
+      const auto x = num(v);
+      if (!x || *x == 0 || *x > 86'400'000'000ull) r = std::unexpected(k + ": microseconds out of range");
+      else c.md_heartbeat = static_cast<Nanos>(*x) * 1'000;
+    }
     else if (k == "md.eos_linger_ms") r = set_ms(c.md_eos_linger);
     else if (k == "md.multicast_if") c.multicast_if = v;
     else if (k == "md.ttl") r = set_num(c.ttl, 0, 255);
@@ -477,11 +484,13 @@ std::expected<ExchangeConfig, std::string> parse_config(const std::string& text)
     else if (k == "ha.bind") r = set_ep(c.ha_bind);
     else if (k == "ha.peer") r = set_ep(c.ha_peer);
     else if (k == "ha.witness") r = set_ep(c.witness);
+    else if (k == "ha.witness_bind") r = set_ip(c.witness_bind);
     else if (k == "ha.primary") r = set_num(c.initial_primary, 0, 1);
     else if (k == "ha.heartbeat_ms") r = set_ms(c.ha_heartbeat);
     else if (k == "ha.repl_thread") r = set_bool(c.repl_thread);
     else if (k == "ha.rejoin_retry_ms") r = set_ms(c.rejoin_retry);
     else if (k == "ha.rto_ms") r = set_ms(c.ha_rto);
+    else if (k == "ha.restart_loop_limit") r = set_num(c.restart_loop_limit, 0, 1'000'000);
     else if (k == "ha.t_d_ms") r = set_ms(c.t_d);
     else if (k == "ha.t_ack_ms") r = set_ms(c.t_ack);
     else if (k == "ha.log_mib") {

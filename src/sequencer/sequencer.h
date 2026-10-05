@@ -6,8 +6,11 @@
 //      InstanceDown records of the instances that died with the old process or the old
 //      partner, emitted ahead of every due Timer and every queued input, so they are
 //      the first records after the recovered prefix or the new epoch's EpochStart;
-//   1. raw inbound OUCH messages (the gateways' SCQ MPSC; the backup's repl stage
-//      FORWARDs mirror-session input into the same queue), and the session events of
+//   1. raw inbound OUCH messages: first the input re-injected ahead of the queue
+//      (inject_ahead: after a promotion, the backup's own mirror-session input the old
+//      primary never committed, which is older than anything still queued), then the
+//      gateways' SCQ MPSC (the backup's repl stage FORWARDs mirror-session input into the
+//      same queue), and the session events of
 //      the same producers, tagged (session_event_inbound): one ordered channel per
 //      producer, so a connection's Disconnect follows every OUCH it sent before it and
 //      the next connection's Login precedes its orders (cancel-on-disconnect; DST-004);
@@ -144,6 +147,19 @@ struct ConfigBlob {
   std::span<const std::byte> bytes;
 };
 
+// The configuration digest the day start stamps into EpochStart (ADR-028): FNV-1a 64 over
+// each table's id, size and bytes, in order. A paired node that restarts on an empty
+// journal joins under the digest of its configuration file (DST-006).
+[[nodiscard]] inline std::uint64_t config_digest(std::span<const ConfigBlob> config) noexcept {
+  Fnv1a64 digest;
+  for (const auto& c : config) {
+    digest.u(static_cast<std::uint16_t>(c.table));
+    digest.u(static_cast<std::uint64_t>(c.bytes.size()));
+    digest.bytes(c.bytes);
+  }
+  return digest.value();
+}
+
 // ---- environment ---------------------------------------------------------------------
 
 template <class Q>
@@ -188,6 +204,7 @@ struct SequencerStats {
   std::uint64_t ouch = 0;
   std::uint64_t session_events = 0;
   std::uint64_t first = 0;  // of session_events: injected to go first (ADR-032)
+  std::uint64_t ahead = 0;  // OUCH input (and tagged events) taken from the re-injected list
   std::uint64_t admin = 0;
   std::uint64_t timers = 0;
   std::uint64_t snapshot_marks = 0;
@@ -233,12 +250,8 @@ class Sequencer {
     pending_mark_ = false;
     started_ = true;
     if (!emit_now(ds)) return std::unexpected(SeqError::RingFull);
-    Fnv1a64 digest;
     for (const auto& c : config) {
       const std::uint32_t n = chunks_of(c);
-      digest.u(static_cast<std::uint16_t>(c.table));
-      digest.u(static_cast<std::uint64_t>(c.bytes.size()));
-      digest.bytes(c.bytes);
       for (std::uint32_t k = 0; k < n; ++k) {
         const std::size_t off = std::size_t{k} * journal::ConfigChunk::kMaxChunkBytes;
         const std::size_t len = std::min<std::size_t>(journal::ConfigChunk::kMaxChunkBytes, c.bytes.size() - off);
@@ -247,7 +260,7 @@ class Sequencer {
         if (!emit_now(chunk)) return std::unexpected(SeqError::RingFull);
       }
     }
-    config_digest_ = digest.value();
+    config_digest_ = seq::config_digest(config);
     if (!emit_now(journal::EpochStart{epoch, primary_node, config_digest_})) return std::unexpected(SeqError::RingFull);
     return {};
   }
@@ -276,6 +289,19 @@ class Sequencer {
       return std::unexpected(SeqError::RingFull);
     }
     return {};
+  }
+
+  // The journal already holds the day's DayEnd (a node that took over, joined or resumed
+  // after the close: resume() put it after the new EpochStart): nothing more is journaled
+  // (06 §10, DST-008). The sequencer stays stopped, and what was waiting to go first or
+  // ahead of the queue is dropped (the close cancelled every Day order and ended every
+  // session).
+  void day_already_ended() noexcept {
+    started_ = false;
+    first_.clear();
+    first_next_ = 0;
+    ahead_.clear();
+    ahead_next_ = 0;
   }
 
   // The last record of the day (06 §10).
@@ -308,6 +334,27 @@ class Sequencer {
   [[nodiscard]] std::size_t first_pending() const noexcept { return first_.size() - first_next_; }
   [[nodiscard]] std::size_t first_capacity() const noexcept { return first_.capacity(); }
 
+  // ---- input re-injected ahead of the queue -------------------------------------------
+  // After a promotion the replica re-injects the backup's own mirror-session input that
+  // the old primary never committed (its pending FORWARDs), and the stage the message it
+  // had popped but not forwarded. Input a gateway queued meanwhile is newer: re-injected
+  // behind it, the older orders would carry lower UserRefNums than ones already taken and
+  // be ignored as resends (05 §4). So the re-injected input is OUCH input emitted before
+  // the queue (after any due Timer, as all input). reserve_ahead sizes the list (cold);
+  // inject_ahead never allocates and returns false when it is full.
+  void reserve_ahead(std::size_t n) { ahead_.reserve(ahead_.size() + n); }
+  [[nodiscard]] bool inject_ahead(const OuchMsg& m) noexcept {
+    if (ahead_.size() == ahead_.capacity()) {
+      if (ahead_next_ == 0) return false;
+      ahead_.erase(ahead_.begin(), ahead_.begin() + static_cast<std::ptrdiff_t>(ahead_next_));  // no allocation
+      ahead_next_ = 0;
+    }
+    ahead_.push_back(m);  // within the capacity: no allocation
+    return true;
+  }
+  [[nodiscard]] std::size_t ahead_pending() const noexcept { return ahead_.size() - ahead_next_; }
+  [[nodiscard]] std::size_t ahead_capacity() const noexcept { return ahead_.capacity(); }
+
   // ---- the stage body -------------------------------------------------------------------
   bool poll() noexcept {
     if (!started_) return false;
@@ -331,9 +378,9 @@ class Sequencer {
       first_.clear();
       first_next_ = 0;
     }
-    // 1. OUCH.
+    // 1. OUCH: the re-injected input, then the queue.
     for (std::uint32_t i = 0; i < cfg_.ouch_batch; ++i) {
-      if (!have_ouch_ && !ouch_q_->try_pop(ouch_)) break;
+      if (!have_ouch_ && !next_ouch()) break;
       have_ouch_ = true;
       if (is_session_event(ouch_)) {  // in order with the producer's OUCH (DST-004)
         const SessionEventMsg e = session_event_of(ouch_);
@@ -392,6 +439,20 @@ class Sequencer {
   static std::uint32_t chunks_of(const ConfigBlob& c) noexcept {
     const std::size_t n = (c.bytes.size() + journal::ConfigChunk::kMaxChunkBytes - 1) / journal::ConfigChunk::kMaxChunkBytes;
     return n == 0 ? 1u : static_cast<std::uint32_t>(n > 0x10000 ? 0x10000 : n);
+  }
+
+  // The next OUCH input into ouch_: the re-injected list first, then the queue.
+  bool next_ouch() noexcept {
+    if (ahead_next_ < ahead_.size()) {
+      ouch_ = ahead_[ahead_next_++];
+      ++stats_.ahead;
+      if (ahead_next_ == ahead_.size()) {
+        ahead_.clear();
+        ahead_next_ = 0;
+      }
+      return true;
+    }
+    return ouch_q_->try_pop(ouch_);
   }
 
   // A poll stops: the ring is full, or this poll's timer budget is spent (not
@@ -496,6 +557,9 @@ class Sequencer {
   // Input 0 (ADR-032): emitted from first_next_ on; cleared once all are out.
   std::vector<SessionEventMsg> first_;
   std::size_t first_next_ = 0;
+  // Re-injected input ahead of the OUCH queue: taken from ahead_next_ on.
+  std::vector<OuchMsg> ahead_;
+  std::size_t ahead_next_ = 0;
 
   // At most one staged (popped, not yet published) message per source.
   OuchMsg ouch_{};

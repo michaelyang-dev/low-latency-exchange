@@ -75,6 +75,7 @@
 #include "sim/clock.h"
 #include "sim/dist.h"
 #include "sim/exchange/exchange_node.h"
+#include "sim/exchange/truth.h"
 #include "sim/network.h"
 #include "sim/node.h"
 #include "sim/worlds/journal_device.h"
@@ -122,50 +123,12 @@ struct Push {
   bool after_end = false;   // pushed once the sequencer had ended the day (never journaled, 06 §10)
 };
 
-// ---- the regenerated day (truth) ----------------------------------------------------
-struct Out {
-  std::uint64_t index = 0;
-  std::vector<std::byte> bytes;
-};
-struct Rec {
-  jr::RecordType type = jr::RecordType::Pad;
-  Nanos ts = 0;
-  std::uint32_t session = 0;  // OUCH / SessionEvent
-  jr::SessionEventKind event = jr::SessionEventKind::Login;
-  std::uint16_t instance = 0;
-  SeqNo requested = 0;
-  std::vector<std::byte> payload;  // OUCH payload
-  std::uint16_t flags = 0;
-};
-struct OrderLife {
-  std::uint32_t session = 0;
-  std::uint32_t urn = 0;
-  std::uint64_t accepted = 0;  // index of the record that made it live
-  std::uint64_t closed = 0;    // index at which its open quantity reached 0 (0: open at the end)
-  std::int64_t open = 0;
-  std::vector<std::uint64_t> executions;  // record indices
-  std::vector<Nanos> execution_ts;
-};
-struct Truth {
-  bool ok = false;
-  std::string error;
-  std::vector<Rec> recs;  // index i at recs[i-1]
-  std::vector<Out> itch;
-  std::map<std::uint32_t, std::vector<Out>> ouch;
-  std::map<std::pair<std::uint32_t, std::uint32_t>, OrderLife> orders;  // (session, urn)
-  // (session, urn) -> consuming responses (A, U-new, J) with their indices.
-  std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::uint64_t>> consumed;
-  std::uint64_t day_end = 0;
-  // The opening freeze (09:25 StateChange) and the opening cross (09:30 Cross 'O'):
-  // held orders are frozen in between, and cancel-on-disconnect spares frozen orders
-  // (matching-rules.md 13.2, 13.6).
-  std::uint64_t open_freeze = 0, open_cross = 0;
-  [[nodiscard]] bool frozen_at(std::uint64_t d, std::uint64_t accepted) const {
-    if (open_freeze == 0 || d < open_freeze) return false;
-    if (open_cross != 0 && d >= open_cross) return false;
-    return open_cross == 0 || accepted < open_cross;
-  }
-};
+// ---- the regenerated day (truth): sim/exchange/truth.h ------------------------------
+using ex::OrderLife;
+using ex::Out;
+using ex::Rec;
+using ex::SubTruth;
+using ex::Truth;
 
 // ---- the clients' durable state -----------------------------------------------------
 struct Connection {
@@ -198,15 +161,6 @@ struct Ledger {
   bool got_eos = false;
   SeqNo eos_at = 0;
   std::uint64_t replays_checked = 0, earlier_logins = 0, drops = 0, logouts = 0, resends = 0, bad = 0;
-};
-
-struct SubTruth {
-  std::vector<std::vector<std::byte>> msgs;  // msgs[k-1]: message k as delivered (empty: covered by a snapshot)
-  std::vector<Nanos> rx_at;                  // its delivery time (0: covered by a snapshot)
-  SeqNo next = 1;                            // next sequence the feed must deliver
-  std::uint64_t delivered = 0, snapshots = 0, snapshot_failures = 0, covered = 0;
-  bool ended = false;
-  SeqNo end_at = 0;
 };
 
 // ---- harness ------------------------------------------------------------------------
@@ -243,8 +197,8 @@ struct Harness {
   bool runbook_pending = false;
 
   // Durable time of every journal record (O-OUTPUT-COMMIT), from the node's journal
-  // device: index -> first virtual time it was durable on the disk.
-  std::map<std::uint64_t, Nanos> durable_at;
+  // device: (index, content crc) -> first virtual time it was durable on the disk.
+  ex::DurableMap durable_at;
   std::unique_ptr<worlds::JournalDurableObserver> durable_tap;
 
   template <class... A>
@@ -299,151 +253,9 @@ struct Harness {
   void check_commit(const Truth& t);
 };
 
-// ---- regeneration -------------------------------------------------------------------
+// ---- regeneration ------------------------------------------------------------------
 Truth Harness::regenerate() const {
-  Truth t;
-  Node& n = w->node(0);
-  ex::SimReadOnlySegmentDir dir(n, params.journal_prefix(day.date));
-  en::Engine eng;
-  struct Sink {
-    Truth* t;
-    std::uint64_t idx = 0;
-    Nanos ts = 0;
-    void itch(std::uint64_t i, std::span<const std::byte> b) {
-      t->itch.push_back(Out{i, std::vector<std::byte>(b.begin(), b.end())});
-    }
-    void ouch(std::uint64_t i, std::uint32_t session, std::span<const std::byte> b) {
-      t->ouch[session].push_back(Out{i, std::vector<std::byte>(b.begin(), b.end())});
-      if (b.empty()) return;
-      auto life = [&](std::uint32_t urn) -> OrderLife* {
-        const auto it = t->orders.find({session, urn});
-        return it == t->orders.end() ? nullptr : &it->second;
-      };
-      auto close_if_done = [&](OrderLife& ol) {
-        if (ol.open <= 0 && ol.closed == 0) ol.closed = i;
-      };
-      switch (static_cast<char>(b[0])) {
-        case 'A': {
-          const auto m = oo::OrderAccepted::decode_base(b.data());
-          t->consumed[{session, m.user_ref_num}].push_back(i);
-          OrderLife ol{session, m.user_ref_num, i, 0, static_cast<std::int64_t>(m.quantity), {}, {}};
-          if (m.order_state == ouch50::OrderState::Dead) {
-            ol.open = 0;
-            ol.closed = i;
-          }
-          t->orders[{session, m.user_ref_num}] = ol;
-          break;
-        }
-        case 'U': {
-          const auto m = oo::OrderReplaced::decode_base(b.data());
-          t->consumed[{session, m.user_ref_num}].push_back(i);
-          if (OrderLife* old = life(m.orig_user_ref_num)) {
-            old->open = 0;
-            close_if_done(*old);
-          }
-          OrderLife ol{session, m.user_ref_num, i, 0, static_cast<std::int64_t>(m.quantity), {}, {}};
-          if (m.order_state == ouch50::OrderState::Dead) {
-            ol.open = 0;
-            ol.closed = i;
-          }
-          t->orders[{session, m.user_ref_num}] = ol;
-          break;
-        }
-        case 'J': {
-          const auto m = oo::Rejected::decode_base(b.data());
-          t->consumed[{session, m.user_ref_num}].push_back(i);
-          break;
-        }
-        case 'E': {
-          const auto m = oo::OrderExecuted::decode_base(b.data());
-          if (OrderLife* ol = life(m.user_ref_num)) {
-            ol->open -= m.quantity;
-            ol->executions.push_back(i);
-            ol->execution_ts.push_back(ts);
-            close_if_done(*ol);
-          }
-          break;
-        }
-        case 'C': {
-          const auto m = oo::OrderCanceled::decode_base(b.data());
-          if (OrderLife* ol = life(m.user_ref_num)) {
-            ol->open -= m.quantity;
-            close_if_done(*ol);
-          }
-          break;
-        }
-        case 'D': {
-          const auto m = oo::AiqCanceled::decode_base(b.data());
-          if (OrderLife* ol = life(m.user_ref_num)) {
-            ol->open -= m.decrement_shares;
-            close_if_done(*ol);
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    }
-    void audit(std::uint64_t, const en::AuditEvent&) {}
-  };
-  struct Replay {
-    Truth* t;
-    en::Engine* eng;
-    Sink* sink;
-    const std::vector<en::ScheduleEntry>* schedule;
-    std::uint64_t expect = 1;
-    bool gap = false;
-    bool on_record(const jr::RecordView& r) {
-      if (r.index() != expect) {
-        gap = true;
-        return false;
-      }
-      ++expect;
-      Rec rec;
-      rec.type = r.type();
-      rec.ts = r.ts_ns();
-      if (r.type() == jr::RecordType::OuchInbound) {
-        if (const auto x = jr::decode_ouch_inbound(r)) {
-          rec.session = x->session_id;
-          rec.payload.assign(x->msg.begin(), x->msg.end());
-        }
-        rec.flags = r.flags();
-      } else if (r.type() == jr::RecordType::SessionEvent) {
-        if (const auto e = jr::decode_session_event(r)) {
-          rec.session = e->session_id;
-          rec.event = e->event;
-          rec.instance = e->instance;
-          rec.requested = e->requested_seq;
-        }
-      } else if (r.type() == jr::RecordType::DayEnd) {
-        t->day_end = r.index();
-      } else if (r.type() == jr::RecordType::Timer) {
-        if (const auto tm = jr::decode_timer(r)) {
-          for (const en::ScheduleEntry& e : *schedule) {
-            if (e.timer_id != tm->timer_id) continue;
-            if (e.kind == en::TimerKind::StateChange &&
-                e.arg == static_cast<std::uint16_t>(en::Milestone::OpenFreeze) && t->open_freeze == 0)
-              t->open_freeze = r.index();
-            if (e.kind == en::TimerKind::Cross && e.arg == 'O' && t->open_cross == 0) t->open_cross = r.index();
-          }
-        }
-      }
-      t->recs.push_back(std::move(rec));
-      sink->idx = r.index();
-      sink->ts = r.ts_ns();
-      eng->apply(en::to_input(r), *sink);
-      return true;
-    }
-  };
-  Sink sink{&t};
-  Replay rp{&t, &eng, &sink, &day.schedule};
-  (void)jr::replay(dir, jr::ReplayRange{1, ~std::uint64_t{0}}, rp, day.date);
-  if (rp.gap) {
-    t.error = "journal replay found a gap at " + std::to_string(rp.expect);
-    return t;
-  }
-  t.ok = true;
-  return t;
+  return ex::regenerate(w->node(0), params.journal_prefix(day.date), day.date, day.schedule);
 }
 
 // ---- oracles ------------------------------------------------------------------------
@@ -787,7 +599,7 @@ void Harness::check_cod(const Truth& t) {
 
 void Harness::check_commit(const Truth& t) {
   auto check = [&](std::uint64_t index, Nanos rx, const std::string& what) {
-    const auto it = durable_at.find(index);
+    const auto it = index == 0 || index > t.crc.size() ? durable_at.end() : durable_at.find({index, t.crc[index - 1]});
     if (it == durable_at.end() || it->second > rx) {
       o->fail(o_commit, what + " (record " + std::to_string(index) + ") was received at " + std::to_string(rx) +
                             " ns, before the record was durable" +
@@ -840,49 +652,7 @@ void Harness::final_checks() {
 }
 
 // ---- the node ------------------------------------------------------------------------
-// Durable journal records, from the node's journal device. On every write or sync that
-// completed durably, each segment file's durable image is parsed on from where the last
-// parse stopped (the first record not yet durable): batches are 4 KiB-padded record
-// runs, so record boundaries are found from the data start; a region that is not
-// durable yet stops the parse until a later completion covers it. A rewritten header
-// (a recycled spare) starts the file over.
-class DurableTap final : public worlds::JournalDurableObserver {
- public:
-  explicit DurableTap(Harness& h) : h_(h) {}
-  void on_durable(Disk& disk, std::uint32_t fidx, std::uint64_t off, std::uint32_t) override {
-    std::uint64_t& cur = cursor_[fidx];
-    if (cur < jr::kSegmentHeaderBytes || off < jr::kSegmentHeaderBytes) cur = jr::kSegmentHeaderBytes;
-    const std::span<const std::byte> img = disk.durable_image(fidx);
-    const Nanos now = h_.w->now();
-    while (cur + jr::kHeaderBytes <= img.size()) {
-      const auto r = jr::parse_record(img.subspan(static_cast<std::size_t>(cur)));
-      if (!r) break;
-      if (r->type() != jr::RecordType::Pad) {
-        const auto [it, fresh] = h_.durable_at.emplace(r->index(), now);
-        if (!fresh && now < it->second) it->second = now;
-      }
-      cur += r->bytes().size();
-    }
-  }
-
- private:
-  Harness& h_;
-  std::map<std::uint32_t, std::uint64_t> cursor_;
-};
-
-// An auction is collecting interest: the opening or closing cross is frozen and not
-// done for some symbol, or a symbol is halted (its halt cross is pending).
-bool auction_in_progress(const en::Engine& e) {
-  const std::uint8_t ms = e.milestones();
-  for (Locate l = 1; l <= e.symbols(); ++l) {
-    const en::SymbolInfo& s = e.symbol(l);
-    if ((ms & en::kOpenFreeze) != 0 && !s.opened) return true;
-    if ((ms & en::kCloseFreeze) != 0 && !s.closed) return true;
-    if (s.halt == en::HaltPhase::Halted || s.halt == en::HaltPhase::QuoteOnly || s.halt == en::HaltPhase::Paused)
-      return true;
-  }
-  return false;
-}
+using ex::auction_in_progress;
 
 void w_probe(Harness& h, std::string_view name) { h.w->probes().hit(name); }
 
@@ -1751,7 +1521,7 @@ Report run_exchange(const Options& o) {
       "O-COD", "no order of a dropped connection is open or executes after its disconnect is sequenced");
   h.o_commit = w.oracles().activate(kOOutputCommit, "every output received comes from a record durable at that time");
   h.o_recover = w.oracles().activate("O-RECOVER", "the node starts on every journal it left");
-  h.durable_tap = std::make_unique<DurableTap>(h);
+  h.durable_tap = std::make_unique<ex::DurableTap>(w, h.durable_at);
 
   // ---- the day ----
   ExchangeDay& d = h.day;

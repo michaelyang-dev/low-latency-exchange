@@ -5,22 +5,44 @@ Reads a classic pcap (microsecond or nanosecond timestamps, either byte order;
 Ethernet with optional 802.1Q tags, Linux cooked v1/v2, or raw IPv4), keeps the UDP
 datagrams addressed to the line A / line B destinations, decodes their MoldUDP64
 headers and reports, per line and per sender, packets, messages, sequence range and
-sequence gaps. With --fault-ns it computes the takeover time of plan 10 §7:
+sequence gaps. With --takeover it computes the takeover time of plan 10 §7:
 
     T_takeover = t_rx(first line-A packet sourced by the new primary)
                - t_rx(last line-A packet sourced by the old primary before the fault)
 
-Localhost trials (tests/integration/exchange/ha_trial.h) write software receive
+The new primary never sends on line A before it takes over, so its first line-A packet
+is the end point. The start point:
+  - with --fault-ns (a software capture on the clock that took the fault time: the
+    localhost and VM trials): the old primary's last line-A packet at or before
+    --fault-done-ns (the fault command had returned; default --fault-ns);
+  - without (the lab's hardware capture: an unsynchronized PHC that no host clock can
+    be compared with): the old primary's line-A packet that starts its longest silence
+    before the end point (within --window-ms). A primary that emits a packet every
+    20 us (METHODOLOGY §17) has no silence but the fault's; a stopped node's packets
+    after SIGCONT (F2) or after its NICs return (F3) come after that silence.
+Also:
+  --new-epoch-seq S  T_new: the first line-A packet carrying output of the new epoch's
+                     records (MoldUDP64 sequence >= S), from the same start point;
+                     packets of the old primary after the takeover that carry such
+                     output are counted (F2, F3: the deposed node sends none);
+  --probe-price P    the release stall (F6, F7): the longest gap between the old
+                     primary's line-A data packets while probe orders (ITCH Add Order
+                     at price P, 4 decimals) were flowing.
+Senders are IP:PORT, IP (any port: the lab's two hosts) or :PORT (one host).
+
+Localhost trials (tests/integration/exchange/ha_trial.h) write kernel software receive
 timestamps, so their T_takeover is indicative only. The lab capture on host C is a
 hardware-timestamped pcap of the same form (tcpdump -j adapter_unsynced
---time-stamp-precision nano); pass its multicast groups as --line-a/--line-b and its
-drop count as --capture-drops (a run is valid only with 0 drops).
+--time-stamp-precision nano); pass its multicast groups as --line-a/--line-b, its drop
+count as --capture-drops (a run is valid only with 0 drops) and --timestamps hardware.
 
 Usage:
-  analyze_pcap.py CAPTURE --line-a [IP:]PORT [--line-b [IP:]PORT] [--fault-ns NS]
-                  [--old-sender IP:PORT] [--new-sender IP:PORT] [--capture-drops N]
-Prints a JSON report. Exit status: 0 ok, 1 no takeover found when --fault-ns was
-given, 2 usage or unreadable capture.
+  analyze_pcap.py CAPTURE --line-a [IP:]PORT [--line-b [IP:]PORT] [--takeover]
+                  [--fault-ns NS [--fault-done-ns NS]] [--window-ms MS]
+                  [--old-sender S] [--new-sender S] [--new-epoch-seq S] [--probe-price P]
+                  [--capture-drops N] [--timestamps software|hardware]
+Prints a JSON report. Exit status: 0 ok, 1 no takeover found when one was asked for
+(--takeover or --fault-ns), 2 usage or unreadable capture.
 """
 import argparse
 import json
@@ -129,6 +151,18 @@ def matches(ep, ip, port):
     return ep is not None and ep[1] == port and (ep[0] is None or ep[0] == ip)
 
 
+def sender_matches(spec, sender):
+    """spec 'IP:PORT', 'IP' or ':PORT' against a packet's 'ip:port' sender."""
+    if spec is None:
+        return True
+    ip, _, port = sender.rpartition(":")
+    if spec.startswith(":"):
+        return port == spec[1:]
+    if ":" in spec:
+        return spec == sender
+    return ip == spec
+
+
 def line_packets(capture, line_a, line_b=None):
     """Every MoldUDP64 packet of the two lines, in capture order:
     dicts {line, ts_ns, sender, session, seq, count, msgs} (sender = 'ip:port')."""
@@ -183,27 +217,86 @@ def summarize(packets):
     return sorted(per.values(), key=lambda s: (s["line"], s["first_ns"]))
 
 
-def takeover(packets, fault_ns, old_sender=None, new_sender=None):
-    """T_takeover per plan 10 §7 on line A, in ns, with the senders it used."""
+def takeover(packets, fault_ns=None, old_sender=None, new_sender=None, fault_done_ns=None, window_ms=10_000,
+             new_epoch_seq=None):
+    """T_takeover per plan 10 §7 on line A, in ns, with the senders and the method it used
+    (see the module comment); T_new with new_epoch_seq."""
     a = [p for p in packets if p["line"] == "A"]
-    before = [p for p in a if p["ts_ns"] <= fault_ns]
     if old_sender is None:
-        if not before:
+        # The first line-A sender of the capture is the primary before the fault.
+        if not a:
             return None
-        counts = {}
-        for p in before:
-            counts[p["sender"]] = counts.get(p["sender"], 0) + 1
-        old_sender = max(counts, key=counts.get)
-    last_old = max((p["ts_ns"] for p in before if p["sender"] == old_sender), default=None)
-    after = [p for p in a if p["ts_ns"] > fault_ns and p["sender"] != old_sender
-             and (new_sender is None or p["sender"] == new_sender)]
-    if not after or last_old is None:
-        return {"old_sender": old_sender, "new_sender": new_sender, "t_takeover_ns": None}
-    first_new = min(after, key=lambda p: p["ts_ns"])
-    return {"old_sender": old_sender, "new_sender": first_new["sender"],
-            "last_old_ns": last_old, "first_new_ns": first_new["ts_ns"],
-            "t_takeover_ns": first_new["ts_ns"] - last_old,
-            "fault_to_first_new_ns": first_new["ts_ns"] - fault_ns}
+        old_sender = a[0]["sender"]
+    old = [p for p in a if sender_matches(old_sender, p["sender"])]
+    cand = [p for p in a if not sender_matches(old_sender, p["sender"])
+            and (new_sender is None or sender_matches(new_sender, p["sender"]))
+            and (fault_ns is None or p["ts_ns"] > fault_ns)]
+    out = {"old_sender": old_sender, "new_sender": new_sender, "t_takeover_ns": None}
+    if not cand or not old:
+        return out
+    first_new = min(cand, key=lambda p: p["ts_ns"])
+    out["new_sender"] = first_new["sender"]
+    out["first_new_ns"] = first_new["ts_ns"]
+    end = first_new["ts_ns"]
+    last_old = None
+    if fault_ns is not None:
+        bound = fault_done_ns if fault_done_ns is not None else fault_ns
+        last_old = max((p["ts_ns"] for p in old if p["ts_ns"] <= bound), default=None)
+        out["method"] = "fault-clock"
+        out["fault_to_first_new_ns"] = end - fault_ns
+    else:
+        # The start of the old primary's longest silence before the end point.
+        ts = sorted(p["ts_ns"] for p in old if end - window_ms * 1_000_000 <= p["ts_ns"] < end)
+        best = None
+        for i, t in enumerate(ts):
+            nxt = ts[i + 1] if i + 1 < len(ts) else end
+            if best is None or nxt - t > best[0]:
+                best = (nxt - t, t)
+        last_old = best[1] if best else None
+        out["method"] = "longest-silence"
+        if best:
+            out["old_packets_in_window"] = len(ts)
+            out["old_packets_after_silence"] = sum(1 for t in ts if t > best[1])
+    if last_old is None:
+        return out
+    out["last_old_ns"] = last_old
+    out["t_takeover_ns"] = end - last_old
+    if new_epoch_seq is not None:
+        first_out = None
+        late = 0
+        for p in a:
+            n = len(p["msgs"])
+            carries_new = n > 0 and p["seq"] + n - 1 >= new_epoch_seq
+            if sender_matches(out["new_sender"], p["sender"]) and p["ts_ns"] >= end and carries_new:
+                if first_out is None or p["ts_ns"] < first_out:
+                    first_out = p["ts_ns"]
+            if sender_matches(old_sender, p["sender"]) and p["ts_ns"] > end and carries_new:
+                late += 1
+        out["new_epoch_seq"] = new_epoch_seq
+        out["t_new_ns"] = first_out - last_old if first_out is not None else None
+        out["old_sender_new_epoch_packets"] = late
+    return out
+
+
+def release_stall(packets, sender, probe_price):
+    """The longest gap between `sender`'s line-A data packets while probes (ITCH Add
+    Order at probe_price) were flowing: (gap ns, gap start ns, probe packets)."""
+    a = [p for p in packets if p["line"] == "A" and sender_matches(sender, p["sender"]) and p["msgs"]]
+    probe_ts = []
+    for p in a:
+        for m in p["msgs"]:
+            if len(m) >= 36 and m[0:1] == b"A" and struct.unpack(">I", m[32:36])[0] == probe_price:
+                probe_ts.append(p["ts_ns"])
+                break
+    if len(probe_ts) < 2:
+        return None
+    lo, hi = probe_ts[0], probe_ts[-1]
+    ts = [p["ts_ns"] for p in a if lo <= p["ts_ns"] <= hi]
+    best = max(((ts[i + 1] - ts[i], ts[i]) for i in range(len(ts) - 1)), default=None)
+    if best is None:
+        return None
+    return {"release_stall_ns": best[0], "stall_start_ns": best[1], "probe_packets": len(probe_ts),
+            "data_packets_in_span": len(ts)}
 
 
 def main(argv=None):
@@ -211,12 +304,21 @@ def main(argv=None):
     ap.add_argument("capture")
     ap.add_argument("--line-a", required=True, help="line A destination [IP:]PORT")
     ap.add_argument("--line-b", help="line B destination [IP:]PORT")
-    ap.add_argument("--fault-ns", type=int, help="fault injection time (capture clock, ns)")
-    ap.add_argument("--old-sender", help="IP:PORT of the old primary's line-A sender")
-    ap.add_argument("--new-sender", help="IP:PORT of the new primary's line-A sender")
-    ap.add_argument("--capture-drops", type=int, default=0, help="drops reported by the capture tool")
+    ap.add_argument("--takeover", action="store_true", help="compute T_takeover (also implied by --fault-ns)")
+    ap.add_argument("--fault-ns", type=int, help="fault injection time (the capture's clock, ns: software captures)")
+    ap.add_argument("--fault-done-ns", type=int, help="the fault command returned (same clock)")
+    ap.add_argument("--window-ms", type=int, default=10_000, help="longest-silence search window before the end point")
+    ap.add_argument("--old-sender", help="the old primary's line-A sender: IP:PORT, IP or :PORT")
+    ap.add_argument("--new-sender", help="the new primary's line-A sender: IP:PORT, IP or :PORT")
+    ap.add_argument("--new-epoch-seq", type=int, help="first MoldUDP64 sequence number of the new epoch's records")
+    ap.add_argument("--probe-price", type=int, help="ITCH price of the probe orders (release stall)")
+    ap.add_argument("--capture-drops", type=int, default=0, help="drops reported by the capture tool (-1: unknown)")
     ap.add_argument("--timestamps", default="software", choices=["software", "hardware"])
     args = ap.parse_args(argv)
+    if args.timestamps == "hardware" and args.fault_ns is not None:
+        print("analyze_pcap: --fault-ns is a host clock reading; a hardware capture's PHC is not comparable "
+              "(omit it: the longest-silence start point)", file=sys.stderr)
+        return 2
     try:
         pk = line_packets(args.capture, parse_endpoint(args.line_a),
                           parse_endpoint(args.line_b) if args.line_b else None)
@@ -226,11 +328,18 @@ def main(argv=None):
     report = {"capture": args.capture, "timestamps": args.timestamps, "capture_drops": args.capture_drops,
               "valid": args.capture_drops == 0, "packets": len(pk), "senders": summarize(pk)}
     status = 0
-    if args.fault_ns is not None:
-        t = takeover(pk, args.fault_ns, args.old_sender, args.new_sender)
+    if args.takeover or args.fault_ns is not None:
+        t = takeover(pk, args.fault_ns, args.old_sender, args.new_sender, args.fault_done_ns, args.window_ms,
+                     args.new_epoch_seq)
         report["takeover"] = t
         if not t or t.get("t_takeover_ns") is None:
             status = 1
+    if args.probe_price is not None:
+        old = args.old_sender
+        if old is None:
+            a = [p for p in pk if p["line"] == "A"]
+            old = a[0]["sender"] if a else None
+        report["release"] = release_stall(pk, old, args.probe_price) if old else None
     print(json.dumps(report, indent=2))
     return status
 

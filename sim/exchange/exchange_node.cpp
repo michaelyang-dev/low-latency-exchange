@@ -54,10 +54,26 @@ ExchangeProc::ExchangeProc(Node& n, const ExchangeDay& day, const NodeParams& p,
     nonce = rng_.next_u64();
   } while (!journal::usable_nonce(nonce));
   sh_->l2.init(reinterpret_cast<std::byte*>(l2_mem_.get()), p_.l2_bytes, nonce);
+  if (p_.paired) {
+    sh_->mirror.store(p_.node_id != p_.initial_primary);
+    sh_->lines.store(p_.node_id == p_.initial_primary ? md::kLineA : md::kLineB);
+  }
   supervisor_ = Supervisor{this};
   n.add_stage(supervisor_, "x-supervisor");
+  rejoin_io_.st = snaps_.get();
+  rejoin_io_.node = &n;
+  rejoin_io_.note_fn = hooks_.log;
 
-  // ---- Node::open_journal (solo) ------------------------------------------------------
+  open_journal();
+  if (!boot_error_.empty()) return;
+  recover_or_start();
+  if (!boot_error_.empty() || rejoin_) return;  // a rejoin builds its stages after the handshake
+  finish_boot();
+}
+
+// ---- Node::open_journal ---------------------------------------------------------------
+void ExchangeProc::open_journal() {
+  Node& n = node_;
   const std::vector<std::uint32_t> ids = d_.session_ids();
   dir_ = std::make_unique<worlds::SimSegmentDir>(n, p_.journal_prefix(d_.date), hooks_.durable);
   prep_ = std::make_unique<SimPreparer>(*dir_, rng_, d_.date, p_.segment_bytes);
@@ -75,14 +91,18 @@ ExchangeProc::ExchangeProc(Node& n, const ExchangeDay& day, const NodeParams& p,
     return;
   }
   engine_ = std::make_unique<engine::Engine>();
-  journal::JournalWriterOptions wo;
-  wo.day = d_.date;
-  writer_ = std::make_unique<SimWriter>(wo);
-  if (auto r = ex::resume_journal_writer(*writer_, *dir_, *prep_, rr, p_.spares); !r) {
-    fail(r.error());
-    return;
+  // A paired node restarting mid-day rejoins (10 §5): the writer opens after the
+  // handshake, which may truncate the journal first. Node::open_journal's decision,
+  // including a restart on an empty journal of a day this node already started.
+  rejoin_ = ex::restart_must_rejoin(p_.paired, recovered_index_,
+                                    n.disk().exists(p_.journal_prefix(d_.date) + "incarnation"));
+  if (!rejoin_) {
+    if (auto r = open_writer(rr); !r) {
+      fail(r.error());
+      return;
+    }
   }
-  if (recovered_index_ != 0) {
+  if (recovered_index_ != 0 && !rejoin_) {
     journal::RecoveryOptions again;
     again.day = d_.date;
     again.repair = false;
@@ -101,33 +121,53 @@ ExchangeProc::ExchangeProc(Node& n, const ExchangeDay& day, const NodeParams& p,
     recovered_ = std::move(*rd);
     if (hooks_.recovered) hooks_.recovered(recovered_);
   }
+}
 
-  // ---- Node::recover_or_start (solo) --------------------------------------------------
-  seq_ring_ = std::make_unique<SimSeqRing>(sh_->l2, nullptr);
+// Node::open_writer: the writer continues after the recovered prefix.
+std::expected<void, std::string> ExchangeProc::open_writer(const journal::RecoveryResult& rr) {
+  journal::JournalWriterOptions wo;
+  wo.day = d_.date;
+  writer_ = std::make_unique<SimWriter>(wo);
+  return ex::resume_journal_writer(*writer_, *dir_, *prep_, rr, p_.spares);
+}
+
+// ---- Node::recover_or_start -----------------------------------------------------------
+void ExchangeProc::recover_or_start() {
+  if (p_.paired) {
+    rlog_ = std::make_unique<SimRecordLog>(p_.repl_log_bytes, p_.repl_log_bytes / 64, p_.journal_prefix(d_.date),
+                                           d_.date, SimL3Opener{&node_}, &hooks_.held);
+  }
+  seq_ring_ = std::make_unique<SimSeqRing>(sh_->l2, rlog_.get());
   seq::SequencerConfig sc;
   sc.snapshot_every = p_.snapshot_every;
   sc.timer_batch = 64;
   sequencer_ =
       std::make_unique<SimSequencer>(clock_, sh_->ouch, sh_->events, sh_->admin, *seq_ring_, d_.day->timers(), sc);
   driver_ = std::make_unique<SimSeqDriver>(*sh_, clock_, *sequencer_, d_.day->timers(), p_.auto_end);
+  if (rejoin_) {
+    begin_rejoin();
+    return;
+  }
   {
     ex::OutlogPositions pos = ex::outlog_positions(*outlog_);
     soup_next_ = std::move(pos.soup_next);
     itch_next_ = pos.itch_next;
   }
   if (recovered_index_ == 0) {
+    if (rlog_) rlog_->reset(journal::ChainState{});
     ex::DayStartParams dp;
     dp.date = d_.date;
     dp.local_midnight = d_.local_midnight;
     dp.build_id = ex::kBuildId;
     dp.mold_session = d_.mold_session;
     dp.soup_session = d_.soup_session;
-    dp.primary = p_.node_id;
+    dp.primary = p_.paired ? p_.initial_primary : p_.node_id;
     if (!ex::start_fresh_day(*sequencer_, clock_, dp, d_.day->config())) {
       fail("day start: the L2 ring cannot hold the day's configuration");
       return;
     }
     sh_->sequenced.store(sequencer_->chain().last_index);
+    if (p_.paired) (void)rejoin_io_.write_incarnation(p_.journal_prefix(d_.date) + "incarnation", 1);
   } else {
     ex::continue_day(*sequencer_, clock_, *sh_, recovered_);
     if (hooks_.log) {
@@ -137,15 +177,168 @@ ExchangeProc::ExchangeProc(Node& n, const ExchangeDay& day, const NodeParams& p,
       hooks_.log("exchanged: live instances at the restart:" + live);
     }
   }
+}
 
-  // ---- Node::build_stages (solo) ------------------------------------------------------
+ex::ReplStageConfig ExchangeProc::repl_config(std::uint64_t incarnation, std::uint64_t digest) const {
+  ex::ReplStageConfig rc;
+  rc.repl.self = static_cast<repl::NodeId>(p_.node_id);
+  rc.repl.incarnation = incarnation;
+  rc.repl.build_id = ex::kBuildId;
+  rc.repl.config_digest = digest;
+  rc.repl.heartbeat_ns = p_.ha_heartbeat;
+  rc.repl.t_d = p_.t_d;
+  rc.repl.t_ack = p_.t_ack;
+  rc.repl.rejoin_retry_ns = p_.rejoin_retry;
+  rc.repl.rto_ns = p_.ha_rto;
+  rc.bind = p_.ha_bind;
+  rc.peer = p_.ha_peer;
+  rc.witness = p_.witness;
+  rc.initial_primary = static_cast<repl::NodeId>(p_.initial_primary);
+  rc.peer_incarnation = 1;
+  for (const auto& s : d_.sessions) rc.sessions.push_back(s.session_id);
+  return rc;
+}
+
+// ---- Node::rejoin (10 §5) ------------------------------------------------------------
+// RECOVERING with a new incarnation; the handshake runs as the image's only stage (with
+// the supervisor) until the engine is reloaded, then the stages are built.
+void ExchangeProc::begin_rejoin() {
+  rejoin_parts_ = std::make_unique<SimRejoinParts>(SimRejoinParts{
+      .dir = *dir_,
+      .prep = *prep_,
+      .rlog = *rlog_,
+      .sh = *sh_,
+      .engine = *engine_,
+      .out = *outlog_,
+      .recovered = recovered_,
+      .recovered_index = recovered_index_,
+      .date = d_.date,
+      .layout = ex::RecoveryLayout{p_.outlog_root(), d_.date, d_.session_ids()},
+      .config = d_.day->config(),
+      .snapshots_dir = p_.snapshots_dir(d_.date),
+      .replay_snapshots = p_.use_snapshots ? p_.snapshots_dir(d_.date) : std::string(),
+      .incarnation_path = p_.journal_prefix(d_.date) + "incarnation"});
+  const auto begun = ex::begin_rejoin(rejoin_io_, *rejoin_parts_);
+  if (!begun) {
+    fail(begun.error());
+    return;
+  }
+  repl_ = std::make_unique<SimReplStage>(*sh_, clock_, *sequencer_, *driver_, *rlog_,
+                                         repl_config(begun->incarnation, begun->config_digest), metrics_, false);
+  if (auto r = repl_->start_recovering(begun->config_digest, ex::rejoin_hooks(rejoin_io_, *rejoin_parts_)); !r) {
+    fail(r.error());
+    return;
+  }
+  if (hooks_.log)
+    hooks_.log(std::format("exchanged: rejoin: incarnation {}, journal at {}", begun->incarnation, recovered_index_));
+  if (hooks_.rejoining) hooks_.rejoining(begun->incarnation);
+  rejoin_from_ = recovered_index_;
+  node_.add_stage(repl_host_, "x-seq");
+}
+
+void ExchangeProc::complete_rejoin() {
+  NodeBinding bind(node_, eph_);
+  rejoined_ = true;
+  const auto role = ex::finish_rejoin(*rejoin_parts_, *repl_, clock_,
+                                      [this](const journal::RecoveryResult& rr) { return open_writer(rr); });
+  if (!role) {
+    fail(role.error());
+    return;
+  }
+  {
+    ex::OutlogPositions pos = ex::outlog_positions(*outlog_);
+    soup_next_ = std::move(pos.soup_next);
+    itch_next_ = pos.itch_next;
+  }
+  if (hooks_.log) {
+    hooks_.log(std::format("exchanged: rejoin: {} {}",
+                           *role == repl::Role::kSoloPrimary ? "resumed as the solo primary at" : "catching up from",
+                           recovered_index_));
+  }
+  if (hooks_.rejoined) hooks_.rejoined(*role, recovered_index_, rejoin_from_);
+  finish_boot();
+}
+
+bool ExchangeProc::repl_poll() {
+  if (exited_ || stopping_) return false;
+  try {
+    if (rejoin_ && !rejoined_) {
+      const bool did = repl_->poll_prestart();
+      if (!repl_->handshake_done()) return did;
+      complete_rejoin();
+      return true;
+    }
+    return repl_->poll();
+  } catch (const ProcessExit& e) {
+    exit_process(e.code);
+    return true;
+  }
+}
+
+void ExchangeProc::exit_process(int code) {
+  exited_ = true;
+  if (hooks_.exited) hooks_.exited(code);
+  node_.request_crash();
+}
+
+std::uint64_t ExchangeProc::RejoinIo::read_incarnation(const std::string& path) {
+  const auto b = st->read_all(path);
+  if (!b) return 1;
+  std::uint64_t v = 0;
+  bool digits = false;
+  for (const std::byte c : *b) {
+    const char ch = static_cast<char>(c);
+    if (ch < '0' || ch > '9') break;
+    v = v * 10 + static_cast<std::uint64_t>(ch - '0');
+    digits = true;
+  }
+  return !digits || v == 0 ? 1 : v;  // a day started before incarnations were recorded
+}
+
+// As node.cpp's write_incarnation: temp file, sync, rename, directory sync.
+bool ExchangeProc::RejoinIo::write_incarnation(const std::string& path, std::uint64_t v) {
+  const std::string text = std::to_string(v) + "\n";
+  const std::string tmp = path + ".tmp";
+  const int h = st->create(tmp);
+  if (h < 0) return false;
+  const bool ok = st->write_at(h, 0, std::as_bytes(std::span<const char>(text.data(), text.size()))) == 0 &&
+                  st->sync(h, false) == 0;
+  (void)st->close(h);
+  if (!ok || st->rename(tmp, path) != 0) return false;
+  const std::size_t slash = path.rfind('/');
+  return st->sync_dir(slash == std::string::npos ? std::string(".") : path.substr(0, slash)) == 0;
+}
+
+std::vector<std::uint64_t> ExchangeProc::RejoinIo::remove_snapshots_above(const std::string& dir, std::uint64_t t) {
+  std::vector<std::uint64_t> removed;
+  for (const std::string& name : st->list(dir)) {
+    if (const auto i = snap::parse_snapshot_file_name(name); i && *i > t) {
+      (void)st->remove(dir + "/" + name);
+      removed.push_back(*i);
+    }
+  }
+  return removed;
+}
+
+// ---- Node::build_stages, Node::start_net, Node::run's hosting ---------------------------
+void ExchangeProc::finish_boot() {
+  Node& n = node_;
+  NodeBinding bind(n, eph_);
+  const bool paired = p_.paired;
   ex::EngineStageConfig ec;
-  ec.hash_interval = 0;
+  ec.hash_interval = paired ? 65'536 : 0;
   engine_stage_ = std::make_unique<SimEngineStage>(*sh_, *engine_, ec, recovered_index_, clock_);
   if (recovered_index_ != 0) engine_stage_->set_totals(recovered_.itch_total, recovered_.soup_total);
-  io_stage_ = std::make_unique<SimIoStage>(*sh_, *dir_, *prep_, *writer_, *outlog_, p_.spares, true, clock_);
+  io_stage_ = std::make_unique<SimIoStage>(*sh_, *dir_, *prep_, *writer_, *outlog_, p_.spares, !paired, clock_);
   seq_ring_->set_meter(&driver_->meter());
-  seq_stage_ = std::make_unique<SimSeqStage>(*driver_);
+  if (paired) {
+    if (!repl_) {
+      repl_ = std::make_unique<SimReplStage>(*sh_, clock_, *sequencer_, *driver_, *rlog_,
+                                             repl_config(1, sequencer_->config_digest()), metrics_, false);
+    }
+  } else {
+    seq_stage_ = std::make_unique<SimSeqStage>(*driver_);
+  }
 
   // ---- Node::start_net ------------------------------------------------------------------
   tap_ouch_ = TapOuchQueue{&sh_->ouch, &hooks_.taps};
@@ -215,7 +408,19 @@ ExchangeProc::ExchangeProc(Node& n, const ExchangeDay& day, const NodeParams& p,
     }
   }
 
-  n.add_stage(*seq_stage_, "x-seq");
+  // Node::run: a paired day's replica starts paired once the stages exist; the seq
+  // stage is the ReplStage (no repl_thread), registered first on a rejoin.
+  if (repl_ && !repl_->started()) {
+    if (auto r = repl_->start(sequencer_->config_digest()); !r) {
+      fail(r.error());
+      return;
+    }
+  }
+  if (paired) {
+    if (!rejoin_) n.add_stage(repl_host_, "x-seq");
+  } else {
+    n.add_stage(*seq_stage_, "x-seq");
+  }
   n.add_stage(*engine_stage_, "x-engine");
   n.add_stage(*io_stage_, "x-io");
   n.add_stage(*gw_[0], "x-gw0");

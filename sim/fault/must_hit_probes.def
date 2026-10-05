@@ -30,7 +30,10 @@ LLE_MUST_HIT("soup.relogin_mid_stream", false, false)  // ServerSession, soupbin
 // snapshotd's follower publishes a snapshot while an auction collects interest (the
 // opening or closing freeze, or a halt), exchange world: 74 hits in 60 seeds.
 LLE_MUST_HIT("snap.during_auction", false, false)
-LLE_MUST_HIT("ha.halt_reopen_cross_spans_failover", false, true)
+// A halt whose reopening cross runs in a later epoch under another primary (the Halt and
+// the Resume journaled in epochs with different primaries), exchange_ha world: 10 hits in
+// 60 seeds.
+LLE_MUST_HIT("ha.halt_reopen_cross_spans_failover", false, false)
 LLE_MUST_HIT("ha.witness_unreachable_during_promotion", true, false)  // witness world
 LLE_MUST_HIT("repl.rejoin_truncates_divergent_tail", true, false)  // ha world
 // A fill of a COD session sequenced after its gateway pushed the Disconnect and before

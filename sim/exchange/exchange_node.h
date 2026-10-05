@@ -1,6 +1,6 @@
 #pragma once
 // One exchanged node as a simulated process image (09 §2; apps/exchanged/node.cpp,
-// solo mode): the production stages seq, engine, io, gw0, gw1, md (MoldUDP64 lines
+// solo or paired mode): the production stages seq, engine, io, gw0, gw1, md (MoldUDP64 lines
 // and re-request server) and the GLIMPSE server over the shared queues and rings
 // (apps/exchanged/shared.h), started on a fresh day or recovered from the journal
 // through the production start-up and recovery steps (start_impl.h, recovery_impl.h),
@@ -12,6 +12,16 @@
 // journal basic_replay_day (snapshots with output digests, or the whole day) ->
 // sequencer and driver -> outlog_positions -> start_fresh_day | continue_day ->
 // engine and io stages -> gateways, md, GLIMPSE (republish_from).
+//
+// Paired (10 §3-§5; NodeParams::paired): the record log (record_log.h on the node's
+// disk), the replication stage (repl_stage.h, BasicReplStage, hosting the sequencer as
+// Node does without repl_thread) talking to the peer and the witness over the simulated
+// network. A fresh day starts both nodes from identical day-start records and the
+// replica starts paired (Node::run); a restart mid-day rejoins through the production
+// sequence (start_impl.h: begin_rejoin, the handshake with truncate_journal_to and
+// reload_to as hooks, finish_rejoin), the handshake polled as the image's first stage
+// as Node::rejoin polls it before any stage starts. Env::exit (a deposed node, a
+// rejoin that must restart, a failed reload) ends the process image.
 //
 // Not modeled: threads and the core map (the scheduler interleaves the stages, one
 // poll at a time), the admin and control ports (the world pushes Admin messages into
@@ -33,8 +43,11 @@
 #include "engine/records.h"
 #include "exchanged/engine_stage.h"
 #include "exchanged/io_stage.h"
+#include "exchanged/record_log.h"
 #include "exchanged/recovery.h"
+#include "exchanged/repl_stage.h"
 #include "exchanged/seq_stage.h"
+#include "exchanged/start_impl.h"
 #include "exchanged/shared.h"
 #include "gateway/credentials.h"
 #include "gateway/gateway.h"
@@ -45,6 +58,7 @@
 #include "md/publisher.h"
 #include "outlog/day.h"
 #include "outlog/reader.h"
+#include "repl/types.h"
 #include "sequencer/engine_day.h"
 #include "sim/exchange/sim_clock.h"
 #include "sim/exchange/sim_net.h"
@@ -59,13 +73,71 @@ namespace lle::sim::exch {
 using SimOutDay = outlog::BasicOutlogDay<SimNodeOutlogFs>;
 using SimWriter = journal::JournalWriter<worlds::SimJournalDevice>;
 using SimPreparer = journal::SegmentPreparer<worlds::SimSegmentDir, Rng>;
-using SimSeqEnv = lle::exch::BasicSeqEnv<SimNodeClock>;
+// The record log reads the node's journal back read-only (record_log.h, PosixL3Opener).
+struct SimL3Opener {
+  Node* node = nullptr;
+  [[nodiscard]] std::expected<SimReadOnlySegmentDir, std::string> operator()(const std::string& dir) const {
+    return SimReadOnlySegmentDir(*node, dir);
+  }
+};
+// The record log, every append reported: what the node holds (its L2 and record log),
+// sequenced here or replicated from the primary (the Output Rule's "held by both").
+// The appends shadow the base's (BasicReplStage and BasicSeqRing call them on this type).
+class SimRecordLog : public lle::exch::BasicRecordLog<SimL3Opener> {
+ public:
+  using Base = lle::exch::BasicRecordLog<SimL3Opener>;
+  using Held = std::function<void(std::uint64_t index, std::uint32_t crc)>;
+  SimRecordLog(std::size_t arena_bytes, std::size_t max_records, std::string l3_dir, std::uint32_t day,
+               SimL3Opener open, const Held* held)
+      : Base(arena_bytes, max_records, std::move(l3_dir), day, open), held_(held) {}
+  bool append_from(const std::byte* rec, std::uint32_t len, const journal::Sealer& src) noexcept {
+    if (!Base::append_from(rec, len, src)) return false;
+    note();
+    return true;
+  }
+  bool append_canonical(std::span<const std::byte> rec) noexcept {
+    if (!Base::append_canonical(rec)) return false;
+    note();
+    return true;
+  }
+
+ private:
+  void note() noexcept {
+    if (held_ != nullptr && *held_) (*held_)(tail().last_index, tail().last_crc);
+  }
+  const Held* held_;
+};
+using SimSeqEnv = lle::exch::BasicSeqEnv<SimNodeClock, SimRecordLog>;
 using SimSequencer = seq::Sequencer<SimSeqEnv>;
-using SimSeqRing = lle::exch::BasicSeqRing<SimNodeClock>;
+using SimSeqRing = lle::exch::BasicSeqRing<SimNodeClock, SimRecordLog>;
 using SimSeqDriver = lle::exch::BasicSeqDriver<SimNodeClock, SimSequencer>;
 using SimSeqStage = lle::exch::BasicSeqStage<SimSeqDriver>;
 using SimEngineStage = lle::exch::BasicEngineStage<SimNodeClock>;
 using SimIoStage = lle::exch::BasicIoStage<worlds::SimSegmentDir, SimWriter, SimPreparer, SimOutDay, SimNodeClock>;
+
+// exchanged ends: std::_Exit in ReplEnv::exit. Here the process image ends (the stage
+// that caught it requests the crash; the supervisor restarts the image).
+struct ProcessExit {
+  int code = 0;
+};
+// The metrics segment is not modeled (publish_metrics is never called).
+struct SimMetrics {
+  template <class... A>
+  void set(A&&...) noexcept {}
+  template <class... A>
+  void set_work(A&&...) noexcept {}
+};
+struct SimReplEnv {
+  using Clock = SimNodeClock;
+  using Udp = SimUdpPort;
+  using Metrics = SimMetrics;
+  using Log = SimRecordLog;
+  using Sequencer = SimSequencer;
+  using Driver = SimSeqDriver;
+  [[noreturn]] static void exit(int code) { throw ProcessExit{code}; }
+};
+using SimReplStage = lle::exch::BasicReplStage<SimReplEnv>;
+using SimRejoinParts = lle::exch::RejoinParts<worlds::SimSegmentDir, SimPreparer, SimRecordLog, SimOutDay>;
 
 // The gateways' input queues are the node's SCQs (shared.h), seen through taps that
 // report every accepted push to the world: the gateway calls try_push only, and a tap
@@ -181,6 +253,18 @@ struct NodeParams {
   std::size_t max_packet_b = 1000;
   Nanos md_heartbeat = kNsPerSec;
   Nanos md_eos_linger = 30 * kNsPerSec;
+  // Paired mode (ExchangeConfig [ha]): node ids 0 and 1.
+  bool paired = false;
+  std::uint16_t initial_primary = 0;
+  env::Endpoint ha_bind{};  // this node's data-plane endpoint
+  env::Endpoint ha_peer{};  // the partner's
+  env::Endpoint witness{};  // witnessd
+  Nanos ha_heartbeat = 1'000'000;
+  Nanos t_d = 50'000'000;
+  Nanos t_ack = 25'000'000;
+  Nanos rejoin_retry = 5'000'000;
+  Nanos ha_rto = 2'000'000;
+  std::size_t repl_log_bytes = std::size_t{8} << 20;
 
   [[nodiscard]] std::string journal_prefix(std::uint32_t date) const;
   [[nodiscard]] std::string outlog_root() const;
@@ -196,6 +280,10 @@ struct NodeHooks {
   std::function<void(const engine::Engine&, std::uint64_t)> snapshot_written;  // snapshotd published one
   NodeTaps taps;                                                               // the gateways' pushes
   worlds::JournalDurableObserver* durable = nullptr;                           // journal writes made durable
+  std::function<void(int code)> exited;                                        // Env::exit (paired: deposed, rejoin)
+  std::function<void(std::uint64_t incarnation)> rejoining;                    // a paired restart began its handshake
+  std::function<void(repl::Role, std::uint64_t index, std::uint64_t truncated_from)> rejoined;  // ...finished it
+  SimRecordLog::Held held;                                                     // paired: a record appended to L2
 };
 
 class ExchangeProc final : public Process {
@@ -219,6 +307,9 @@ class ExchangeProc final : public Process {
   [[nodiscard]] const SimEngineStage* engine_stage() const noexcept { return engine_stage_.get(); }
   [[nodiscard]] const SimSnapshotter* follower() const noexcept { return follower_.get(); }
   [[nodiscard]] const SimSequencer* sequencer() const noexcept { return sequencer_.get(); }
+  [[nodiscard]] const SimReplStage* repl() const noexcept { return repl_.get(); }
+  [[nodiscard]] const SimRecordLog* record_log() const noexcept { return rlog_.get(); }
+  [[nodiscard]] bool rejoining() const noexcept { return rejoin_ && !rejoined_; }
   // Quiescent: everything sequenced is applied, durable, released and handed on by every
   // egress consumer (the control port's `sync` condition, node.cpp).
   [[nodiscard]] bool settled() const noexcept;
@@ -232,11 +323,33 @@ class ExchangeProc final : public Process {
     ExchangeProc* p;
     bool poll() { return p->follow(); }
   };
+  // The seq thread of a paired node (Node::run hosts the ReplStage as "seq"), and before
+  // it the rejoin handshake (Node::rejoin's loop).
+  struct ReplHost {
+    ExchangeProc* p;
+    bool poll() { return p->repl_poll(); }
+  };
+  // The rejoin steps' storage (start_impl.h Io) on the node's disk.
+  struct RejoinIo : SimRecoveryIo {
+    std::uint64_t read_incarnation(const std::string& path);
+    bool write_incarnation(const std::string& path, std::uint64_t v);
+    std::vector<std::uint64_t> remove_snapshots_above(const std::string& dir, std::uint64_t t);
+    void warn(const std::string& line) { note(line); }
+  };
 
   void fail(std::string why);
   bool supervise();
   bool follow();
   void start_follower();
+  void open_journal();
+  void recover_or_start();
+  std::expected<void, std::string> open_writer(const journal::RecoveryResult& rr);
+  void begin_rejoin();
+  void complete_rejoin();
+  void finish_boot();
+  bool repl_poll();
+  void exit_process(int code);
+  [[nodiscard]] lle::exch::ReplStageConfig repl_config(std::uint64_t incarnation, std::uint64_t digest) const;
 
   Node& node_;
   const ExchangeDay& d_;
@@ -253,10 +366,15 @@ class ExchangeProc final : public Process {
   std::unique_ptr<SimWriter> writer_;
   std::unique_ptr<SimOutDay> outlog_;
   std::unique_ptr<engine::Engine> engine_;
+  std::unique_ptr<SimRecordLog> rlog_;
   std::unique_ptr<SimSeqRing> seq_ring_;
   std::unique_ptr<SimSequencer> sequencer_;
   std::unique_ptr<SimSeqDriver> driver_;
   std::unique_ptr<SimSeqStage> seq_stage_;
+  std::unique_ptr<SimReplStage> repl_;
+  SimMetrics metrics_;
+  RejoinIo rejoin_io_;
+  std::unique_ptr<SimRejoinParts> rejoin_parts_;
   std::unique_ptr<SimEngineStage> engine_stage_;
   std::unique_ptr<SimIoStage> io_stage_;
   TapOuchQueue tap_ouch_;
@@ -267,14 +385,19 @@ class ExchangeProc final : public Process {
   std::unique_ptr<SimSnapshotter> follower_;
   Supervisor supervisor_{this};
   Follower follower_stage_{this};
+  ReplHost repl_host_{this};
   lle::exch::RecoveredDay recovered_;
   std::uint64_t recovered_index_ = 0;
+  std::uint64_t rejoin_from_ = 0;  // the journal's end when the rejoin began
   std::vector<std::pair<std::uint32_t, SeqNo>> soup_next_;
   SeqNo itch_next_ = 1;
   Nanos next_follow_ = 0;
   bool follower_failed_ = false;
   bool started_ = false;
   bool stopping_ = false;
+  bool rejoin_ = false;    // a paired node restarting mid-day (10 §5)
+  bool rejoined_ = false;  // its handshake finished and the stages are built
+  bool exited_ = false;    // Env::exit ended the image
   std::string boot_error_;
 };
 

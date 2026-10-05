@@ -26,5 +26,59 @@
    "signature": "O-OUTPUT-COMMIT:61629:0x28ecb60b6eccdfa9",
    "world": "exchange"
   }
+ },
+ "955ba23f10b18bd6741eef17a0e851bde38b915a": {
+  "O-COD": {
+   "campaign_id": "phase4-final-exchange-20000",
+   "dirty": true,
+   "events": 35276,
+   "exsim_args": [
+    "--mode=swarm",
+    "--world=exchange",
+    "--check-determinism"
+   ],
+   "seed": "0xf04cda43d9d83501",
+   "signature": "O-COD:35276:0x69fabf20e121c22c",
+   "world": "exchange"
+  },
+  "O-LIVE": {
+   "campaign_id": "phase4-final-exchange_ha-20000",
+   "dirty": true,
+   "events": 20749170,
+   "exsim_args": [
+    "--mode=swarm",
+    "--world=exchange_ha",
+    "--check-determinism"
+   ],
+   "seed": "0xf04cda43d9d81dd7",
+   "signature": "O-LIVE:20749170:0x77fd32fd4725b7f4",
+   "world": "exchange_ha"
+  },
+  "O-RECOVER": {
+   "campaign_id": "phase4-final-exchange_ha-20000",
+   "dirty": true,
+   "events": 45315,
+   "exsim_args": [
+    "--mode=swarm",
+    "--world=exchange_ha",
+    "--check-determinism"
+   ],
+   "seed": "0xf04cda43d9d82b3b",
+   "signature": "O-RECOVER:45315:0xaae1d53c8910f344",
+   "world": "exchange_ha"
+  },
+  "O-STREAM": {
+   "campaign_id": "phase4-final-exchange_ha-20000",
+   "dirty": true,
+   "events": 1750145,
+   "exsim_args": [
+    "--mode=swarm",
+    "--world=exchange_ha",
+    "--check-determinism"
+   ],
+   "seed": "0xf04cda43d9d808ed",
+   "signature": "O-STREAM:1750145:0x48083a122f4abeaf",
+   "world": "exchange_ha"
+  }
  }
 }

@@ -96,6 +96,7 @@ TEST(NoAlloc, SequencerRingAndWriterHotPaths) {
   }
   rig.start();
   rig.seq->reserve_first(4);  // cold: the list of session events that go first (ADR-032)
+  rig.seq->reserve_ahead(4);  // cold: a promotion's re-injected input
   std::uint64_t engine_seen = 0;
   const auto run = [&](int rounds) {
     for (int round = 0; round < rounds; ++round) {
@@ -104,6 +105,7 @@ TEST(NoAlloc, SequencerRingAndWriterHotPaths) {
       if (round % 7 == 0) {
         for (std::uint16_t k = 0; k < 3; ++k)
           (void)rig.seq->inject_first(SessionEventMsg{2, k, journal::SessionEventKind::InstanceDown, 0});
+        for (std::uint8_t k = 0; k < 3; ++k) (void)rig.seq->inject_ahead(Rig::ouch_msg(3, k));
       }
       (void)rig.seq->poll();
       engine_seen += rig.ring.drain(1, [](const journal::RecordView&) {}, 1000);
@@ -127,6 +129,7 @@ TEST(NoAlloc, SequencerRingAndWriterHotPaths) {
   EXPECT_GT(rig.seq->stats().timers, 0u);
   EXPECT_GT(rig.seq->stats().snapshot_marks, 0u);
   EXPECT_GT(rig.seq->stats().first, 0u);
+  EXPECT_GT(rig.seq->stats().ahead, 0u);
 }
 
 // The list of session events that go first (ADR-032): after reserve_first, injecting,

@@ -1,0 +1,72 @@
+# The T25 lab: hosts A (primary), B (backup) and C (witness, clients, the hardware
+# capture), as bench/failover/run_trials.py --lab drives them (METHODOLOGY §17; plan 10
+# §7). The runner runs on host C. Every TBD_BY_LAB value is a lab fact recorded at M3
+# bring-up (lab/hosts/); TBD_BY_PILOT values come from labelled pilots (METHODOLOGY §18).
+# The runner refuses this file while any TBD_ value remains, and so does
+# lab/run_campaign.sh for lab/campaigns/t25.toml.
+name = "t25-lab"
+t25 = true                   # results from this lab can count for T25
+timestamps = "hardware"      # host C's capture: NIC hardware timestamps, one PHC
+repo = "TBD_BY_LAB"          # the repository checkout on hosts A and B (same path on both)
+build = "TBD_BY_LAB"         # the bench build on hosts A and B (same commit as host C's)
+state = "/var/tmp/lle-t25"   # per-node state on its host (pid, exit status, output)
+deploy = "scp -q {local} {ssh}:{remote}"   # puts a rendered configuration on a host
+ssh_options = "-o BatchMode=yes -o ConnectTimeout=3"
+
+# Every node, then per node, "section.key = value" for the rendered configurations.
+common_overrides = [
+  "md.heartbeat_us = 20",               # >= 1 line packet per 20 us from the primary (§17 load)
+  "node.backend = TBD_BY_PILOT",        # the gateway and md backend of the T20 pilots
+  "md.multicast_if = TBD_BY_LAB",       # the data NIC that carries the lines
+  "md.ttl = 1",
+]
+
+[c]
+ip = "TBD_BY_LAB"            # host C's address on the lab network (witnessd, clients)
+witness_port = 7400
+capture_iface = "TBD_BY_LAB" # the capture port (mlx5; ethtool -T: hardware-receive, rx-filter all)
+# Hardware timestamps on the receive path (plan 10 §7); drops are read from tcpdump's
+# report on {stderr} ("N packets dropped by kernel / by interface").
+capture_start = "sudo -n tcpdump -i {iface} -j adapter_unsynced --time-stamp-precision nano -B 524288 -w {pcap} 'udp and (dst host {group_a} or dst host {group_b})' 2> {stderr} & echo $! > {trial}/capture.pid"
+capture_stop = "sudo -n kill -INT $(cat {trial}/capture.pid); for i in $(seq 1 50); do sudo -n kill -0 $(cat {trial}/capture.pid) 2>/dev/null || exit 0; sleep 0.1; done"
+capture_settle_ms = 1000
+
+[lines]
+a = "TBD_BY_LAB"             # line A's multicast group IP:PORT
+b = "TBD_BY_LAB"             # line B's
+
+[a]
+ssh = "TBD_BY_LAB"           # user@host over the management network (stays up when the data NICs go down, F3)
+ip = "TBD_BY_LAB"            # the node's address on the lab network (gateways, control, re-request)
+repl = "TBD_BY_LAB"          # IP:PORT of its end of the A-B replication link
+data_dir = "TBD_BY_LAB"      # on the PLP NVMe (06 §6)
+conf = "/var/tmp/lle-t25/haA.conf"
+nics = ["TBD_BY_LAB"]        # every data NIC (F3: all down)
+nics_restore = "TBD_BY_LAB"  # puts back the routes "ip link set down" dropped (e.g. networkctl reconfigure <if>)
+sudo = "sudo -n"
+power_off = "TBD_BY_LAB"     # F5, run on host C: e.g. ipmitool -I lanplus -H <bmc> -U <user> -E chassis power off
+power_on = "TBD_BY_LAB"
+ports = { gw0 = 15000, gw1 = 15001, rerequest = 26479, control = 17000, admin = 17001 }
+overrides = ["cores.gw0 = TBD_BY_LAB", "cores.gw1 = TBD_BY_LAB", "cores.seq = TBD_BY_LAB", "cores.engine = TBD_BY_LAB", "cores.md = TBD_BY_LAB", "cores.io = TBD_BY_LAB"]  # host A's core map (01 §7)
+
+[b]
+ssh = "TBD_BY_LAB"
+ip = "TBD_BY_LAB"
+repl = "TBD_BY_LAB"
+data_dir = "TBD_BY_LAB"
+conf = "/var/tmp/lle-t25/haB.conf"
+nics = ["TBD_BY_LAB"]
+nics_restore = "TBD_BY_LAB"
+sudo = "sudo -n"
+power_off = "TBD_BY_LAB"
+power_on = "TBD_BY_LAB"
+ports = { gw0 = 15000, gw1 = 15001, rerequest = 26479, control = 17000, admin = 17001 }
+overrides = ["cores.gw0 = TBD_BY_LAB", "cores.gw1 = TBD_BY_LAB", "cores.seq = TBD_BY_LAB", "cores.engine = TBD_BY_LAB", "cores.md = TBD_BY_LAB", "cores.io = TBD_BY_LAB"]
+
+[link]
+cut = "TBD_BY_LAB"           # F6: the managed switch shuts the A-B link's port(s)
+heal = "TBD_BY_LAB"
+
+[load]
+start = "TBD_BY_LAB"         # F10 (M14): loadgen on host C at the paired-mode T20 rate, in the background
+stop = "TBD_BY_LAB"

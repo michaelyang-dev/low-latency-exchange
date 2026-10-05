@@ -163,9 +163,11 @@ void hit_probe_macro() {
 
 TEST(Probes, CountsStatusAndMustHitReport) {
   ProbeRegistry p;
-  // The default manifest is loaded: plan 09 §8 probes, mostly pending.
+  // The default manifest is loaded: plan 09 §8 probes (none pending any more).
   EXPECT_EQ(ProbeRegistry::status(*p.site("disk.ooo_persist_at_crash", true)), ProbeStatus::Missing);
-  EXPECT_EQ(ProbeRegistry::status(*p.site("ha.halt_reopen_cross_spans_failover", false)), ProbeStatus::Pending);
+  EXPECT_EQ(ProbeRegistry::status(*p.site("ha.halt_reopen_cross_spans_failover", false)), ProbeStatus::Missing);
+  p.declare("t.pending", false, true);  // a component not landed yet: reported, never missing
+  EXPECT_EQ(ProbeRegistry::status(*p.site("t.pending", false)), ProbeStatus::Pending);
   p.declare("t.a", false);
   p.declare("t.rare", true);
   auto missing = p.missing(false);

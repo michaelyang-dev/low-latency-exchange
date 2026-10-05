@@ -79,6 +79,31 @@ TEST(ExchangeConfig, HaRetransmissionDefaultsAreTheCoresAndCanBeSet) {
   EXPECT_NE(z.error().find("rto_ms"), std::string::npos) << z.error();
 }
 
+// The keys a takeover trial needs (T25): the md heartbeat in microseconds (the later of
+// heartbeat_ms / heartbeat_us wins) and the witness link's local address (default: the
+// kernel's choice, so a dedicated A-B link the witness cannot reach is no obstacle).
+TEST(ExchangeConfig, TakeoverTrialKeys) {
+  auto d = parse_config(base());
+  ASSERT_TRUE(d.has_value()) << d.error();
+  EXPECT_EQ(d->md_heartbeat, kNsPerSec);
+  EXPECT_EQ(d->witness_bind, 0u);
+  auto c = parse_config(base() + "[md]\nheartbeat_ms = 200\nheartbeat_us = 20\n[ha]\nwitness_bind = 10.0.0.1\n");
+  ASSERT_TRUE(c.has_value()) << c.error();
+  EXPECT_EQ(c->md_heartbeat, 20'000);
+  EXPECT_EQ(c->witness_bind, 0x0A000001u);
+  auto later = parse_config(base() + "[md]\nheartbeat_us = 20\nheartbeat_ms = 3\n");
+  ASSERT_TRUE(later.has_value()) << later.error();
+  EXPECT_EQ(later->md_heartbeat, 3'000'000);
+  EXPECT_EQ(d->restart_loop_limit, 3u);
+  auto lim = parse_config(base() + "[ha]\nrestart_loop_limit = 0\n");
+  ASSERT_TRUE(lim.has_value()) << lim.error();
+  EXPECT_EQ(lim->restart_loop_limit, 0u);
+  for (const char* bad : {"[md]\nheartbeat_us = 0\n", "[ha]\nwitness_bind = 10.0.0\n"}) {
+    const auto z = parse_config(base() + bad);
+    EXPECT_FALSE(z.has_value()) << bad;
+  }
+}
+
 // The I/O variants (07 §1, METHODOLOGY §14): every backend from configuration, the
 // IRQ-suspend sub-variant as busypoll plus its device setting, and [xsk] placements.
 TEST(ExchangeConfig, VariantsAndTheirSettings) {

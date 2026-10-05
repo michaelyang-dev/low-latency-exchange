@@ -60,6 +60,7 @@ struct SplitRepl {
     std::size_t timers = 0;
     std::uint64_t next_snapshot_id = 1;
     std::uint64_t digest = 0;
+    bool day_ended = false;  // the log holds the day's DayEnd: the sequencer stays stopped (DST-008)
   };
   alignas(kFalseSharingBytes) std::atomic<bool> allowed{false};
   alignas(kFalseSharingBytes) std::atomic<std::uint64_t> disallow_gen{0};

@@ -1,0 +1,264 @@
+diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
+--- a/apps/exchanged/repl_stage.h
++++ b/apps/exchanged/repl_stage.h
+@@ -188,7 +188,6 @@
+     // A promotion's re-injected input: the FORWARD window and the popped message.
+     pending_ahead_.reserve(cfg_.repl.forward_slots + 1);
+     seq_->reserve_ahead(cfg_.repl.forward_slots + 1);
+-    record_buf_.resize(journal::kMaxRecordBytes);
+   }
+   BasicReplStage(const BasicReplStage&) = delete;
+   BasicReplStage& operator=(const BasicReplStage&) = delete;
+@@ -283,7 +282,6 @@
+         seq_->resume(log_->tail(), std::max(timers_seen_, seq_->next_timer()),
+                      std::max(snapshot_next_, seq_->next_snapshot_id()), digest_);
+         resync_ = false;
+-        if (day_ended()) end_of_day_takeover();
+       }
+       did |= deliver_instance_down();
+       did |= push_instance_down();  // what did not fit in the first list
+@@ -363,9 +361,7 @@
+     if (want && !published_allowed_) {
+       if (resync_) {
+         (void)drain_tee();
+-        const bool ended = day_ended();
+-        if (ended) end_of_day_takeover();
+-        sp.resync = SplitRepl::Resync{log_->tail(), timers_seen_, snapshot_next_, digest_, ended};
++        sp.resync = SplitRepl::Resync{log_->tail(), timers_seen_, snapshot_next_, digest_};
+         sp.resync_gen.fetch_add(1, std::memory_order_release);
+         resync_ = false;
+       }
+@@ -429,31 +425,6 @@
+     note_record(v);
+     resync_ = true;
+     return true;
+-  }
+-  // 06 §10: the day's DayEnd is the log's last record but for the EpochStarts of later
+-  // epochs (a takeover, a JOIN or a RESUME after the close). Cold: a resync.
+-  [[nodiscard]] bool day_ended() {
+-    for (std::uint64_t i = log_->tail().last_index; i != 0; --i) {
+-      const std::uint32_t n = log_->read(i, std::span<std::byte>(record_buf_));
+-      if (n == 0) return false;
+-      const journal::RecordView v{std::span<const std::byte>(record_buf_.data(), n)};
+-      if (v.type() == journal::RecordType::EpochStart) continue;
+-      return v.type() == journal::RecordType::DayEnd;
+-    }
+-    return false;
+-  }
+-  // The day ended before this node took over, joined or resumed: nothing more is
+-  // sequenced (DST-008), so the dead instances' InstanceDowns and the re-injected input are
+-  // dropped (the close cancelled every Day order and ended every session). In combined
+-  // mode the sequencer stops here; in split mode the seq thread stops it from the resync
+-  // slot.
+-  void end_of_day_takeover() {
+-    if (!split_) seq_->day_already_ended();
+-    pending_down_.clear();
+-    down_next_ = 0;
+-    pending_ahead_.clear();
+-    ahead_next_ = 0;
+-    NLOG_INFO("repl: the day ended at the close: the sequencer stays stopped");
+   }
+   // Counters the sequencer continues from (Timer records, SnapshotMark ids, config digest).
+   void note_record(const journal::RecordView& v) {
+@@ -774,7 +745,6 @@
+   std::size_t down_next_ = 0;
+   bool down_overflow_noted_ = false;
+   std::vector<seq::InboundMsg> pending_ahead_;  // a promotion's re-injected input (inject_ahead)
+-  std::vector<std::byte> record_buf_;            // day_ended(): one record at a time
+   std::size_t ahead_next_ = 0;
+   bool ahead_overflow_noted_ = false;
+   bool staged_ = false;
+@@ -809,7 +779,6 @@
+     if (g != seen_resync_) {
+       const SplitRepl::Resync& r = sp_->resync;
+       seq_->resume(r.chain, r.timers, r.next_snapshot_id, r.digest);
+-      if (r.day_ended) seq_->day_already_ended();  // DST-008: nothing after DayEnd
+       seen_resync_ = g;
+     }
+     const ScqConsumerScope consumer(*guard_, ScqConsumerGuard::kSeq);
+diff --git a/apps/exchanged/shared.h b/apps/exchanged/shared.h
+--- a/apps/exchanged/shared.h
++++ b/apps/exchanged/shared.h
+@@ -60,7 +60,6 @@
+     std::size_t timers = 0;
+     std::uint64_t next_snapshot_id = 1;
+     std::uint64_t digest = 0;
+-    bool day_ended = false;  // the log holds the day's DayEnd: the sequencer stays stopped (DST-008)
+   };
+   alignas(kFalseSharingBytes) std::atomic<bool> allowed{false};
+   alignas(kFalseSharingBytes) std::atomic<std::uint64_t> disallow_gen{0};
+diff --git a/src/sequencer/sequencer.h b/src/sequencer/sequencer.h
+--- a/src/sequencer/sequencer.h
++++ b/src/sequencer/sequencer.h
+@@ -291,19 +291,6 @@
+     return {};
+   }
+ 
+-  // The journal already holds the day's DayEnd (a node that took over, joined or resumed
+-  // after the close: resume() put it after the new EpochStart): nothing more is journaled
+-  // (06 §10, DST-008). The sequencer stays stopped, and what was waiting to go first or
+-  // ahead of the queue is dropped (the close cancelled every Day order and ended every
+-  // session).
+-  void day_already_ended() noexcept {
+-    started_ = false;
+-    first_.clear();
+-    first_next_ = 0;
+-    ahead_.clear();
+-    ahead_next_ = 0;
+-  }
+-
+   // The last record of the day (06 §10).
+   std::expected<void, SeqError> end_day(std::uint64_t itch_messages, std::uint64_t soup_messages) {
+     if (!started_) return std::unexpected(SeqError::NotStarted);
+diff --git a/tests/integration/exchange/exchange_ha_test.cpp b/tests/integration/exchange/exchange_ha_test.cpp
+--- a/tests/integration/exchange/exchange_ha_test.cpp
++++ b/tests/integration/exchange/exchange_ha_test.cpp
+@@ -624,108 +624,6 @@
+   EXPECT_EQ(code, 0) << d;
+ }
+ 
+-// DST-008: after the day's DayEnd nothing more is journaled (06 §10), also when a node
+-// takes over, a node rejoins (JOIN) or a solo primary resumes after the close. The pair
+-// ends the day; A dies; B takes over: its journal holds nothing after DayEnd but the new
+-// epoch's EpochStart (no InstanceDowns, no orders a client sends after the close, no
+-// second DayEnd). A then restarts and rejoins (a JOIN epoch): the same, and both journals
+-// end alike. Parameter: the replica on its own thread.
+-class DayEndedTakeover : public ::testing::TestWithParam<bool> {};
+-
+-TEST_P(DayEndedTakeover, NothingIsJournaledAfterDayEnd) {
+-  const auto dir = fresh_dir(GetParam() ? "ha-dayend-split" : "ha-dayend");
+-  const ScopedDir cleanup(dir);
+-  ha::TrialOptions o;
+-  o.repl_thread = GetParam();
+-  ha::Witness w(dir, o.tie_break_ms);
+-  ASSERT_NE(w.port(), 0) << w.init_output() << w.output();
+-  ha::UdpRelay relay;
+-  const std::uint16_t bind[2] = {free_port(SOCK_DGRAM), free_port(SOCK_DGRAM)};
+-  relay.start(bind[0], bind[1]);
+-  MoldSubscriber sub;
+-  Exchange a(ha::paired_node(0, dir, sub, w.port(), relay, bind, o), dir);
+-  Exchange b(ha::paired_node(1, dir, sub, w.port(), relay, bind, o), dir);
+-  a.launch();
+-  b.launch();
+-  ASSERT_TRUE(a.wait_ready()) << a.output();
+-  ASSERT_TRUE(b.wait_ready()) << b.output();
+-  auto role = [](Exchange& e) {
+-    const std::string s = e.status();
+-    const auto at = s.find("role=");
+-    return at == std::string::npos ? std::string("?") : s.substr(at + 5, s.find(' ', at) - at - 5);
+-  };
+-  auto wait_roles = [&](const std::string& ra, const std::string& rb) {
+-    for (int i = 0; i < 3000; ++i) {
+-      if (role(a) == ra && role(b) == rb) return true;
+-      std::this_thread::sleep_for(10ms);
+-    }
+-    return false;
+-  };
+-  ASSERT_TRUE(wait_roles("P", "B")) << a.status() << "\n" << b.status();
+-  b.clock("09:31:00");
+-  a.clock("09:31:00");
+-  // ALPHA rests a sell (a cancel-on-disconnect candidate for the InstanceDowns) and logs in
+-  // on B too, so B's takeover has an instance of A's to take down.
+-  OuchClient alpha("ALPHA", "alpha-pw"), alpha_b("ALPHA", "alpha-pw");
+-  ASSERT_EQ(alpha.login(a.port("gw0")), 'A');
+-  ASSERT_EQ(alpha_b.login(b.port("gw0")), 'A');
+-  engine::EnterArgs e;
+-  e.urn = 1;
+-  e.side = ouch50::Side::Sell;
+-  e.qty = 100;
+-  e.symbol = "AAPL";
+-  e.price = 1'500'000;
+-  alpha.send(engine::enter_msg(e));
+-  ASSERT_TRUE(alpha.wait_count(2, 10s)) << a.status();
+-  ASSERT_EQ(a.cmd("end-day").rfind("ok", 0), 0u);
+-  std::uint64_t day_end = 0;
+-  for (int i = 0; i < 1000 && (day_end == 0 || Control::field(b.status(), "seq") < day_end); ++i) {
+-    day_end = Control::field(a.status(), "day_end");
+-    std::this_thread::sleep_for(10ms);
+-  }
+-  ASSERT_NE(day_end, 0u) << a.status();
+-  ASSERT_GE(Control::field(b.status(), "seq"), day_end) << b.status();
+-  a.kill9();
+-  alpha.drop();
+-  for (int i = 0; i < 3000 && role(b) != "SP"; ++i) std::this_thread::sleep_for(10ms);
+-  ASSERT_EQ(role(b), "SP") << b.status() << "\n" << b.output() << "\n" << w.output();
+-  // A client's order after the close, on the new primary: never sequenced.
+-  e.urn = 2;
+-  alpha_b.send(engine::enter_msg(e));
+-  for (int i = 0; i < 50; ++i) alpha_b.poll(5);
+-  // A restarts and rejoins: a JOIN epoch on B.
+-  a.launch();
+-  ASSERT_TRUE(a.wait_ready(30s)) << a.output();
+-  ASSERT_TRUE(wait_roles("B", "P")) << a.status() << "\n" << b.status() << "\n" << w.output();
+-  EXPECT_EQ(w.count("PROMOTE granted"), 1u) << w.output();
+-  EXPECT_EQ(w.count("JOIN granted"), 1u) << w.output();
+-  const std::uint64_t seq_b = Control::field(b.status(), "seq");
+-  for (int i = 0; i < 1000 && Control::field(a.status(), "seq") < seq_b; ++i) std::this_thread::sleep_for(10ms);
+-  EXPECT_EQ(a.stop(), 0) << a.output();
+-  EXPECT_EQ(b.stop(), 0) << b.output();
+-  for (const std::string& jdir : {a.journal_dir(), b.journal_dir()}) {
+-    SCOPED_TRACE(jdir);
+-    const std::vector<JournalRec> recs = journal_records(jdir);
+-    std::size_t k = 0;
+-    while (k < recs.size() && recs[k].type != journal::RecordType::DayEnd) ++k;
+-    ASSERT_LT(k, recs.size()) << "no DayEnd";
+-    EXPECT_EQ(recs[k].index, day_end);
+-    std::size_t epoch_starts = 0;
+-    for (std::size_t i = k + 1; i < recs.size(); ++i) {
+-      EXPECT_EQ(recs[i].type, journal::RecordType::EpochStart)
+-          << "record " << recs[i].index << " (type " << static_cast<int>(recs[i].type) << ") after DayEnd " << day_end;
+-      epoch_starts += recs[i].type == journal::RecordType::EpochStart ? 1 : 0;
+-    }
+-    EXPECT_EQ(epoch_starts, 2u) << "the takeover's and the JOIN's EpochStart";
+-  }
+-  int code = -1;
+-  const std::string d = run_capture({LLE_JOURNAL_DIFF, a.journal_dir(), b.journal_dir()}, &code);
+-  EXPECT_EQ(code, 0) << d;
+-}
+-
+-INSTANTIATE_TEST_SUITE_P(Mode, DayEndedTakeover, ::testing::Values(false, true),
+-                         [](const ::testing::TestParamInfo<bool>& i) { return i.param ? "Split" : "Combined"; });
+-
+ // The restart-loop guard (restart_guard.h): a node whose last starts from this same
+ // journal each exited 5 at the same point is refused (exit 6) with the remedy; below the
+ // limit it starts and rejoins; a clean stop removes the record.
+diff --git a/tests/unit/sequencer/sequencer_test.cpp b/tests/unit/sequencer/sequencer_test.cpp
+--- a/tests/unit/sequencer/sequencer_test.cpp
++++ b/tests/unit/sequencer/sequencer_test.cpp
+@@ -512,36 +512,6 @@
+   EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[1]))->msg[0], std::byte{0xD0});
+ }
+ 
+-// DST-008: a node that takes over, joins or resumes after the close resumes the sequencer
+-// after the new EpochStart, but the journal already holds DayEnd: day_already_ended()
+-// keeps it stopped, with queued input, due timers and its lists, and no second DayEnd.
+-TEST(Sequencer, NothingIsSequencedOnceTheDayAlreadyEnded) {
+-  const Nanos t0 = 1'790'000'000'000'000'000;
+-  std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::Cross, 1}};
+-  Rig rig(std::size_t{1} << 20, sched);
+-  rig.clock.real = t0;
+-  rig.start();
+-  ASSERT_TRUE(rig.seq->end_day(0, 0).has_value());
+-  const auto day = rig.take();
+-  ASSERT_EQ(RecordView(day.back()).type(), RecordType::DayEnd);
+-  // The resync of a takeover after the close.
+-  rig.seq->resume(rig.seq->chain(), rig.seq->next_timer(), rig.seq->next_snapshot_id(), rig.seq->config_digest());
+-  rig.seq->reserve_first(1);
+-  rig.seq->reserve_ahead(1);
+-  ASSERT_TRUE(rig.seq->inject_first(SessionEventMsg{1, 0, journal::SessionEventKind::InstanceDown, 0}));
+-  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(1, 1)));
+-  ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(2, 2)));
+-  rig.seq->day_already_ended();
+-  EXPECT_FALSE(rig.seq->started());
+-  EXPECT_EQ(rig.seq->first_pending(), 0u);
+-  EXPECT_EQ(rig.seq->ahead_pending(), 0u);
+-  rig.clock.real = t0 + 5000;  // the cross is due
+-  EXPECT_FALSE(rig.seq->poll());
+-  EXPECT_TRUE(rig.take().empty());
+-  EXPECT_FALSE(rig.seq->end_day(0, 0).has_value());
+-  EXPECT_TRUE(rig.take().empty());
+-}
+-
+ TEST(Sequencer, BackpressureStopsPoppingAndLosesNothing) {
+   Rig rig(256 * 1024);
+   rig.start();

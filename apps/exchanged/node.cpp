@@ -22,6 +22,7 @@
 #include "exchanged/node_log.h"
 #include "exchanged/recovery.h"
 #include "exchanged/repl_stage.h"
+#include "exchanged/restart_guard.h"
 #include "exchanged/start_impl.h"
 #include "journal/recovery.h"
 #include "log/nlog.h"
@@ -175,6 +176,7 @@ ReplStageConfig repl_config(const ExchangeConfig& cfg, std::uint64_t incarnation
   rc.bind = cfg.ha_bind;
   rc.peer = cfg.ha_peer;
   rc.witness = cfg.witness;
+  rc.witness_bind = cfg.witness_bind;
   rc.initial_primary = cfg.initial_primary;
   rc.peer_incarnation = 1;
   for (const auto& s : cfg.sessions) rc.sessions.push_back(s.session_id);
@@ -302,9 +304,12 @@ std::expected<void, std::string> Node::open_journal() {
     rr = std::move(*r);
     recovered_index_ = rr.chain.last_index;
   }
-  // A paired node restarting mid-day rejoins (10 §5): the writer opens after the
-  // handshake, which may truncate the journal first (rejoin()).
-  rejoin_ = cfg_.mode == NodeMode::Paired && recovered_index_ != 0;
+  // A paired node restarting mid-day rejoins (10 §5), even on an empty journal once the day
+  // started here (start_impl.h restart_must_rejoin): the writer opens after the handshake,
+  // which may truncate the journal first (rejoin()).
+  std::error_code inc_ec;
+  rejoin_ = restart_must_rejoin(cfg_.mode == NodeMode::Paired, recovered_index_,
+                                std::filesystem::exists(cfg_.journal_dir() + "/incarnation", inc_ec));
   if (!rejoin_) {
     if (auto r = open_writer(rr); !r) return r;
   }
@@ -312,6 +317,17 @@ std::expected<void, std::string> Node::open_journal() {
   std::printf("exchanged: journal %s: %" PRIu64 " records recovered%s\n", cfg_.journal_dir().c_str(),
               rr.chain.last_index, rr.torn_tail ? " (torn tail repaired)" : "");
   std::fflush(stdout);  // progress is visible even if a later step stalls
+  // The restart-loop guard (restart_guard.h): after [ha] restart_loop_limit starts from this
+  // same journal that each exited 5 at the same point, refuse, naming the remedy.
+  start_recovered_index_ = recovered_index_;
+  if (rejoin_) {
+    const auto rec = read_restart_record(restart_guard_path());
+    if (restart_refused(rec, recovered_index_, cfg_.restart_loop_limit)) {
+      restart_loop_refused_ = true;
+      NLOG_ERROR("restart loop: {}", std::string_view(restart_refusal(*rec)));
+      return std::unexpected(restart_refusal(*rec));
+    }
+  }
 
   if (recovered_index_ != 0 && !rejoin_) {
     journal::RecoveryOptions again;
@@ -458,6 +474,13 @@ std::expected<void, std::string> Node::rejoin() {
   RejoinHooks hooks;
   hooks.truncate = [this](std::uint64_t t) { return truncate_journal_to(t); };
   hooks.reload = [this](std::uint64_t t) { return reload_to(t); };
+  hooks.before_restart = [this](const char* what, std::uint64_t t) {
+    const RestartRecord rec =
+        next_restart_record(read_restart_record(restart_guard_path()), what, t, start_recovered_index_);
+    (void)write_restart_record(restart_guard_path(), rec);
+    std::fprintf(stderr, "exchanged: restart loop guard: %u consecutive exit(s) at this point (limit %u)\n", rec.count,
+                 cfg_.restart_loop_limit);
+  };
   if (auto r = repl_->start_recovering(begun->config_digest, std::move(hooks)); !r) return r;
   std::printf("exchanged: rejoin: incarnation %" PRIu64 ", journal at %" PRIu64 "\n", inc, recovered_index_);
   std::fflush(stdout);
@@ -865,7 +888,9 @@ int Node::run(const std::atomic<bool>& external_stop) {
     }
   }
   shutdown();
-  return sh_->exit_code.load();
+  const int code = sh_->exit_code.load();
+  if (code == 0 && cfg_.mode == NodeMode::Paired) clear_restart_record(restart_guard_path());  // a clean stop
+  return code;
 }
 
 void Node::shutdown() {

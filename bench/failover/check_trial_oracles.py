@@ -4,22 +4,28 @@
 A trial directory (written by exchange_failover_trial, tests/integration/exchange/
 ha_trial.h; in the lab by the clients and the capture host) holds:
   trial.json        class, session ids, phases, line ports, fault time, grants, journals
-  clients/USER.N.bin  each connection's sequenced OUCH stream ([u16 BE length][message])
+  clients/USER.N.bin  each connection's sequenced OUCH stream ([u16 BE length][message]);
+                    clients/DELTA.bin the prober's one connection, if it ran
   feed.bin          the feed the subscriber assembled (NASDAQ BinaryFILE)
-  capture.pcap      every line packet as received
-  <node>/journal/<day>  both nodes' journals
+  capture.pcap      every line packet as received (the lab: host C's hardware capture)
+  both nodes' journals (trial.json names them; the lab's are copied into the trial)
 
 This script checks, independently of the trial's own verdict:
   O-LEDGER   every order accepted exactly once, every execution reported once to each
              side, fills add up (crossing pairs: 100 each; F1-partial: the resting order
              filled by every buy);
   O-STREAM   each session's two connections agree where they overlap and the session's
-             stream equals journal_replay --emit-ouch of the final primary's journal;
+             stream equals journal_replay --emit-ouch of the final primary's journal
+             (the prober's too; its probes are accepted at most once, never executed);
   O-MOLD     the assembled feed equals journal_replay --emit of the final primary's
              journal; every line packet from every sender carries the feed's bytes at its
              sequence numbers; per line and sender, sequence numbers never step back;
-  O-JOURNAL  journal_diff of the two journals reports them identical (after a rejoin);
-  O-CLASS    the witness grants recorded in trial.json fit the class.
+  O-JOURNAL  journal_diff of the two journals reports them identical (after a rejoin, and
+             after F8, where nobody was lost);
+  O-CLASS    the witness grants recorded in trial.json fit the class: one PROMOTE for a
+             takeover (F1*, F2-F5, F9, F10), one SOLO for F6/F7*, nothing for F8; then
+             one JOIN if the lost node rejoined; RESUME only for F7-resume; the cut-off
+             node of F2, F3 and F6 exited as deposed (3).
 
 Usage:
   check_trial_oracles.py TRIAL_DIR [--bin BUILD_DIR | --journal-replay P --journal-diff P]
@@ -136,6 +142,20 @@ def main(argv=None):
         if regen_ouch and regen_ouch.get(sid, []) != streams[user]:
             fail(f"O-STREAM: {user}: stream differs from the regeneration "
                  f"({len(streams[user])} vs {len(regen_ouch.get(sid, []))} messages)")
+    if num.get("session_DELTA"):
+        d_path = os.path.join(d, "clients", "DELTA.bin")
+        delta = framed(d_path) if os.path.exists(d_path) else None
+        if delta is None:
+            fail("O-STREAM: DELTA: clients/DELTA.bin missing")
+        else:
+            if regen_ouch and regen_ouch.get(num["session_DELTA"], []) != delta:
+                fail(f"O-STREAM: DELTA: stream differs from the regeneration "
+                     f"({len(delta)} vs {len(regen_ouch.get(num['session_DELTA'], []))} messages)")
+            ld, ed, _ = ledger(delta)
+            if any(c != 1 for c in ld.values()):
+                fail("O-LEDGER: DELTA: a probe accepted more than once")
+            if ed:
+                fail("O-LEDGER: DELTA: probes executed")
     n = num.get("phase1", 0) + num.get("phase2", 0) + num.get("phase3", 0)
     la, ea, fa = ledger(streams["ALPHA"])
     lb, eb, fb = ledger(streams["BRAVO"])
@@ -166,8 +186,10 @@ def main(argv=None):
     feed = framed(os.path.join(d, "feed.bin"))
     if regen_itch and feed != regen_itch:
         fail(f"O-MOLD: the assembled feed ({len(feed)}) differs from the regeneration ({len(regen_itch)})")
-    packets = analyze_pcap.line_packets(os.path.join(d, "capture.pcap"),
-                                        (None, int(num["line_a_port"])), (None, int(num["line_b_port"])))
+    # The lab's lines are multicast groups (trial.json str.line_a/line_b "IP:PORT").
+    line_a = analyze_pcap.parse_endpoint(strs["line_a"]) if strs.get("line_a") else (None, int(num["line_a_port"]))
+    line_b = analyze_pcap.parse_endpoint(strs["line_b"]) if strs.get("line_b") else (None, int(num["line_b_port"]))
+    packets = analyze_pcap.line_packets(os.path.join(d, "capture.pcap"), line_a, line_b)
     mismatches = 0
     for p in packets:
         if p["malformed"]:
@@ -185,24 +207,27 @@ def main(argv=None):
             fail(f"O-MOLD: line {s['line']} sender {s['sender']} stepped back {s['back_steps']} times")
 
     # O-JOURNAL.
-    if num.get("rejoin"):
+    if num.get("rejoin") or cls == "F8":
         r = subprocess.run([diff, strs["journal_a"], strs["journal_b"]], capture_output=True, text=True)
         if r.returncode != 0:
             fail(f"O-JOURNAL: journals differ after the rejoin: {r.stdout.strip()}")
 
     # O-CLASS.
     g = {k: num.get("grants_" + k, 0) for k in ("promote", "solo", "join", "resume")}
-    takeover = cls.startswith("F1")
+    takeover = cls.startswith("F1") or cls in ("F2", "F3", "F4", "F5", "F9", "F10")
+    solo = cls in ("F6", "F7", "F7-resume")
     if takeover and (g["promote"] != 1 or g["solo"] != 0):
         fail(f"O-CLASS: {cls} expects one PROMOTE and no SOLO grant: {g}")
-    if not takeover and (g["promote"] != 0 or g["solo"] != 1):
+    if solo and (g["promote"] != 0 or g["solo"] != 1):
         fail(f"O-CLASS: {cls} expects one SOLO and no PROMOTE grant (no takeover): {g}")
+    if cls == "F8" and any(g.values()):
+        fail(f"O-CLASS: F8 expects no grant at all (no epoch change): {g}")
     if num.get("rejoin") and g["join"] != 1:
         fail(f"O-CLASS: one JOIN grant expected: {g}")
     if g["resume"] != (1 if cls == "F7-resume" else 0):
         fail(f"O-CLASS: unexpected RESUME grants: {g}")
-    if cls == "F6" and num.get("deposed_exit_code") != 3:
-        fail(f"O-CLASS: F6: the cut-off backup exited with {num.get('deposed_exit_code')} (deposed is 3)")
+    if cls in ("F2", "F3", "F6") and num.get("deposed_exit_code") != 3:
+        fail(f"O-CLASS: {cls}: the cut-off node exited with {num.get('deposed_exit_code')} (deposed is 3)")
 
     verdict = {"trial_dir": d, "class": cls, "trial_pass": trial.get("pass"), "oracles_pass": not violations,
                "violations": violations, "feed_messages": len(feed), "line_packets": len(packets),

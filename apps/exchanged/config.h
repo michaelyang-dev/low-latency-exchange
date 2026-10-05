@@ -149,6 +149,10 @@ struct ExchangeConfig {
   env::Endpoint ha_bind{};
   env::Endpoint ha_peer{};
   env::Endpoint witness{};
+  // The witness link's local address: 0 (default) lets the kernel pick the source by its
+  // route to the witness. Binding it to ha.bind's address fails where the A-B link is a
+  // network of its own that the witness cannot reach (the lab's F6 link).
+  std::uint32_t witness_bind = 0;
   std::uint8_t initial_primary = 0;
   Nanos ha_heartbeat = 1'000'000;
   Nanos t_d = 50'000'000;
@@ -161,6 +165,9 @@ struct ExchangeConfig {
   // APPEND retransmission without ACK progress (repl::Config::rto_ns). Go-back-N: keep it
   // above the real A-B round trip, or every round trip retransmits the window.
   Nanos ha_rto = 2'000'000;
+  // Starts from the same journal that each exited 5 at the same point before a start is
+  // refused (restart_guard.h); 0: never.
+  std::uint32_t restart_loop_limit = 3;
   std::size_t repl_log_bytes = std::size_t{256} << 20;
   bool repl_thread = false;  // the replica on its own thread ([ha] repl_thread, or a `repl` core-map entry)
 

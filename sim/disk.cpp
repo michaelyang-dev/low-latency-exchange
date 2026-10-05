@@ -130,7 +130,7 @@ bool Disk::submit_write(std::uint32_t fi, std::uint64_t off, std::span<const std
   op.handle_gen = f.handle_gen;
   const Nanos lat = latency(p_.write_min_ns, p_.write_mean_ns);
   const bool eio = chance_ppm(rng_, p_.eio_write_ppm);
-  op.eio = eio && w_.faults_active();
+  op.eio = eio && w_.faults_active() && faults_allowed();
   f.inflight.push_back(op);
   Fnv1a64 h;
   h.bytes(data);
@@ -152,7 +152,7 @@ bool Disk::submit_sync(std::uint32_t fi, std::uint64_t tag) {
   op.handle_gen = f.handle_gen;
   const Nanos lat = latency(p_.sync_min_ns, p_.sync_mean_ns);
   const bool eio = chance_ppm(rng_, p_.eio_sync_ppm);
-  op.eio = eio && w_.faults_active();
+  op.eio = eio && w_.faults_active() && faults_allowed();
   f.inflight.push_back(op);
   w_.schedule(w_.now() + lat, handler_, kSyncDone, node_, fi | (static_cast<std::uint64_t>(f.crash_epoch) << 32),
               op.seq, op.covers_done);
@@ -164,7 +164,8 @@ std::int32_t Disk::write_now(std::uint32_t fi, std::uint64_t off, std::span<cons
   File& f = *files_[fi];
   const bool eio = chance_ppm(rng_, p_.eio_write_ppm);
   ++w_.stats().disk_writes;
-  if (eio && w_.faults_active()) {
+  if (eio && w_.faults_active() && faults_allowed()) {
+    fault_landed();
     ++w_.stats().disk_eio;
     return -kEio;
   }
@@ -210,7 +211,8 @@ std::int32_t Disk::sync_now(std::uint32_t fi) {
   File& f = *files_[fi];
   const bool eio = chance_ppm(rng_, p_.eio_sync_ppm);
   ++w_.stats().disk_syncs;
-  if (eio && w_.faults_active()) {
+  if (eio && w_.faults_active() && faults_allowed()) {
+    fault_landed();
     for (Dirty& d : f.dirty) d.doomed = true;  // fsyncgate, as for asynchronous syncs
     ++w_.stats().disk_eio;
     return -kEio;
@@ -276,8 +278,12 @@ Dispatch Disk::handle(const Event& ev) {
   if (epoch != f.crash_epoch) return {false, 0};
   const auto it = std::find_if(f.inflight.begin(), f.inflight.end(), [&](const Op& o) { return o.seq == ev.b; });
   if (it == f.inflight.end()) return {false, 0};
-  const Op op = *it;
+  Op op = *it;
   f.inflight.erase(it);
+  // A gated disk (set_fault_gate) re-checks at completion: an error drawn while failures
+  // were allowed does not land once they are not (the other node failed meanwhile).
+  if (op.eio && fault_gate_ && !fault_gate_()) op.eio = false;
+  if (op.eio) fault_landed();
 
   std::int32_t result = 0;
   if (!op.is_sync) {

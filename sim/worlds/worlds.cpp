@@ -38,6 +38,8 @@ std::string_view world_name(WorldKind w) noexcept {
       return "kill_switch_during_cross";
     case WorldKind::Exchange:
       return "exchange";
+    case WorldKind::ExchangeHa:
+      return "exchange_ha";
   }
   return "?";
 }
@@ -72,6 +74,9 @@ std::string_view world_name(WorldKind w) noexcept {
 #if !defined(LLE_WORLD_EXCHANGE)
 #define LLE_WORLD_EXCHANGE 0
 #endif
+#if !defined(LLE_WORLD_EXCHANGE_HA)
+#define LLE_WORLD_EXCHANGE_HA 0
+#endif
 
 bool world_built(WorldKind w) noexcept {
   switch (w) {
@@ -100,6 +105,8 @@ bool world_built(WorldKind w) noexcept {
       return LLE_WORLD_SINGLE != 0;
     case WorldKind::Exchange:
       return LLE_WORLD_EXCHANGE != 0;
+    case WorldKind::ExchangeHa:
+      return LLE_WORLD_EXCHANGE_HA != 0;
   }
   return false;
 }
@@ -178,6 +185,10 @@ Report run_world(WorldKind w, const Options& o) {
 #if LLE_WORLD_EXCHANGE
     case WorldKind::Exchange:
       return detail::run_exchange(o);
+#endif
+#if LLE_WORLD_EXCHANGE_HA
+    case WorldKind::ExchangeHa:
+      return detail::run_exchange_ha(o);
 #endif
     default:
       break;

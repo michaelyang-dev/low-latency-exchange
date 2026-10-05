@@ -65,6 +65,8 @@ class Node {
   void request_stop(int code = 0) noexcept;
   // Checked while start() waits (the rejoin handshake): a signal stops the wait.
   void set_stop_flag(const std::atomic<bool>* f) noexcept { external_stop_ = f; }
+  // start() refused: the restart-loop guard (restart_guard.h; main exits kExitRestartLoop).
+  [[nodiscard]] bool restart_loop_refused() const noexcept { return restart_loop_refused_; }
 
   // One status line (control port, logs).
   [[nodiscard]] std::string status() const;
@@ -126,6 +128,9 @@ class Node {
   bool rejoin_ = false;  // a paired node restarting mid-day (10 §5)
   const std::atomic<bool>* external_stop_ = nullptr;
   std::uint64_t recovered_index_ = 0;
+  std::uint64_t start_recovered_index_ = 0;  // as this start found the journal (restart guard)
+  bool restart_loop_refused_ = false;
+  [[nodiscard]] std::string restart_guard_path() const { return cfg_.journal_dir() + "/restart-guard"; }
   RecoveredDay recovered_;
   std::vector<std::pair<std::uint32_t, SeqNo>> soup_next_;
   SeqNo itch_next_ = 1;

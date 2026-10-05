@@ -213,8 +213,27 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
      if (now >= next_hb_) {
        send_heartbeat(peer_inc_);
        next_hb_ = now + cfg_.heartbeat_ns;
-@@ -1437,11 +1368,6 @@
-     if (join_window_ && !join_.join_sent && join_.acked == tail.last_index) {
+@@ -1430,28 +1361,13 @@
+     }
+     const bool snap_ready = !join_.snap.active || join_.snap.done;
+     if (!join_window_ && snap_ready && tail.last_index - join_.acked <= cfg_.join_lag_records) {
+-      // 10 §5 step 5: pause sequencing and drain the joiner to zero lag. Release goes on
+-      // until it reaches the tail: a joiner applies only what we have released, so its
+-      // L2 must otherwise hold everything between our release and our tail, and a disk
+-      // stall that holds our durable index back while we sequence can make that more
+-      // than its L2 holds. Frozen there, it never reached zero lag (DST-009).
++      // 10 §5 step 5: pause sequencing and release, drain the joiner to zero lag.
+       join_window_ = true;
+       did = true;
+     }
+-    // The JOIN leaves only when the joiner holds our whole log and everything in it is
+-    // released: from the JOIN on we neither sequence nor release (HotStandby's atomic
+-    // Rejoin, with the primary paused), and nothing is left that we would have to.
+-    if (join_window_ && !join_.join_sent && release_ < tail.last_index && h_.durable_index() < tail.last_index) {
+-      h_.request_flush();  // the tail must be durable to be released before the JOIN
+-    }
+-    if (join_window_ && !join_.join_sent && join_.acked == tail.last_index && release_ == tail.last_index) {
++    if (join_window_ && !join_.join_sent && join_.acked == tail.last_index) {
        join_.join_sent = true;
        join_.join_last = tail.last_index;
 -      if (relays_.epoch != epoch_) relays_ = Relays{epoch_, 0, 0, 0, false};
@@ -225,7 +244,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
        trace(TraceKind::kRequestJoin, epoch_, tail.last_index, join_.inc);
        request(witness::Join{epoch_, self_, peer_, cfg_.incarnation, join_.inc, tail.last_index}, witness::MsgType::kJoin,
                epoch_, now);
-@@ -1507,7 +1433,7 @@
+@@ -1517,7 +1433,7 @@
          return false;
        case Phase::kQueryEpochEnd:
          if (now >= next_rejoin_at_) {
@@ -234,7 +253,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
            return true;
          }
          return false;
-@@ -1537,17 +1463,8 @@
+@@ -1547,17 +1463,8 @@
      send_epoch_end_query(now);
    }
  
@@ -252,7 +271,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
      send(wire::EpochEndQuery{self_, h_.log_tail().epoch, cfg_.incarnation, cfg_.build_id, query_id_});
      next_rejoin_at_ = now + cfg_.rejoin_retry_ns;
    }
-@@ -1567,12 +1484,6 @@
+@@ -1577,12 +1484,6 @@
    // that arrives after we re-handshook with a newer epoch of the primary (it went solo
    // while the copy was in flight) is stale and ignored.
    void on_join_admission(const witness::Grant& g, Nanos now) {
@@ -265,7 +284,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
      if (g.incarnation != cfg_.incarnation || role_ != Role::kRecovering || !reloaded_ || !joinable() ||
          !witness::is_member(g.members, self_) || g.primary != peer_ || g.from_epoch != catchup_epoch_ ||
          g.epoch != catchup_epoch_ + 1) {
-@@ -1581,7 +1492,7 @@
+@@ -1591,7 +1492,7 @@
      }
      ++stats_.grants;
      SIM_PROBE("repl.joiner_adopts_join_grant");
@@ -274,7 +293,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
    }
  
    // The joiner becomes the backup of `epoch`. HotStandby's Rejoin gives both logs the
-@@ -1631,7 +1542,6 @@
+@@ -1641,7 +1542,6 @@
      hb.role = static_cast<std::uint8_t>(role_);
      hb.members = members_;
      hb.primary = primary_;
@@ -282,7 +301,21 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
      send(hb);
    }
  
-@@ -1779,7 +1689,7 @@
+@@ -1762,11 +1662,8 @@
+       case Role::kSoloPrimary: {
+         const std::uint64_t durable = h_.durable_index();
+         // Solo mode releases only L3-durable records, and nothing before its own
+-        // EpochStart is durable (10 §4 step 4; mutant SoloReleaseFromL2). Release goes on
+-        // while a joiner drains (sequencing is paused, so it can only catch up with the
+-        // tail) and stops from the JOIN on (DST-009).
+-        const bool join_pending = relays_.pending && relays_.epoch == epoch_;
+-        if (!es_pending_ && !join_pending && durable >= release_gate_) w = std::min(tail, durable);
++        // EpochStart is durable (10 §4 step 4; mutant SoloReleaseFromL2).
++        if (!es_pending_ && !join_window_ && durable >= release_gate_) w = std::min(tail, durable);
+         break;
+       }
+       case Role::kBackup:
+@@ -1792,7 +1689,7 @@
    NodeId primary_ = 0;
  
    // Primary.
@@ -291,7 +324,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
    std::uint64_t ack_ = 0;
    bool losing_ = false;
    Nanos last_ack_progress_ = 0;
-@@ -1829,23 +1739,6 @@
+@@ -1842,23 +1739,6 @@
  
    // Solo primary: the joiner it serves.
    Joiner join_;

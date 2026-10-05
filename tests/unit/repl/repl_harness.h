@@ -53,6 +53,9 @@ struct FakeHost {
   std::vector<Bytes> log;  // log[i - 1] = record i, canonical
   std::uint64_t durable = 0;
   bool flush_on_request = true;  // request_flush makes the whole log durable at once
+  // L2 capacity in records (0: unlimited). As in exchanged, the L2 cursor follows the
+  // applier: a record leaves L2 once applied, so at most l2_cap records past `applied`.
+  std::size_t l2_cap = 0;
   bool refuse_appends = false;   // simulate a full L2 ring
   // ---- applier ----
   std::uint64_t applied = 0;
@@ -93,6 +96,7 @@ struct FakeHost {
   [[nodiscard]] std::uint64_t applied_index() const { return applied; }
   bool log_append(std::span<const std::byte> rec) {
     if (refuse_appends) return false;
+    if (l2_cap != 0 && log.size() >= applied + l2_cap) return false;  // L2 full
     const journal::RecordView v(rec);
     EXPECT_EQ(v.index(), log.size() + 1);
     log.emplace_back(rec.begin(), rec.end());

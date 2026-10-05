@@ -24,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -121,6 +122,56 @@ inline int udp_bound(std::uint16_t port) {
   return s;
 }
 
+// The kernel's software receive timestamp on a UDP socket (SO_TIMESTAMPNS on Linux,
+// SO_TIMESTAMP on macOS): a line packet's time does not depend on when the test reads it.
+inline void enable_rx_timestamps(int fd) {
+  const int one = 1;
+#ifdef SO_TIMESTAMPNS
+  ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &one, sizeof one);
+#else
+  ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof one);
+#endif
+}
+// recvfrom() with that timestamp (wall clock ns; the read time if the kernel gave none).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#pragma GCC diagnostic ignored "-Wsign-conversion"
+#pragma GCC diagnostic ignored "-Wcast-align"
+#pragma GCC diagnostic ignored "-Wconversion"
+inline ssize_t recv_stamped(int fd, std::byte* buf, std::size_t cap, sockaddr_in& from, std::int64_t& rx_ns) {
+  iovec iov{buf, cap};
+  alignas(cmsghdr) char ctrl[256];
+  msghdr m{};
+  m.msg_name = &from;
+  m.msg_namelen = sizeof from;
+  m.msg_iov = &iov;
+  m.msg_iovlen = 1;
+  m.msg_control = ctrl;
+  m.msg_controllen = sizeof ctrl;
+  const ssize_t n = ::recvmsg(fd, &m, MSG_DONTWAIT);
+  rx_ns = 0;
+  if (n <= 0) return n;
+  for (cmsghdr* c = CMSG_FIRSTHDR(&m); c != nullptr; c = CMSG_NXTHDR(&m, c)) {
+    if (c->cmsg_level != SOL_SOCKET) continue;
+#ifdef SO_TIMESTAMPNS
+    if (c->cmsg_type == SCM_TIMESTAMPNS) {
+      timespec ts{};
+      std::memcpy(&ts, CMSG_DATA(c), sizeof ts);
+      rx_ns = static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+    }
+#else
+    if (c->cmsg_type == SCM_TIMESTAMP) {
+      timeval tv{};
+      std::memcpy(&tv, CMSG_DATA(c), sizeof tv);
+      rx_ns = static_cast<std::int64_t>(tv.tv_sec) * 1'000'000'000 + static_cast<std::int64_t>(tv.tv_usec) * 1'000;
+    }
+#endif
+  }
+  if (rx_ns == 0) rx_ns = realtime_ns();
+  return n;
+}
+#pragma GCC diagnostic pop
+
 inline std::uint16_t local_port(int s) {
   sockaddr_in a{};
   socklen_t len = sizeof a;
@@ -169,6 +220,10 @@ class Process {
     ::waitpid(pid_, &st, 0);
     status_ = st;
     pid_ = -1;
+  }
+  // Sends `sig` without waiting (SIGSTOP / SIGCONT: the process stays a child).
+  void signal(int sig) {
+    if (pid_ > 0) ::kill(pid_, sig);
   }
   // Exit code after the process ended (-1 if killed by a signal or still running).
   int wait_exit(std::chrono::milliseconds timeout) {
@@ -230,22 +285,36 @@ inline std::string run_capture(const std::vector<std::string>& args, int* exit_c
 
 class Control {
  public:
-  explicit Control(std::uint16_t port) {
+  // Connects within `connect_ms` (a powered-off host never answers the SYN).
+  explicit Control(std::uint16_t port, std::uint32_t host = e2e_host(), int connect_ms = 3000) {
     fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
-    a.sin_addr.s_addr = htonl(e2e_host());
-    if (::connect(fd_, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) {
+    a.sin_addr.s_addr = htonl(host);
+    const int flags = ::fcntl(fd_, F_GETFL, 0);
+    ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
+    bool ok = ::connect(fd_, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0;
+    if (!ok && errno == EINPROGRESS) {
+      pollfd p{fd_, POLLOUT, 0};
+      int err = 0;
+      socklen_t len = sizeof err;
+      ok = ::poll(&p, 1, connect_ms) == 1 && ::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0;
+    }
+    if (!ok) {
       ::close(fd_);
       fd_ = -1;
+      return;
     }
+    ::fcntl(fd_, F_SETFL, flags);
   }
   ~Control() {
     if (fd_ >= 0) ::close(fd_);
   }
   [[nodiscard]] bool ok() const { return fd_ >= 0; }
-  std::string cmd(const std::string& line) {
+  // A line and its reply; "err ..." when there is none within `reply_ms` (a stopped
+  // node never answers: the connection is then unusable and closed).
+  std::string cmd(const std::string& line, int reply_ms = 90'000) {
     if (fd_ < 0) return "err not connected";
     const std::string l = line + "\n";
     if (::send(fd_, l.data(), l.size(), 0) != static_cast<ssize_t>(l.size())) return "err send";
@@ -253,7 +322,11 @@ class Control {
     char c;
     for (;;) {
       pollfd p{fd_, POLLIN, 0};
-      if (::poll(&p, 1, 90'000) != 1) return "err timeout";
+      if (::poll(&p, 1, reply_ms) != 1) {
+        ::close(fd_);
+        fd_ = -1;
+        return "err timeout";
+      }
       if (::recv(fd_, &c, 1, 0) != 1) return "err closed";
       if (c == '\n') return reply;
       reply += c;
@@ -278,6 +351,7 @@ class Control {
 struct Received {
   SeqNo seq = 0;
   Bytes msg;
+  std::int64_t rx_ns = 0;  // wall-clock receive time (software)
 };
 
 class OuchClient {
@@ -287,6 +361,12 @@ class OuchClient {
   OuchClient(const OuchClient&) = delete;
   OuchClient& operator=(const OuchClient&) = delete;
 
+  // The node's address for the next login (default LLE_E2E_HOST; the lab's trials name
+  // each node's own).
+  OuchClient& at(std::uint32_t host) {
+    host_ = host;
+    return *this;
+  }
   // Connects and logs in requesting `next` (default: the next expected message). Returns
   // the login outcome: 'A' accepted, 'J' + reason, or 'X' on a connection failure.
   char login(std::uint16_t port, std::optional<SeqNo> next = std::nullopt, std::chrono::milliseconds timeout = 5s) {
@@ -297,7 +377,7 @@ class OuchClient {
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
-    a.sin_addr.s_addr = htonl(e2e_host());
+    a.sin_addr.s_addr = htonl(host_);
     if (::connect(fd_, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) {
       drop();
       return 'X';
@@ -418,7 +498,7 @@ class OuchClient {
         continue;
       }
       if (d.seq > next_expected_) ++gaps_;
-      received_.push_back(Received{d.seq, Bytes(d.data.begin(), d.data.end())});
+      received_.push_back(Received{d.seq, Bytes(d.data.begin(), d.data.end()), realtime_ns()});
       next_expected_ = d.seq + 1;
     }
     if (fd_ >= 0 && !a.write.empty()) {
@@ -430,6 +510,7 @@ class OuchClient {
 
   std::string user_;
   std::string password_;
+  std::uint32_t host_ = e2e_host();
   int fd_ = -1;
   std::unique_ptr<soup::ClientSession> sess_;
   bool logged_in_ = false;
@@ -447,6 +528,8 @@ class OuchClient {
 class MoldSubscriber {
  public:
   MoldSubscriber() : line_a_(udp_bound(0)), line_b_(udp_bound(0)), rr_(udp_bound(0)) {
+    enable_rx_timestamps(line_a_);
+    enable_rx_timestamps(line_b_);
     mold::LineArbiterConfig c;
     c.first_seq = 1;
     c.gap_timeout = 20'000'000;
@@ -459,9 +542,46 @@ class MoldSubscriber {
   }
   [[nodiscard]] std::uint16_t port_a() const { return local_port(line_a_); }
   [[nodiscard]] std::uint16_t port_b() const { return local_port(line_b_); }
-  void set_servers(std::uint16_t a, std::uint16_t b) {
+  void set_servers(std::uint16_t a, std::uint16_t b, std::uint32_t host_a = e2e_host(), std::uint32_t host_b = e2e_host()) {
     server_[0] = a;
     server_[1] = b;
+    server_host_[0] = host_a;
+    server_host_[1] = host_b;
+  }
+  // Receives line `line` (0: A, 1: B) on `addr:port` instead: a multicast group, joined on
+  // the interface whose address is `iface` (the lab's lines), or a unicast address of
+  // this host. False if the socket cannot be bound or the group joined.
+  bool listen_line(int line, std::uint32_t addr, std::uint16_t port, std::uint32_t iface) {
+    const int s = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return false;
+    const int one = 1;
+    ::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    int big = 8 << 20;
+    ::setsockopt(s, SOL_SOCKET, SO_RCVBUF, &big, sizeof big);
+    const bool mcast = (addr >> 28) == 0xE;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(mcast ? INADDR_ANY : addr);
+    if (::bind(s, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) {
+      ::close(s);
+      return false;
+    }
+    if (mcast) {
+      ip_mreq m{};
+      m.imr_multiaddr.s_addr = htonl(addr);
+      m.imr_interface.s_addr = htonl(iface);
+      if (::setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m) != 0) {
+        ::close(s);
+        return false;
+      }
+    }
+    ::fcntl(s, F_SETFL, ::fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+    enable_rx_timestamps(s);
+    int& slot = line == 0 ? line_a_ : line_b_;
+    ::close(slot);
+    slot = s;
+    return true;
   }
   // Keep every received line packet as sent (before any induced drop), for pcaps.
   void record(bool on) { record_ = on; }
@@ -530,15 +650,15 @@ class MoldSubscriber {
     for (int i : {1, 0, 2}) {
       for (;;) {
         sockaddr_in from{};
-        socklen_t flen = sizeof from;
-        const ssize_t n = ::recvfrom(p[i].fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr*>(&from), &flen);
+        std::int64_t rx_ns = 0;
+        const ssize_t n = recv_stamped(p[i].fd, buf, sizeof buf, from, rx_ns);
         if (n <= 0) break;
         const std::span<const std::byte> pkt(buf, static_cast<std::size_t>(n));
         if (i < 2) {
           ++packets_[i];
           if (record_) {
             raw_[i].emplace_back(pkt.begin(), pkt.end());
-            log_.push_back(LinePacket{i, ntohs(from.sin_port), realtime_ns(), Bytes(pkt.begin(), pkt.end())});
+            log_.push_back(LinePacket{i, ntohs(from.sin_port), rx_ns, Bytes(pkt.begin(), pkt.end()), ntohl(from.sin_addr.s_addr)});
           }
           ++sources_[i][ntohs(from.sin_port)];
           last_source_[i] = ntohs(from.sin_port);
@@ -555,7 +675,8 @@ class MoldSubscriber {
         }
         mold::Source src = i == 0 ? mold::Source::LineA : mold::Source::LineB;
         if (i == 2) {
-          src = ntohs(from.sin_port) == server_[1] ? mold::Source::RerequestB : mold::Source::RerequestA;
+          src = ntohs(from.sin_port) == server_[1] && ntohl(from.sin_addr.s_addr) == server_host_[1] ? mold::Source::RerequestB
+                                                                                                     : mold::Source::RerequestA;
           ++replies_;
         }
         arb_->on_packet(src, pkt, mono(), sink_);
@@ -596,12 +717,13 @@ class MoldSubscriber {
   [[nodiscard]] SeqNo next_expected() const { return arb_->next_expected(); }
   [[nodiscard]] bool ended() const { return sink_.ended; }
   // Every line packet received while recording, in arrival order, with its sender's UDP
-  // port and a software receive timestamp.
+  // port and address and the kernel's software receive timestamp.
   struct LinePacket {
     int line = 0;
     std::uint16_t sender = 0;
     std::int64_t rx_ns = 0;
     Bytes bytes;
+    std::uint32_t sender_ip = 0;  // host order
   };
   [[nodiscard]] const std::vector<LinePacket>& packet_log() const { return log_; }
   // A nanosecond pcap of both lines as received: UDP from 127.0.0.1:<sender> to
@@ -678,12 +800,13 @@ class MoldSubscriber {
     bool ended = false;
     void on_message(SeqNo, std::span<const std::byte> msg) { s->messages_.emplace_back(msg.begin(), msg.end()); }
     void send_request(mold::Server server, std::span<const std::byte> req) {
-      const std::uint16_t port = s->server_[server == mold::Server::A ? 0 : 1];
+      const int k = server == mold::Server::A ? 0 : 1;
+      const std::uint16_t port = s->server_[k];
       if (port == 0) return;
       sockaddr_in a{};
       a.sin_family = AF_INET;
       a.sin_port = htons(port);
-      a.sin_addr.s_addr = htonl(e2e_host());
+      a.sin_addr.s_addr = htonl(s->server_host_[k]);
       ::sendto(s->rr_, req.data(), req.size(), 0, reinterpret_cast<sockaddr*>(&a), sizeof a);
       ++requests;
     }
@@ -697,6 +820,7 @@ class MoldSubscriber {
   std::unique_ptr<mold::LineArbiter> arb_;
   Sink sink_{this};
   std::uint16_t server_[2] = {0, 0};
+  std::uint32_t server_host_[2] = {e2e_host(), e2e_host()};
   std::uint64_t replies_ = 0;
   SeqNo drop_seq_ = 0;
   std::uint64_t dropped_seq_packets_ = 0;
@@ -874,7 +998,69 @@ struct NodeSpec {
   std::vector<std::string> extra;  // raw lines appended (e.g. a [ha] section)
   std::string operator_key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
   bool metrics = false;
+  // A node on another host (the lab's trials): its own address for the gateways, the
+  // re-request server and the ports below, the lines' destinations (a multicast group or
+  // a unicast address), fixed control and admin ports, and "section.key = value"
+  // overrides applied last (apply_overrides).
+  std::string host_ip;                  // empty: LLE_E2E_HOST
+  std::string line_a_ip, line_b_ip;     // empty: LLE_E2E_PEER_HOST
+  std::uint16_t control = 0, admin = 0;
+  std::vector<std::string> overrides;
 };
+
+// "section.key = value" lines applied to a configuration text: an existing key of the
+// section is replaced in place, a new one goes at the end of its section, a new section
+// at the end of the file. "section.key = -" removes the key.
+inline std::string apply_overrides(const std::string& text, const std::vector<std::string>& overrides) {
+  std::vector<std::string> lines;
+  {
+    std::istringstream in(text);
+    for (std::string l; std::getline(in, l);) lines.push_back(l);
+  }
+  auto trim = [](std::string v) {
+    const auto b = v.find_first_not_of(" \t");
+    const auto e = v.find_last_not_of(" \t");
+    return b == std::string::npos ? std::string() : v.substr(b, e - b + 1);
+  };
+  for (const std::string& o : overrides) {
+    const auto eq = o.find('=');
+    const auto dot = o.find('.');
+    if (eq == std::string::npos || dot == std::string::npos || dot > eq) continue;
+    const std::string section = trim(o.substr(0, dot)), key = trim(o.substr(dot + 1, eq - dot - 1)),
+                      value = trim(o.substr(eq + 1));
+    std::size_t sec = lines.size(), end = lines.size(), at = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+      const std::string t = trim(lines[i]);
+      if (!t.empty() && t.front() == '[') {
+        if (sec != lines.size() && end == lines.size()) end = i;
+        if (t == "[" + section + "]") {
+          sec = i;
+          end = lines.size();
+        }
+        continue;
+      }
+      if (sec != lines.size() && end == lines.size()) {
+        const auto e = t.find('=');
+        if (e != std::string::npos && trim(t.substr(0, e)) == key) at = i;
+      }
+    }
+    const std::string line = key + " = " + value;
+    if (at != lines.size()) {
+      if (value == "-") lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(at));
+      else lines[at] = line;
+    } else if (value != "-") {
+      if (sec == lines.size()) {
+        lines.push_back("[" + section + "]");
+        lines.push_back(line);
+      } else {
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(end), line);
+      }
+    }
+  }
+  std::string out;
+  for (const std::string& l : lines) out += l + "\n";
+  return out;
+}
 
 inline std::vector<std::uint8_t> key_bytes(const std::string& hex) { return *gw::from_hex(hex); }
 
@@ -888,16 +1074,17 @@ inline std::string config_text(const NodeSpec& s) {
     << "\nrunner = " << s.runner << "\nidle_sleep_us = 20\nmetrics = " << (s.metrics ? "true" : "false") << "\n";
   o << "[day]\ndate = 20261001\nclock = " << s.clock << "\nstart = " << s.start << "\nschedule = " << s.schedule << "\n";
   o << "[journal]\nsegment_mib = 8\nspares = 1\nl2_mib = 32\n";
-  const std::string host = e2e_host_text(), peer = e2e_peer_text();
+  const std::string host = s.host_ip.empty() ? e2e_host_text() : s.host_ip, peer = e2e_peer_text();
+  const std::string line_a_ip = s.line_a_ip.empty() ? peer : s.line_a_ip, line_b_ip = s.line_b_ip.empty() ? peer : s.line_b_ip;
   // AF_XDP: fixed ports, the ones xsk_e2e.sh steers to the stages' queues.
   const bool xsk = backend != nullptr && std::string(backend) == "xsk";
   const std::uint16_t gw0 = xsk ? 15000 : s.gw0, gw1 = xsk ? 15001 : s.gw1, rr = xsk ? 26479 : s.rerequest;
   o << "[gateway]\ngw0 = " << host << ":" << gw0 << "\ngw1 = " << host << ":" << gw1
     << "\nheartbeat_ms = 200\nidle_timeout_ms = 60000\nreplay_ring_msgs = 4096\nreplay_ring_mib = 2\n";
-  o << "[md]\nline_a = " << peer << ":" << s.line_a << "\nline_b = " << peer << ":" << s.line_b << "\nrerequest = " << host
+  o << "[md]\nline_a = " << line_a_ip << ":" << s.line_a << "\nline_b = " << line_b_ip << ":" << s.line_b << "\nrerequest = " << host
     << ":" << rr << "\nmax_packet_b = " << s.max_packet_b << "\nheartbeat_ms = 200\neos_linger_ms = 1000\n";
-  o << "[admin]\nport = 0\nbind = " << host << "\noperator.1 = " << s.operator_key << "\n";
-  o << "[control]\nport = 0\nbind = " << host << "\n";
+  o << "[admin]\nport = " << s.admin << "\nbind = " << host << "\noperator.1 = " << s.operator_key << "\n";
+  o << "[control]\nport = " << s.control << "\nbind = " << host << "\n";
   // Busy-poll device settings (busypoll_device_e2e.sh): checked, or applied with
   // LLE_E2E_DEVICE_SETUP, on LLE_E2E_NET_IF.
   if (const char* nif = std::getenv("LLE_E2E_NET_IF"); nif != nullptr && *nif != 0) {
@@ -924,7 +1111,7 @@ inline std::string config_text(const NodeSpec& s) {
       << " password=" << gw::Credential::make(d.password, salt).text() << " gw=" << d.gw << " flags=" << d.flags << "\n";
   }
   for (const auto& l : s.extra) o << l << "\n";
-  return o.str();
+  return s.overrides.empty() ? o.str() : apply_overrides(o.str(), s.overrides);
 }
 
 inline std::filesystem::path fresh_dir(const std::string& name) {
@@ -984,7 +1171,9 @@ class Exchange {
     ctl_ = std::make_unique<Control>(proc_->port_of("control"));
     return ctl_->ok();
   }
-  std::string cmd(const std::string& line) { return ctl_ ? ctl_->cmd(line) : std::string("err not running"); }
+  std::string cmd(const std::string& line, int reply_ms = 90'000) {
+    return ctl_ ? ctl_->cmd(line, reply_ms) : std::string("err not running");
+  }
   [[nodiscard]] bool running() { return proc_ && proc_->alive(); }
   // Barrier: everything received so far is sequenced, applied, released and handed on.
   std::uint64_t sync() {
@@ -1000,6 +1189,10 @@ class Exchange {
   void kill9() {
     if (proc_) proc_->kill(SIGKILL);
     ctl_.reset();
+  }
+  // SIGSTOP / SIGCONT (a stalled node): the process stays this harness's child.
+  void signal(int sig) {
+    if (proc_) proc_->signal(sig);
   }
   int stop(std::chrono::milliseconds timeout = 20s) {
     if (!proc_) return -1;

@@ -1,29 +1,46 @@
 # T25: takeover time (METHODOLOGY §17; plan 10 §7). Full tier: A primary, B backup, C the
 # witness, clients and the hardware-timestamped capture, all on the managed switch; faults
 # needing power or console go through the BMC or PiKVM. The primary emits >= 1 packet per
-# 20 us. T_takeover = t_rx(first line-A MoldUDP64 packet sourced by B) - t_rx(last packet
-# sourced by A before the fault), one capture NIC (one PHC); a trial with any capture drop
-# is invalid. Also reported: T_new (probe orders every 100 us), T_first_new_order_ack, and
-# the detection/promotion breakdown from nlog. Every trial needs 0 oracle violations
+# 20 us (md.heartbeat_us = 20 in the lab file's overrides). T_takeover = t_rx(first line-A
+# MoldUDP64 packet sourced by B) - t_rx(last packet sourced by A before the fault), one
+# capture NIC (one PHC); a trial with any capture drop is invalid. Also reported: T_new
+# (probe orders every 100 us), T_first_new_order_ack, and the detection/promotion
+# breakdown from nlog. Every trial needs 0 oracle violations
 # (bench/failover/check_trial_oracles.py: client exactly-once ledgers, MoldUDP64
 # continuity, journal comparison after rejoin).
 # Pass: F1-F5, F9, F10 with >= 1,000 trials each (F5 >= 100), max T_takeover < 50 ms; F6-F8
-# judged on their own criteria. Per class: p50, p90, p99, max with N, per-trial JSON, pcaps.
+# judged on their own criteria (F6, F7 >= 200: solo mode, release stall <= T_ack + 5 ms;
+# F8 >= 200: no epoch change, service continues; its "alarm within 10 ms" has no detector
+# to meet it: run_trials.py reports it unsupported). Per class: p50, p90, p99, max with N,
+# per-trial JSON, pcaps (bench/failover/run_trials.py summary.json, verdict per class).
+#
+# The driver is bench/failover/run_trials.py --lab, run on host C with the lab's
+# description (lab/failover/t25-lab.toml: hosts, addresses, NICs, BMC, switch, capture
+# port). It refuses that file while it has TBD_ values, and this campaign stays refused
+# until lab_file names the described file. A dry run of everything but the hardware
+# capture runs in the VM (lab/failover/vm-dryrun.toml; never T25 evidence).
 target = "t25"
 methodology = "methodology-v2"
 profile = "host-c"
 ifaces = ["TBD_BY_LAB"]                  # the capture port of host C
 preset = "bench"
 repetitions = 1                          # trials are counted per class below
-sources = ["src/repl", "src/journal", "src/gateway", "src/md", "apps/exchanged", "apps/witnessd", "bench/failover"]
+sources = ["src/repl", "src/journal", "src/gateway", "src/md", "apps/exchanged", "apps/witnessd", "bench/failover",
+           "lab/failover"]
 pass_max_ms = 50
-classes = "F1,F2,F3,F4,F5,F9,F10"
+classes = "F1,F2,F3,F4,F5,F9,F10"        # F10 needs [load] (loadgen at the paired-mode T20 rate, M14)
 trials = 1000
 trials_f5 = 100
+classes_judged = "F6,F7,F8"
+trials_judged = 200
+probe_us = 100
 t_d_ms = "TBD_BY_PILOT"                  # detector timeout T_d: measured stall distribution (R-09), 24 h stall run
-t_w_ms = "TBD_BY_PILOT"                  # witness timeout T_w
-lab_harness = "TBD_BY_LAB"               # the lab trial driver (bench/failover/run_trials.py drives one host only)
+t_ack_ms = "TBD_BY_PILOT"                # T_ack < T_d
+t_w_ms = "TBD_BY_PILOT"                  # witness timeout T_w (< T_d)
+lab_harness = "python3 bench/failover/run_trials.py"
+lab_file = "TBD_BY_LAB"                  # lab/failover/t25-lab.toml once every TBD_BY_LAB in it is a lab fact
 
 commands = [
-  "{lab_harness} --bin {build} --out {out}/trials --classes {classes} --trials {trials} --trials-F5 {trials_f5} --t-d-ms {t_d_ms} --t-w-ms {t_w_ms} --label t25 && cp {out}/trials/summary.json {out}/run-{rep}.json",
+  "{lab_harness} --lab {lab_file} --bin {build} --out {out}/takeover --classes {classes} --trials {trials} --trials-F5 {trials_f5} --t-d-ms {t_d_ms} --t-ack-ms {t_ack_ms} --t-w-ms {t_w_ms} --probe-us {probe_us} --label t25 && cp {out}/takeover/summary.json {out}/run-{rep}-takeover.json",
+  "{lab_harness} --lab {lab_file} --bin {build} --out {out}/judged --classes {classes_judged} --trials {trials_judged} --t-d-ms {t_d_ms} --t-ack-ms {t_ack_ms} --t-w-ms {t_w_ms} --probe-us {probe_us} --label t25 && cp {out}/judged/summary.json {out}/run-{rep}-judged.json",
 ]

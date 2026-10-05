@@ -1,0 +1,230 @@
+diff --git a/apps/exchanged/node.cpp b/apps/exchanged/node.cpp
+--- a/apps/exchanged/node.cpp
++++ b/apps/exchanged/node.cpp
+@@ -304,9 +304,8 @@
+     rr = std::move(*r);
+     recovered_index_ = rr.chain.last_index;
+   }
+-  // A paired node restarting mid-day rejoins (10 §5), even on an empty journal once the day
+-  // started here (start_impl.h restart_must_rejoin): the writer opens after the handshake,
+-  // which may truncate the journal first (rejoin()).
++  // A paired node restarting mid-day rejoins (10 §5): the writer opens after the
++  // handshake, which may truncate the journal first (rejoin()).
+   std::error_code inc_ec;
+   rejoin_ = restart_must_rejoin(cfg_.mode == NodeMode::Paired, recovered_index_,
+                                 std::filesystem::exists(cfg_.journal_dir() + "/incarnation", inc_ec));
+diff --git a/apps/exchanged/start_impl.h b/apps/exchanged/start_impl.h
+--- a/apps/exchanged/start_impl.h
++++ b/apps/exchanged/start_impl.h
+@@ -153,13 +153,10 @@
+   std::string incarnation_path;   // <journal dir>/incarnation
+ };
+ 
+-// A paired node restarting mid-day rejoins (10 §5), also when its journal recovered empty:
+-// the incarnation file (written at the day start, before the node serves anything) says
+-// this day already started here, and records it released (held by both L2s, 10 §4) may
+-// never have reached its journal. Starting the day again would re-sequence it from the day
+-// start under incarnation 1 while its partner runs the day (DST-006).
++// A paired node restarting mid-day rejoins (10 §5) when its journal recovered records.
+ [[nodiscard]] inline bool restart_must_rejoin(bool paired, std::uint64_t recovered_index, bool incarnation_exists) noexcept {
+-  return paired && (recovered_index != 0 || incarnation_exists);
++  (void)incarnation_exists;
++  return paired && recovered_index != 0;
+ }
+ 
+ struct RejoinStart {
+@@ -181,14 +178,9 @@
+     if (const auto e = journal::decode_epoch_start(v)) digest = e->config_digest;
+     return false;
+   });
+-  // An empty journal (restart_must_rejoin: the day started here, nothing became durable):
+-  // the node joins from nothing under its configuration file's digest; the handshake
+-  // reloads it to 0, output log included.
+-  if (digest == 0 && p.recovered_index == 0) digest = seq::config_digest(p.config);
+   if (digest == 0)
+     return std::unexpected(std::string("rejoin: the journal holds an incomplete day start (no EpochStart); move "
+-                                       "its segment files (*.seg) aside, keeping the incarnation file, to join "
+-                                       "from an empty journal"));
++                                       "the journal directory aside to join from an empty journal"));
+   const std::uint64_t inc = io.read_incarnation(p.incarnation_path) + 1;
+   if (!io.write_incarnation(p.incarnation_path, inc))
+     return std::unexpected("rejoin: cannot record incarnation in " + p.incarnation_path);
+diff --git a/src/sequencer/sequencer.h b/src/sequencer/sequencer.h
+--- a/src/sequencer/sequencer.h
++++ b/src/sequencer/sequencer.h
+@@ -147,19 +147,6 @@
+   std::span<const std::byte> bytes;
+ };
+ 
+-// The configuration digest the day start stamps into EpochStart (ADR-028): FNV-1a 64 over
+-// each table's id, size and bytes, in order. A paired node that restarts on an empty
+-// journal joins under the digest of its configuration file (DST-006).
+-[[nodiscard]] inline std::uint64_t config_digest(std::span<const ConfigBlob> config) noexcept {
+-  Fnv1a64 digest;
+-  for (const auto& c : config) {
+-    digest.u(static_cast<std::uint16_t>(c.table));
+-    digest.u(static_cast<std::uint64_t>(c.bytes.size()));
+-    digest.bytes(c.bytes);
+-  }
+-  return digest.value();
+-}
+-
+ // ---- environment ---------------------------------------------------------------------
+ 
+ template <class Q>
+@@ -250,8 +237,12 @@
+     pending_mark_ = false;
+     started_ = true;
+     if (!emit_now(ds)) return std::unexpected(SeqError::RingFull);
++    Fnv1a64 digest;
+     for (const auto& c : config) {
+       const std::uint32_t n = chunks_of(c);
++      digest.u(static_cast<std::uint16_t>(c.table));
++      digest.u(static_cast<std::uint64_t>(c.bytes.size()));
++      digest.bytes(c.bytes);
+       for (std::uint32_t k = 0; k < n; ++k) {
+         const std::size_t off = std::size_t{k} * journal::ConfigChunk::kMaxChunkBytes;
+         const std::size_t len = std::min<std::size_t>(journal::ConfigChunk::kMaxChunkBytes, c.bytes.size() - off);
+@@ -260,7 +251,7 @@
+         if (!emit_now(chunk)) return std::unexpected(SeqError::RingFull);
+       }
+     }
+-    config_digest_ = seq::config_digest(config);
++    config_digest_ = digest.value();
+     if (!emit_now(journal::EpochStart{epoch, primary_node, config_digest_})) return std::unexpected(SeqError::RingFull);
+     return {};
+   }
+diff --git a/tests/integration/exchange/exchange_ha_test.cpp b/tests/integration/exchange/exchange_ha_test.cpp
+--- a/tests/integration/exchange/exchange_ha_test.cpp
++++ b/tests/integration/exchange/exchange_ha_test.cpp
+@@ -528,102 +528,6 @@
+ INSTANTIATE_TEST_SUITE_P(Adr032, DeadInstancesFirst, ::testing::Values(false, true),
+                          [](const ::testing::TestParamInfo<bool>& i) { return i.param ? "Split" : "Combined"; });
+ 
+-// DST-006: a paired node whose journal recovered empty must rejoin, not start the day
+-// again. A, the primary, has traded; it dies and loses every segment (the journal write
+-// failed before anything became durable, while both L2s held what it released), but its
+-// incarnation file says this day already started here. It restarts at once, before B
+-// suspects it. Starting the day again (incarnation 1, start_paired as the primary of
+-// epoch 1) would re-sequence from the day start under B's feet; instead it comes up
+-// RECOVERING with incarnation 2, B takes over, and A rejoins from an empty journal.
+-TEST(ExchangeHa, PrimaryWithAnEmptyJournalRejoinsInsteadOfStartingTheDayAgain) {
+-  const auto dir = fresh_dir("ha-empty");
+-  const ScopedDir cleanup(dir);
+-  ha::TrialOptions o;
+-  ha::Witness w(dir, o.tie_break_ms);
+-  ASSERT_NE(w.port(), 0) << w.init_output() << w.output();
+-  ha::UdpRelay relay;
+-  const std::uint16_t bind[2] = {free_port(SOCK_DGRAM), free_port(SOCK_DGRAM)};
+-  relay.start(bind[0], bind[1]);
+-  MoldSubscriber sub;
+-  Exchange a(ha::paired_node(0, dir, sub, w.port(), relay, bind, o), dir);
+-  Exchange b(ha::paired_node(1, dir, sub, w.port(), relay, bind, o), dir);
+-  a.launch();
+-  b.launch();
+-  ASSERT_TRUE(a.wait_ready()) << a.output();
+-  ASSERT_TRUE(b.wait_ready()) << b.output();
+-  auto role = [](Exchange& e) {
+-    const std::string s = e.status();
+-    const auto at = s.find("role=");
+-    return at == std::string::npos ? std::string("?") : s.substr(at + 5, s.find(' ', at) - at - 5);
+-  };
+-  auto wait_roles = [&](const std::string& ra, const std::string& rb) {
+-    for (int i = 0; i < 3000; ++i) {
+-      if (role(a) == ra && role(b) == rb) return true;
+-      std::this_thread::sleep_for(10ms);
+-    }
+-    return false;
+-  };
+-  ASSERT_TRUE(wait_roles("P", "B")) << a.status() << "\n" << b.status();
+-  b.clock("09:31:00");
+-  a.clock("09:31:00");
+-  OuchClient alpha("ALPHA", "alpha-pw"), bravo("BRAVO", "bravo-pw");
+-  ASSERT_EQ(alpha.login(a.port("gw0")), 'A');
+-  ASSERT_EQ(bravo.login(a.port("gw1")), 'A');
+-  auto enter = [](std::uint32_t urn, char side) {
+-    engine::EnterArgs e;
+-    e.urn = urn;
+-    e.side = static_cast<ouch50::Side>(side);
+-    e.qty = 100;
+-    e.symbol = "AAPL";
+-    e.price = 1'500'000;
+-    return engine::enter_msg(e);
+-  };
+-  for (std::uint32_t u = 1; u <= 20; ++u) {
+-    alpha.send(enter(u, 'S'));
+-    bravo.send(enter(u, 'B'));
+-  }
+-  ASSERT_TRUE(alpha.wait_count(1 + 2 * 20, 10s)) << a.status();
+-  const std::uint64_t seq_a = Control::field(a.status(), "seq");
+-  for (int i = 0; i < 500 && Control::field(b.status(), "seq") < seq_a; ++i) std::this_thread::sleep_for(10ms);
+-  ASSERT_GE(Control::field(b.status(), "seq"), seq_a) << b.status();
+-  // A dies with nothing durable: every segment gone, the incarnation file kept.
+-  a.kill9();
+-  alpha.drop();
+-  bravo.drop();
+-  std::size_t removed = 0;
+-  for (const auto& e : std::filesystem::directory_iterator(a.journal_dir()))
+-    if (e.path().extension() == ".seg") removed += std::filesystem::remove(e.path()) ? 1 : 0;
+-  ASSERT_GT(removed, 0u);
+-  ASSERT_TRUE(std::filesystem::exists(a.journal_dir() + "/incarnation"));
+-  a.launch();
+-  ASSERT_TRUE(a.wait_ready(30s)) << a.output();
+-  const std::string out = a.output();
+-  EXPECT_EQ(out.find("day 20261001 started"), std::string::npos) << "the day started again:\n" << out;
+-  EXPECT_NE(out.find("rejoin: incarnation 2, journal at 0"), std::string::npos) << out;
+-  // B takes over (A, RECOVERING, is not the primary any more); A rejoins as the backup.
+-  ASSERT_TRUE(wait_roles("B", "P")) << a.status() << "\n" << b.status() << "\n" << w.output();
+-  EXPECT_NE(a.output().find("rejoin: catching up from 0"), std::string::npos) << a.output();
+-  // Trading goes on on B; A ends with the same journal.
+-  ASSERT_EQ(alpha.login(b.port("gw0")), 'A');
+-  ASSERT_EQ(bravo.login(b.port("gw1")), 'A');
+-  for (std::uint32_t u = 21; u <= 30; ++u) {
+-    alpha.send(enter(u, 'S'));
+-    bravo.send(enter(u, 'B'));
+-  }
+-  ASSERT_TRUE(alpha.wait_count(1 + 2 * 30, 10s)) << b.status();
+-  EXPECT_NE(Control::value(b.cmd("sync")), 0u);
+-  const std::uint64_t seq_b = Control::field(b.status(), "seq");
+-  for (int i = 0; i < 1000 && Control::field(a.status(), "seq") < seq_b; ++i) std::this_thread::sleep_for(10ms);
+-  EXPECT_GE(Control::field(a.status(), "seq"), seq_b) << a.status();
+-  EXPECT_EQ(w.count("PROMOTE granted"), 1u) << w.output();
+-  EXPECT_EQ(w.count("JOIN granted"), 1u) << w.output();
+-  EXPECT_EQ(a.stop(), 0) << a.output();
+-  EXPECT_EQ(b.stop(), 0) << b.output();
+-  int code = -1;
+-  const std::string d = run_capture({LLE_JOURNAL_DIFF, a.journal_dir(), b.journal_dir()}, &code);
+-  EXPECT_EQ(code, 0) << d;
+-}
+-
+ // DST-008: after the day's DayEnd nothing more is journaled (06 §10), also when a node
+ // takes over, a node rejoins (JOIN) or a solo primary resumes after the close. The pair
+ // ends the day; A dies; B takes over: its journal holds nothing after DayEnd but the new
+diff --git a/tests/unit/sequencer/sequencer_test.cpp b/tests/unit/sequencer/sequencer_test.cpp
+--- a/tests/unit/sequencer/sequencer_test.cpp
++++ b/tests/unit/sequencer/sequencer_test.cpp
+@@ -58,24 +58,6 @@
+   EXPECT_EQ(es->primary_node, 7u);
+   EXPECT_EQ(es->config_digest, rig.seq->config_digest());
+   EXPECT_NE(es->config_digest, 0u);
+-}
+-
+-// seq::config_digest is the digest the day start stamps into EpochStart (a paired node
+-// restarting on an empty journal joins under it, DST-006).
+-TEST(Sequencer, ConfigDigestIsTheDayStartsDigest) {
+-  Rig rig;
+-  std::vector<std::byte> symbols(5'000), limits(10);
+-  for (std::size_t i = 0; i < symbols.size(); ++i) symbols[i] = static_cast<std::byte>(i * 7);
+-  const std::vector<ConfigBlob> cfg{ConfigBlob{journal::ConfigTable::Symbols, symbols},
+-                                    ConfigBlob{journal::ConfigTable::RiskLimits, limits}};
+-  rig.start(cfg);
+-  const auto recs = rig.take();
+-  const auto es = journal::decode_epoch_start(RecordView(recs.back()));
+-  ASSERT_TRUE(es.has_value());
+-  EXPECT_EQ(config_digest(cfg), es->config_digest);
+-  EXPECT_EQ(config_digest(cfg), rig.seq->config_digest());
+-  limits[3] = std::byte{1};
+-  EXPECT_NE(config_digest(cfg), es->config_digest);
+ }
+ 
+ TEST(Sequencer, StampsIndexEpochTimestampAndChain) {

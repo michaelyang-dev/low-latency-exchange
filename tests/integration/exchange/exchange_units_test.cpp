@@ -2,10 +2,12 @@
 // tests: the input SCQs' single-consumer guard, the ring-occupancy gauges.
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <thread>
 
 #include "concurrent/mpsc_scq.h"
 #include "exchanged/consumer_guard.h"
+#include "exchanged/restart_guard.h"
 #include "exchanged/ring_gauge.h"
 
 namespace lle::exch {
@@ -91,4 +93,45 @@ TEST(RingGauge, ScqSizeFollowsPushesAndPops) {
 }
 
 }  // namespace
+// The restart-loop guard (restart_guard.h): consecutive exits at the same point from the
+// same journal count up; a different point, target or journal starts again; the start is
+// refused at the limit, and only for the journal that recorded it.
+TEST(RestartGuard, CountsIdenticalExitsAndRefusesAtTheLimit) {
+  std::optional<RestartRecord> rec;
+  for (std::uint32_t k = 1; k <= 3; ++k) {
+    rec = next_restart_record(rec, "truncate the journal to", 0, 517);
+    EXPECT_EQ(rec->count, k);
+  }
+  EXPECT_TRUE(restart_refused(rec, 517, 3));
+  EXPECT_FALSE(restart_refused(rec, 517, 4));
+  EXPECT_FALSE(restart_refused(rec, 0, 3)) << "the *.seg files were moved aside: another journal";
+  EXPECT_FALSE(restart_refused(rec, 517, 0)) << "limit 0: never";
+  EXPECT_FALSE(restart_refused(std::nullopt, 517, 3));
+  EXPECT_EQ(next_restart_record(rec, "truncate the journal to", 1, 517).count, 1u);
+  EXPECT_EQ(next_restart_record(rec, "reload the engine to", 0, 517).count, 1u);
+  EXPECT_EQ(next_restart_record(rec, "truncate the journal to", 0, 518).count, 1u);
+  const std::string msg = restart_refusal(*rec);
+  EXPECT_NE(msg.find("*.seg"), std::string::npos) << msg;
+  EXPECT_NE(msg.find("truncate the journal to 0"), std::string::npos) << msg;
+}
+
+TEST(RestartGuard, TheRecordRoundTripsThroughItsFile) {
+  const RestartRecord r{"reload the engine to", 42, 4096, 2};
+  const auto back = parse_restart_record(format_restart_record(r));
+  ASSERT_TRUE(back.has_value());
+  EXPECT_EQ(back->what, r.what);
+  EXPECT_EQ(back->target, 42u);
+  EXPECT_EQ(back->recovered, 4096u);
+  EXPECT_EQ(back->count, 2u);
+  for (const char* bad : {"", "exit5", "exit5 0 1 2 x", "exit4 1 1 2 x", "exit5 1 1 2"}) EXPECT_FALSE(parse_restart_record(bad)) << bad;
+  const auto path = (std::filesystem::temp_directory_path() / ("lle-restart-guard-" + std::to_string(::getpid()))).string();
+  EXPECT_FALSE(read_restart_record(path).has_value());
+  ASSERT_TRUE(write_restart_record(path, r));
+  const auto read = read_restart_record(path);
+  ASSERT_TRUE(read.has_value());
+  EXPECT_EQ(read->count, 2u);
+  clear_restart_record(path);
+  EXPECT_FALSE(std::filesystem::exists(path));
+}
+
 }  // namespace lle::exch

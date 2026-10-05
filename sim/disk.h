@@ -23,6 +23,7 @@
 // The Disk object belongs to the Node and survives crashes; DiskFile handles
 // live in process memory.
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <span>
@@ -111,6 +112,14 @@ class Disk {
     atlas_replicas_ = replicas;
   }
   [[nodiscard]] const DiskParams& params() const noexcept { return p_; }
+  // Opt-in gate on injected I/O errors (a world keeping its failures inside a failure
+  // model): an EIO drawn while the gate says no is not applied. The draw itself is made
+  // either way, so the disk's random stream does not depend on the gate. Unset: no gate.
+  // `landed` (optional) is told when a gated error is delivered (the node is failing).
+  void set_fault_gate(std::function<bool()> gate, std::function<void()> landed = {}) {
+    fault_gate_ = std::move(gate);
+    fault_landed_ = std::move(landed);
+  }
   // Overrides the swarm-drawn parameters (tests, targeted scenarios).
   void set_params(const DiskParams& p) noexcept {
     p_ = p;
@@ -124,6 +133,10 @@ class Disk {
   [[nodiscard]] std::uint64_t dirty(std::uint32_t f) const;
 
   static Dispatch on_event(void* ctx, const Event& ev);
+  [[nodiscard]] bool faults_allowed() const { return !fault_gate_ || fault_gate_(); }
+  void fault_landed() const {
+    if (fault_landed_) fault_landed_();
+  }
   void set_handler(HandlerId h) noexcept { handler_ = h; }
 
  private:
@@ -179,6 +192,8 @@ class Disk {
   NodeId node_;
   DiskParams p_;
   Prng rng_;
+  std::function<bool()> fault_gate_;
+  std::function<void()> fault_landed_;
   HandlerId handler_ = 0;
   std::uint32_t atlas_replica_ = 0;
   std::uint32_t atlas_replicas_ = 1;

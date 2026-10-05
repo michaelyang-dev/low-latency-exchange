@@ -1,0 +1,74 @@
+# The VM dry run of the T25 lab trials (bench/failover/run_trials.py --lab): everything the
+# lab does except the hardware capture, on one machine. Hosts A and B are the network
+# namespaces of lab/failover/vm_netns.sh, host C is the root namespace (witnessd, the
+# clients, a software tcpdump on the bridge). Host faults (F4 panic, F5 power off) are
+# emulated by SIGKILL of the node. Never valid for T25: software timestamps, one CPU
+# set shared by all three "hosts", emulated host faults.
+#   sudo lab/failover/vm_netns.sh up
+#   python3 bench/failover/run_trials.py --lab lab/failover/vm-dryrun.toml --bin BUILD --out OUT ...
+name = "vm-dryrun"
+t25 = false
+timestamps = "software"
+repo = "{repo}"              # this checkout (the runner fills it in)
+build = "{build}"            # --bin
+state = "/var/tmp/lle-t25-vm"
+deploy = "sudo -n mkdir -p $(dirname {remote}) && sudo -n cp {local} {remote}"
+ssh_options = ""
+emulate_host_faults = true
+
+common_overrides = [
+  "md.heartbeat_us = 20",    # the lab's line load (METHODOLOGY §17)
+  "md.multicast_if = eth0",
+  "md.ttl = 1",
+]
+
+[c]
+ip = "10.77.0.254"
+witness_port = 7400
+capture_iface = "lle-br"
+# Software timestamps (a bridge has no PHC): tcpdump's own receive times.
+capture_start = "sudo -n tcpdump -i {iface} --time-stamp-precision nano -B 65536 -w {pcap} 'udp and (dst host {group_a} or dst host {group_b})' 2> {stderr} & echo $! > {trial}/capture.pid"
+capture_stop = "sudo -n kill -INT $(cat {trial}/capture.pid); for i in $(seq 1 50); do sudo -n kill -0 $(cat {trial}/capture.pid) 2>/dev/null || exit 0; sleep 0.1; done"
+capture_settle_ms = 1000
+
+[lines]
+a = "239.77.0.1:26477"
+b = "239.77.0.2:26478"
+
+[a]
+ssh = ""                     # local
+netns = "lleA"
+ip = "10.77.0.1"
+repl = "10.78.0.1:7500"
+data_dir = "/var/tmp/lle-t25-vm/A/data"
+conf = "/var/tmp/lle-t25-vm/haA.conf"
+nics = ["eth0", "ab0"]
+nics_restore = "ip route replace 224.0.0.0/4 dev eth0"
+sudo = "sudo -n"
+power_off = ""               # emulated (emulate_host_faults)
+power_on = ""
+ports = { gw0 = 15000, gw1 = 15001, rerequest = 26479, control = 17000, admin = 17001 }
+overrides = []
+
+[b]
+ssh = ""
+netns = "lleB"
+ip = "10.77.0.2"
+repl = "10.78.0.2:7500"
+data_dir = "/var/tmp/lle-t25-vm/B/data"
+conf = "/var/tmp/lle-t25-vm/haB.conf"
+nics = ["eth0", "ab0"]
+nics_restore = "ip route replace 224.0.0.0/4 dev eth0"
+sudo = "sudo -n"
+power_off = ""
+power_on = ""
+ports = { gw0 = 15000, gw1 = 15001, rerequest = 26479, control = 17000, admin = 17001 }
+overrides = []
+
+[link]
+cut = "sudo -n ip -n lleA link set dev ab0 down"
+heal = "sudo -n ip -n lleA link set dev ab0 up"
+
+[load]
+start = ""                   # F10 needs loadgen at the paired-mode T20 rate: not in the dry run
+stop = ""

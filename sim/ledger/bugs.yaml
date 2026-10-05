@@ -237,3 +237,184 @@ bugs:
       journal::recover and exch::basic_replay_day: DayStart plus one Config chunk gets the
       ADR-028 verdict at the found tree and the incomplete-day-start verdict at the fix,
       and a complete day start with another configuration keeps the ADR-028 verdict.
+  - id: DST-006
+    title: "a paired node whose journal recovered empty after it had started the day ran the day start again (incarnation 1, the day's first primary) while its partner ran the day"
+    component: exchanged
+    targets: [T10, T24, T26]
+    category: production
+    found_utc: "2026-10-05T00:36:00Z"
+    campaign_id: dst-006-found-exchange_ha-2000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-006.patch
+    seed: "0x000000000000003c"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x53e5cec38df162c4"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-LINE
+    signature: "O-LINE:67547:0x41c206a6724b9310"
+    root_cause: >-
+      Node::open_journal treated a paired restart as a rejoin only when the journal
+      recovered a record. A journal write that fails before the first batch is durable
+      stops the node (the io stage never retries) and leaves the journal empty, although
+      the pair had released records: paired release needs only both L2s (10 §4). The
+      restart then took the day-start path: start_fresh_day, the incarnation file written
+      as 1 again, start_paired(1, initial primary) while the partner ran the day. As the
+      day's first primary the node sequenced a second history from index 7, and its md
+      (first sequence from the stale output log) sent line A bytes for sequence numbers
+      the partner's line B had already carried with other bytes. The incomplete-day-start
+      runbook led to the same path, since moving the journal directory aside also moved
+      the incarnation file. Fix: start_impl.h restart_must_rejoin (rejoin also on an empty
+      journal when the incarnation file says the day started here), begin_rejoin joins an
+      empty journal under the configuration's digest (seq::config_digest) and the
+      handshake reloads to 0; the runbook moves only the *.seg files (exchange-node.md §8).
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-006_empty_journal_paired_restart
+    counted: true
+    count_reason: >-
+      Production start-up of exchanged in paired mode (apps/exchanged/node.cpp,
+      start_impl.h). Safety defect under one failure: a restarted node re-sequences the day
+      as primary of epoch 1 while its partner runs it, so the market data a subscriber
+      receives for one sequence number differs between line A and line B, and the
+      incarnation the witness relies on repeats. Found by exsim's exchange_ha world through
+      O-LINE (mold::LineComparator over every line packet), diagnosed from the node's
+      "day started" at index 6 with a non-empty output log. Reproduces from seed at the
+      found tree: 39 of 2,000 exchange_ha seeds (38 O-LINE, one O-LIVE; campaign
+      dst-006-found-exchange_ha-2000),
+      all passing at the fix. One root cause, one fix (by the node's owner, from the
+      simulator's proposed patch). The seed-independent regression test runs the production
+      restart decision and begin_rejoin on an empty journal: at the found tree the node does
+      not rejoin and begin_rejoin refuses the empty journal; at the fix it rejoins under the
+      day's configuration digest with incarnation 2.
+  - id: DST-007
+    title: "refclient's HA order entry took an unsolicited cancel as the answer to a pending Cancel and released every earlier pending message, which a failover then lost"
+    component: client
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-05T00:50:00Z"
+    campaign_id: dst-007-found-exchange_ha-2000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-007.patch
+    seed: "0x0000000000000001"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x07e282d3b5c04024"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-EXACTLY-ONCE
+    signature: "O-EXACTLY-ONCE:856130:0x84e39fc11ae36b43"
+    root_cause: >-
+      client::HaOrderEntry keeps every message pending until the response to it or to a
+      later message arrives, and releases the messages before a matched one (the engine
+      applies a session's messages in order). A cancel-like message (Order Canceled, AIQ
+      Canceled, Cancel Pending, Cancel Reject, Order Modified) was matched to a pending
+      Cancel or Modify by the order it names and released every earlier pending message
+      too. That included unsolicited ones, which answer no message: cancel-on-disconnect
+      ('C', reason 'Z'), the close ('E'), IOC, a halt, self-match, AIQ, and an Order Canceled
+      'U' that completes an earlier Cancel already answered by Cancel Pending. The released
+      messages could still sit in the node's queue; when the node then died or lost the
+      primary role, the client never sent them again. Fix: only Order Canceled with reason
+      User Requested, Cancel Pending, Cancel Reject and Order Modified answer a pending Cancel
+      or Modify, and each acknowledges only its own entry; the cumulative rule stays for
+      responses that name a consumed UserRefNum.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-007_ha_client_unsolicited_cancel
+    counted: true
+    count_reason: >-
+      Production client code (src/client/order_entry.cpp: refclient's order entry, the T18
+      system under test, and loadgen), not harness. Correctness defect under one failure:
+      orders the client considers processed are lost without a response, and the client
+      never re-sends them. Found by exsim's exchange_ha world through O-EXACTLY-ONCE (every
+      Enter Order sent before one that got a response must be consumed in the final
+      journal), diagnosed from the client's pending count falling at unsolicited 'C'/'Z'
+      cancels. Reproduces from seed at the found tree: 934 of 2,000 exchange_ha seeds
+      (campaign dst-007-found-exchange_ha-2000), all passing at the fix. One root cause, one
+      fix (by the clients' owner, from the simulator's proposed diff). The seed-independent
+      regression test drives HaOrderEntry: an unsolicited cancel of an order with a pending
+      Cancel, and a 'C'/'U' after 'P', release the earlier Enter Order at the found tree and
+      leave it pending at the fix.
+  - id: DST-008
+    title: "a takeover, JOIN or RESUME after the day's DayEnd restarted the sequencer: InstanceDowns, input and another DayEnd were journaled after DayEnd"
+    component: exchanged
+    targets: [T05, T24, T26]
+    category: production
+    found_utc: "2026-10-05T01:11:00Z"
+    campaign_id: dst-008-found-exchange_ha-2000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-008.patch
+    seed: "0x0000000000000126"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0xcbf6feddc12dcb77"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-STREAM
+    signature: "O-STREAM:450484:0x616ca6ea94f0ad73"
+    root_cause: >-
+      When a node becomes primary (a takeover, a JOIN's new epoch, a RESUME) the replication
+      stage resyncs the sequencer to the record log's tail, and Sequencer::resume() started
+      it. After the close the day was over (06 §10: nothing is journaled after DayEnd), but
+      the new primary then journaled the dead instances' InstanceDowns (ADR-032's first
+      list), gateway input and a second DayEnd after the first. Clients that already had
+      End of Session received more messages, and subscribers' End of Session came short of
+      the stream. Fix: the resync checks the log (the last record but EpochStarts is DayEnd)
+      and keeps the sequencer stopped (Sequencer::day_already_ended), dropping the pending
+      InstanceDowns and re-injected input; split mode carries the flag in the resync slot.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-008_takeover_after_day_end
+    counted: true
+    count_reason: >-
+      Production replication stage and sequencer of exchanged (apps/exchanged/repl_stage.h,
+      src/sequencer). Correctness defect under one failure after the close: the journal, the
+      output streams and the engine change after the day ended, and clients get messages
+      after End of Session. Found by exsim's exchange_ha world through O-STREAM (a client's End
+      of Session with fewer messages than the final journal holds) and O-ARB, diagnosed from
+      the final journal's repeated DayEnd records. Reproduces from seed at the found tree: 12
+      of 2,000 exchange_ha seeds (11 O-STREAM, one O-ARB; campaign dst-008-found-exchange_ha-2000), all passing at the
+      fix. One root cause, one fix (by the node's owner, from the simulator's proposed patch).
+      The seed-independent regression test runs two paired nodes and the witness on the
+      simulator with no clients and no faults: the day ends, the primary dies, the backup
+      takes over; at the found tree its journal holds a SessionEvent and DayEnds after DayEnd,
+      at the fix only the new epoch's EpochStart.
+  - id: DST-009
+    title: "the JOIN window froze a solo primary's release while its joiner, which may apply only up to that release, needed L2 room to drain: no JOIN and no release for the rest of the day"
+    component: repl
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-05T01:25:00Z"
+    campaign_id: dst-009-found-exchange_ha-2000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-009.patch
+    seed: "0x00000000000001f8"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x5c130a7aeaaee384"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:18109527:0x77fd32fd4725b7f4"
+    root_cause: >-
+      A solo primary releases up to its durable index (10 §4). A disk stall held that index
+      while the primary sequenced on. A restarted node caught up; a recovering joiner applies
+      only up to the primary's announced release, so the records it held past that point
+      stayed in its L2. When the joiner got within join_lag_records of the tail the JOIN
+      window opened and paused sequencing and release (10 §5 step 5). Release stayed paused
+      after the stall ended, the joiner's L2 was full of records it could not apply, it could
+      not take the last records, never reached zero lag, and no JOIN was relayed: the primary
+      released nothing more that day. Fix (Replica): at the lag threshold the window pauses
+      sequencing only; release keeps following durability; the JOIN is relayed once the
+      joiner is at zero lag and release equals the tail, and release is gated only while
+      that JOIN is pending.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-009_join_window_l2_deadlock
+    counted: true
+    count_reason: >-
+      Production replication core (src/repl/replica.h) with exchanged's host. Liveness
+      defect under one failure (the joiner's restart) plus a disk stall, which the model
+      allows at any time: the primary stops releasing for the rest of the day and every
+      client and subscriber waits. Found by exsim's exchange_ha world through O-LIVE, the
+      deadlock traced in the replica's join and release state and the joiner's refused L2
+      appends. Reproduces from seed at the found tree: 1 of 2,000 exchange_ha seeds
+      (campaign dst-009-found-exchange_ha-2000), all passing at the fix. One root cause, one
+      fix (by the replication owner, the simulator's option (a)). The seed-independent
+      regression test drives the production Replica in the repl harness: a durable stall on
+      the solo primary and a joiner whose L2 holds 55 records past what it applied; at the
+      found tree the window freezes release and the joiner never becomes backup, at the fix
+      it drains and the pair forms.

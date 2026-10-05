@@ -95,6 +95,9 @@ struct ReloadResult {
 struct RejoinHooks {
   std::function<bool(std::uint64_t)> truncate;          // journal (L3) and RecordLog to index t
   std::function<ReloadResult(std::uint64_t)> reload;    // engine and output log from records 1..t
+  // Before an exit 5 (what the node had to do, the index): the restart-loop guard's record
+  // (restart_guard.h). Optional.
+  std::function<void(const char*, std::uint64_t)> before_restart;
 };
 
 // Exit code of a node that must restart its rejoin handshake.
@@ -105,6 +108,7 @@ struct ReplStageConfig {
   env::Endpoint bind{};     // this node's data-plane endpoint
   env::Endpoint peer{};     // the partner's
   env::Endpoint witness{};  // witnessd
+  std::uint32_t witness_bind = 0;  // the witness link's local address (0: the kernel's choice)
   repl::NodeId initial_primary = 0;
   std::uint64_t peer_incarnation = 1;  // the backup's incarnation at day start (witness --incN)
   std::vector<std::uint32_t> sessions;  // every session id (instance_down)
@@ -181,6 +185,10 @@ class BasicReplStage {
     pending_down_.reserve(cfg_.sessions.size() * 2);
     // Every session on both instances: a take-over plus a RESUME's own instances.
     seq_->reserve_first(cfg_.sessions.size() * 2);
+    // A promotion's re-injected input: the FORWARD window and the popped message.
+    pending_ahead_.reserve(cfg_.repl.forward_slots + 1);
+    seq_->reserve_ahead(cfg_.repl.forward_slots + 1);
+    record_buf_.resize(journal::kMaxRecordBytes);
   }
   BasicReplStage(const BasicReplStage&) = delete;
   BasicReplStage& operator=(const BasicReplStage&) = delete;
@@ -253,7 +261,10 @@ class BasicReplStage {
       if (repl::is_primary(role)) {
         // InstanceDown goes to the sequencer when publish_split() allows sequencing
         // again (ADR-032); only what did not fit there goes through the input queue.
-        if (published_allowed_) did |= push_instance_down();
+        if (published_allowed_) {
+          did |= push_instance_down();
+          did |= push_ahead_overflow();
+        }
         did |= reinject_staged();
       } else if (role == repl::Role::kBackup || role == repl::Role::kCandidate) {
         did |= forward_inbound(now);
@@ -272,10 +283,13 @@ class BasicReplStage {
         seq_->resume(log_->tail(), std::max(timers_seen_, seq_->next_timer()),
                      std::max(snapshot_next_, seq_->next_snapshot_id()), digest_);
         resync_ = false;
+        if (day_ended()) end_of_day_takeover();
       }
       did |= deliver_instance_down();
       did |= push_instance_down();  // what did not fit in the first list
       did |= reinject_staged();
+      did |= deliver_ahead();       // the promotion's re-injected input, then the popped message
+      did |= push_ahead_overflow();
       work_.finish();  // the driver meters sequencing (seq)
       {
         const ScqConsumerScope consumer(sh_->scq_consumer, ScqConsumerGuard::kSeq);
@@ -349,14 +363,19 @@ class BasicReplStage {
     if (want && !published_allowed_) {
       if (resync_) {
         (void)drain_tee();
-        sp.resync = SplitRepl::Resync{log_->tail(), timers_seen_, snapshot_next_, digest_};
+        const bool ended = day_ended();
+        if (ended) end_of_day_takeover();
+        sp.resync = SplitRepl::Resync{log_->tail(), timers_seen_, snapshot_next_, digest_, ended};
         sp.resync_gen.fetch_add(1, std::memory_order_release);
         resync_ = false;
       }
       // While the seq thread is parked (InstanceDown comes with a grant's EpochStart,
       // appended once it parked, or from the handshake, before it ran) the sequencer's
       // first list is ours; allowing sequencing below publishes it with the resync slot.
-      if (seq_parked()) (void)deliver_instance_down();
+      if (seq_parked()) {
+        (void)deliver_instance_down();
+        (void)deliver_ahead();
+      }
       sp.allowed.store(true, std::memory_order_release);
       published_allowed_ = true;
     } else if (!want && published_allowed_) {
@@ -373,7 +392,7 @@ class BasicReplStage {
     d.dst_addr = false;
     if (auto r = data_.open(d); !r) return std::unexpected("repl: data link: " + net::to_string(r.error()));
     net::UdpConfig c;
-    c.bind = env::Endpoint{cfg_.bind.ipv4, 0};
+    c.bind = env::Endpoint{cfg_.witness_bind, 0};
     c.dst_addr = false;
     if (auto r = ctl_.open(c); !r) return std::unexpected("repl: witness link: " + net::to_string(r.error()));
     return {};
@@ -410,6 +429,31 @@ class BasicReplStage {
     note_record(v);
     resync_ = true;
     return true;
+  }
+  // 06 §10: the day's DayEnd is the log's last record but for the EpochStarts of later
+  // epochs (a takeover, a JOIN or a RESUME after the close). Cold: a resync.
+  [[nodiscard]] bool day_ended() {
+    for (std::uint64_t i = log_->tail().last_index; i != 0; --i) {
+      const std::uint32_t n = log_->read(i, std::span<std::byte>(record_buf_));
+      if (n == 0) return false;
+      const journal::RecordView v{std::span<const std::byte>(record_buf_.data(), n)};
+      if (v.type() == journal::RecordType::EpochStart) continue;
+      return v.type() == journal::RecordType::DayEnd;
+    }
+    return false;
+  }
+  // The day ended before this node took over, joined or resumed: nothing more is
+  // sequenced (DST-008), so the dead instances' InstanceDowns and the re-injected input are
+  // dropped (the close cancelled every Day order and ended every session). In combined
+  // mode the sequencer stops here; in split mode the seq thread stops it from the resync
+  // slot.
+  void end_of_day_takeover() {
+    if (!split_) seq_->day_already_ended();
+    pending_down_.clear();
+    down_next_ = 0;
+    pending_ahead_.clear();
+    ahead_next_ = 0;
+    NLOG_INFO("repl: the day ended at the close: the sequencer stays stopped");
   }
   // Counters the sequencer continues from (Timer records, SnapshotMark ids, config digest).
   void note_record(const journal::RecordView& v) {
@@ -476,21 +520,71 @@ class BasicReplStage {
     NLOG_ERROR("repl: rejoin must {} {} while the node runs: restarting the handshake", std::string_view(what), t);
     std::fprintf(stderr, "exchanged: rejoin must %s %llu while running: exiting to restart the handshake\n", what,
                  static_cast<unsigned long long>(t));
+    if (hooks_.before_restart) hooks_.before_restart(what, t);
     Env::exit(kExitRestartRejoin);
   }
 
   // ---- sequencer side -------------------------------------------------------------------
+  // A FORWARD for our sequencer: from the backup while paired (into the OUCH queue), or,
+  // after a PROMOTE, the replica's re-injection of our own pending FORWARDs (a solo primary
+  // has no backup, so nothing else is injected then). Those go ahead of the queue, in
+  // order: a gateway may have queued newer input of the same session meanwhile, and
+  // behind it they would carry lower UserRefNums than orders already taken and be
+  // ignored as resends (Sequencer::inject_ahead).
   bool inject(const repl::wire::Forward& f) {
-    if (f.kind == repl::wire::ForwardKind::kSessionEvent) {
-      return sh_->ouch.try_push(seq::session_event_inbound(seq::SessionEventMsg{
-          f.session_id, f.instance, static_cast<journal::SessionEventKind>(f.event), f.requested_seq}));
-    }
     seq::InboundMsg m;
-    gw::make_inbound(m, f.session_id, f.account, f.instance, f.bytes, 0);
-    // The backup's gateway flagged it (an over-long packet, truncated there): the record
-    // carries exactly the flags a direct submission would have (wire::Forward::record_flags).
-    m.flags = static_cast<std::uint16_t>(m.flags | f.record_flags);
+    if (f.kind == repl::wire::ForwardKind::kSessionEvent) {
+      m = seq::session_event_inbound(seq::SessionEventMsg{f.session_id, f.instance,
+                                                          static_cast<journal::SessionEventKind>(f.event), f.requested_seq});
+    } else {
+      gw::make_inbound(m, f.session_id, f.account, f.instance, f.bytes, 0);
+      // The backup's gateway flagged it (an over-long packet, truncated there): the record
+      // carries exactly the flags a direct submission would have (wire::Forward::record_flags).
+      m.flags = static_cast<std::uint16_t>(m.flags | f.record_flags);
+    }
+    if (reinjecting()) return queue_ahead(m);
     return sh_->ouch.try_push(m);
+  }
+  [[nodiscard]] bool reinjecting() const noexcept { return replica_ && replica_->role() == repl::Role::kSoloPrimary; }
+  bool queue_ahead(const seq::InboundMsg& m) {
+    if (pending_ahead_.size() == pending_ahead_.capacity()) return false;  // retried (sized for the window)
+    pending_ahead_.push_back(m);  // within the capacity: no allocation
+    return true;
+  }
+  // The re-injected input into the sequencer's list ahead of the OUCH queue. The sequencer
+  // must not be running: combined mode, or split mode with the seq thread parked.
+  bool deliver_ahead() {
+    bool did = false;
+    while (ahead_next_ < pending_ahead_.size() && seq_->inject_ahead(pending_ahead_[ahead_next_])) {
+      work_.start();
+      work_.add();
+      ++ahead_next_;
+      did = true;
+    }
+    if (ahead_next_ < pending_ahead_.size() && !ahead_overflow_noted_) {
+      ahead_overflow_noted_ = true;
+      NLOG_WARN("repl: {} re-injected inputs did not fit the sequencer's list: queued behind newer input",
+                pending_ahead_.size() - ahead_next_);
+    }
+    finish_ahead();
+    return did;
+  }
+  // What did not fit (or came after split mode allowed sequencing again): the OUCH queue.
+  bool push_ahead_overflow() {
+    bool did = false;
+    while (ahead_next_ < pending_ahead_.size() && sh_->ouch.try_push(pending_ahead_[ahead_next_])) {
+      ++ahead_next_;
+      did = true;
+    }
+    finish_ahead();
+    return did;
+  }
+  void finish_ahead() noexcept {
+    if (ahead_next_ == pending_ahead_.size() && ahead_next_ != 0) {
+      pending_ahead_.clear();
+      ahead_next_ = 0;
+      ahead_overflow_noted_ = false;
+    }
   }
 
   void instance_down(repl::NodeId peer) {
@@ -595,8 +689,8 @@ class BasicReplStage {
   // behind whatever the core re-injects (its pending FORWARDs, in order).
   bool reinject_staged() {
     if (!staged_ || replica_->pending_forwards() != 0) return false;
-    const bool ok = staged_event_ ? sh_->ouch.try_push(seq::session_event_inbound(staged_ev_))
-                                  : sh_->ouch.try_push(staged_msg_);
+    const seq::InboundMsg m = staged_event_ ? seq::session_event_inbound(staged_ev_) : staged_msg_;
+    const bool ok = reinjecting() ? queue_ahead(m) : sh_->ouch.try_push(m);
     if (ok) {
       work_.start();
       work_.add();
@@ -679,6 +773,10 @@ class BasicReplStage {
   std::vector<seq::SessionEventMsg> pending_down_;
   std::size_t down_next_ = 0;
   bool down_overflow_noted_ = false;
+  std::vector<seq::InboundMsg> pending_ahead_;  // a promotion's re-injected input (inject_ahead)
+  std::vector<std::byte> record_buf_;            // day_ended(): one record at a time
+  std::size_t ahead_next_ = 0;
+  bool ahead_overflow_noted_ = false;
   bool staged_ = false;
   bool staged_event_ = false;
   seq::InboundMsg staged_msg_{};
@@ -711,6 +809,7 @@ class BasicSeqSide {
     if (g != seen_resync_) {
       const SplitRepl::Resync& r = sp_->resync;
       seq_->resume(r.chain, r.timers, r.next_snapshot_id, r.digest);
+      if (r.day_ended) seq_->day_already_ended();  // DST-008: nothing after DayEnd
       seen_resync_ = g;
     }
     const ScqConsumerScope consumer(*guard_, ScqConsumerGuard::kSeq);

@@ -1,0 +1,271 @@
+diff --git a/src/client/order_entry.cpp b/src/client/order_entry.cpp
+--- a/src/client/order_entry.cpp
++++ b/src/client/order_entry.cpp
+@@ -107,7 +107,6 @@
+   e.len = static_cast<std::uint16_t>(ouch.size());
+   std::memcpy(e.bytes.data(), ouch.data(), ouch.size());
+   e.consumed = ouch50::peek_new_user_ref_num(ouch).value_or(0);
+-  e.acked = false;
+   e.refers = 0;
+   if ((e.type == 'X' || e.type == 'M') && ouch.size() >= 5) e.refers = load_be32(ouch.data() + 1);
+   if (e.type == 'U' && ouch.size() >= 5) e.refers = load_be32(ouch.data() + 1);
+@@ -123,10 +122,6 @@
+   if (!k.session || k.state != InstState::Active) return;
+   while (unsent_ < tail_) {
+     const Entry& e = at(unsent_);
+-    if (e.acked) {  // a Cancel or Modify already answered: not sent again
+-      ++unsent_;
+-      continue;
+-    }
+     const soup::Actions& a = k.session->send_unsequenced(std::span<const std::byte>(e.bytes.data(), e.len), now);
+     if (!a.accepted) {
+       ++st_.tx_blocked;
+@@ -149,43 +144,22 @@
+   // the new one at 13 (and the original at 9).
+   const UserRefNum u9 = load_be32(m.data() + 9);
+   const UserRefNum u13 = (t == 'U' && m.size() >= 17) ? load_be32(m.data() + 13) : 0;
+-  // Only solicited answers to a Cancel or Modify: Order Canceled with reason User
+-  // Requested, Cancel Pending, Cancel Reject, Order Modified. Unsolicited cancels
+-  // (cancel on disconnect 'Z', IOC, close 'E', halt, self-match, AIQ Canceled 'D') say
+-  // nothing about the messages before a pending Cancel of the same order (DST-007).
+-  constexpr std::size_t kReason = ouch50::layout::out::OrderCanceled::kReasonOff;
+-  const bool user_cancel = t == 'C' && m.size() > kReason && static_cast<char>(m[kReason]) == 'U';
+-  const bool cancel_answer = user_cancel || t == 'I' || t == 'P' || t == 'M';
++  const bool cancel_like = t == 'C' || t == 'I' || t == 'P' || t == 'M' || t == 'D';
+   for (std::uint64_t p = head_; p < tail_; ++p) {
+-    Entry& e = at(p);
+-    if (e.acked) continue;
+-    // A response naming the UserRefNum this message consumed proves it was processed,
+-    // and with it every earlier message (one session's messages apply in order).
+-    if (e.consumed != 0 && e.consumed == (t == 'U' ? u13 : u9)) {
+-      for (std::uint64_t q = head_; q <= p; ++q) st_.acked += at(q).acked ? 0u : 1u;
++    const Entry& e = at(p);
++    bool match = false;
++    if (e.consumed != 0) match = e.consumed == (t == 'U' ? u13 : u9);
++    if (!match && (e.type == 'X' || e.type == 'M') && cancel_like) match = e.refers == u9;
++    // A Replace whose original was cancelled because the request failed validation.
++    if (!match && e.type == 'U' && t == 'C') match = e.refers == u9;
++    if (match) {
++      const std::uint64_t released = p + 1 - head_;
++      st_.acked += released;
+       head_ = p + 1;
+-      advance_head();
+-      return;
+-    }
+-    // A solicited cancel answer names an order, not a message: it answers this Cancel
+-    // or Modify only, never the messages before it (it may even complete an earlier
+-    // Cancel of the same order, answered by Cancel Pending before; this one is then
+-    // moot, the order being gone).
+-    bool answered = (e.type == 'X' || e.type == 'M') && cancel_answer && e.refers == u9;
+-    // A Replace whose original was cancelled because the request failed validation.
+-    if (!answered && e.type == 'U' && user_cancel && e.refers == u9) answered = true;
+-    if (answered) {
+-      e.acked = true;
+-      ++st_.acked;
+-      advance_head();
++      if (unsent_ < head_) unsent_ = head_;
+       return;
+     }
+   }
+-}
+-
+-void HaOrderEntry::advance_head() noexcept {
+-  while (head_ < tail_ && at(head_).acked) ++head_;
+-  if (unsent_ < head_) unsent_ = head_;
+ }
+ 
+ std::span<const std::byte> HaOrderEntry::tx(std::size_t i) const noexcept {
+diff --git a/src/client/order_entry.h b/src/client/order_entry.h
+--- a/src/client/order_entry.h
++++ b/src/client/order_entry.h
+@@ -7,17 +7,9 @@
+ // enforced here:
+ //   - every message is sent on ONE instance only, the active one;
+ //   - a message stays pending until the response to it, or to a later message,
+-//     arrives. A response that names the UserRefNum a message consumed (Accepted,
+-//     Replaced, Rejected, or any later message about that order) proves the
+-//     message was processed, and the engine applies a session's messages in
+-//     order, so every earlier message was processed too, including those it
+-//     ignored without a response: they are all released. A solicited answer to a
+-//     Cancel or Modify (Canceled with reason User Requested, Cancel Pending,
+-//     Cancel Reject, Order Modified) names an order, not a message, so it releases
+-//     that one pending Cancel or Modify only. Unsolicited cancels (cancel on
+-//     disconnect, IOC, close, halt, self-match and AIQ prevention) release nothing
+-//     (DST-007: such a message used to release every earlier pending entry, which
+-//     a takeover then never re-sent);
++//     arrives (the engine applies a session's messages in order, so a response
++//     to message k means messages before k were processed, including those it
++//     ignored without a response);
+ //   - when the active instance fails (TCP closed, idle timeout, end of session,
+ //     protocol violation), the other instance takes over and every pending
+ //     message is re-sent on it in its original order. Splitting messages across
+@@ -106,8 +98,6 @@
+ 
+   [[nodiscard]] InstState state(std::size_t i) const noexcept { return inst_[i].state; }
+   [[nodiscard]] int active() const noexcept { return active_; }
+-  // Messages not yet released (a Cancel or Modify answered while an earlier message is
+-  // still pending stays counted until the earlier one is released).
+   [[nodiscard]] std::size_t pending() const noexcept { return static_cast<std::size_t>(tail_ - head_); }
+   [[nodiscard]] SeqNo next_seq() const noexcept { return next_seq_; }
+   [[nodiscard]] Nanos next_deadline() const noexcept;
+@@ -121,7 +111,6 @@
+     UserRefNum consumed = 0;  // the new UserRefNum it consumes (Enter, Replace, ...), 0 = none
+     UserRefNum refers = 0;    // the order it references (Cancel, Modify, Replace's original)
+     char type = 0;
+-    bool acked = false;       // answered by its own response (a Cancel or Modify): not re-sent
+     std::uint16_t len = 0;
+     std::array<std::byte, kMaxMsg> bytes{};
+   };
+@@ -137,7 +126,6 @@
+   void maybe_activate(Nanos now);
+   void fail(std::size_t i, Nanos now);
+   void pump(Nanos now);  // writes unsent pending messages on the active instance
+-  void advance_head() noexcept;  // past answered entries at the head of the ring
+ 
+   OrderEntryConfig cfg_;
+   std::array<Instance, kInstances> inst_{};
+diff --git a/tests/unit/client/order_entry_test.cpp b/tests/unit/client/order_entry_test.cpp
+--- a/tests/unit/client/order_entry_test.cpp
++++ b/tests/unit/client/order_entry_test.cpp
+@@ -45,40 +45,6 @@
+   std::vector<std::byte> b(64);
+   b.resize(ouch50::encode(b, m));
+   return b;
+-}
+-
+-// Outbound messages injected straight into HaOrderEntry::on_response.
+-template <class M>
+-std::vector<std::byte> out(const M& m) {
+-  std::vector<std::byte> b(M::kMaxLen);
+-  b.resize(ouch50::encode(b, m));
+-  return b;
+-}
+-std::vector<std::byte> canceled(UserRefNum u, ouch50::CancelReason why) {
+-  ouch50::out::OrderCanceled m;
+-  m.user_ref_num = u;
+-  m.reason = why;
+-  return out(m);
+-}
+-std::vector<std::byte> cancel_pending(UserRefNum u) {
+-  ouch50::out::CancelPending m;
+-  m.user_ref_num = u;
+-  return out(m);
+-}
+-std::vector<std::byte> cancel_reject(UserRefNum u) {
+-  ouch50::out::CancelReject m;
+-  m.user_ref_num = u;
+-  return out(m);
+-}
+-std::vector<std::byte> aiq_canceled(UserRefNum u) {
+-  ouch50::out::AiqCanceled m;
+-  m.user_ref_num = u;
+-  return out(m);
+-}
+-std::vector<std::byte> rejected(UserRefNum u) {
+-  ouch50::out::Rejected m;
+-  m.user_ref_num = u;
+-  return out(m);
+ }
+ 
+ // The exchange side: both nodes' gateways feed one engine; outputs go to the
+@@ -305,100 +271,5 @@
+   EXPECT_FALSE(oe.send(big, 0));
+ }
+ 
+-// DST-007 (exchange_ha seed 0x18): an unsolicited cancel-on-disconnect 'Z' of an
+-// order with a pending Cancel released every message before that Cancel, here the
+-// Enters queued behind it in the node; the node failed with them unprocessed and the
+-// takeover re-sent from after them. An unsolicited cancel proves nothing about them.
+-TEST(OrderEntry, UnsolicitedCancelOfAnOrderWithAPendingCancelReleasesNothing) {
+-  Rig r;
+-  r.connect(0);
+-  r.connect(1);
+-  ASSERT_TRUE(r.oe->send(enter(1), r.now));
+-  r.pump();
+-  ASSERT_EQ(r.oe->pending(), 0u);
+-  // Enters 2..6 then a Cancel of order 1 reach the primary; nothing is answered yet.
+-  r.ex.silent = true;
+-  for (UserRefNum u = 2; u <= 6; ++u) ASSERT_TRUE(r.oe->send(enter(u), r.now));
+-  ASSERT_TRUE(r.oe->send(cancel(1), r.now));
+-  r.pump();
+-  ASSERT_EQ(r.oe->pending(), 6u);
+-  for (const auto why : {ouch50::CancelReason::System, ouch50::CancelReason::Closed,
+-                         ouch50::CancelReason::ImmediateOrCancel, ouch50::CancelReason::HaltedAfterOpen,
+-                         ouch50::CancelReason::SelfMatchPrevention, ouch50::CancelReason::Supervisory}) {
+-    r.oe->on_response(canceled(1, why));
+-    EXPECT_EQ(r.oe->pending(), 6u) << "reason " << static_cast<char>(why);
+-  }
+-  r.oe->on_response(aiq_canceled(1));
+-  EXPECT_EQ(r.oe->pending(), 6u);
+-  EXPECT_EQ(r.oe->stats().acked, 1u);  // only Enter 1's Accepted
+-  // The primary dies: all six go out again on the backup, in order.
+-  r.ex.silent = false;
+-  r.kill(0);
+-  EXPECT_EQ(r.oe->active(), 1);
+-  EXPECT_EQ(r.oe->stats().resent, 6u);
+-  ASSERT_EQ(r.ex.applied.size(), 6u);
+-  for (std::size_t k = 0; k < 6; ++k) EXPECT_EQ(r.ex.applied[k], k + 1);
+-  EXPECT_EQ(r.ex.resends_ignored, 5u);  // the Enters the primary had applied, ignored as resends
+-}
+-
+-// DST-007, the solicited form: a Cancel answered by Cancel Pending, then a second
+-// Cancel of the same order behind two Enters; the order's final Canceled (User
+-// Requested) completes the first Cancel. It answers one Cancel, not the Enters before
+-// the second one, which a takeover must still re-send.
+-TEST(OrderEntry, CanceledAfterCancelPendingAnswersOneCancelOnly) {
+-  Rig r;
+-  r.connect(0);
+-  r.connect(1);
+-  ASSERT_TRUE(r.oe->send(enter(1), r.now));
+-  r.pump();
+-  r.ex.silent = true;
+-  ASSERT_TRUE(r.oe->send(cancel(1), r.now));
+-  r.pump();
+-  r.oe->on_response(cancel_pending(1));
+-  EXPECT_EQ(r.oe->pending(), 0u);  // the Cancel answered at the head: released
+-  ASSERT_TRUE(r.oe->send(enter(2), r.now));
+-  ASSERT_TRUE(r.oe->send(enter(3), r.now));
+-  ASSERT_TRUE(r.oe->send(cancel(1), r.now));
+-  r.pump();
+-  r.oe->on_response(canceled(1, ouch50::CancelReason::UserRequested));
+-  EXPECT_EQ(r.oe->pending(), 3u);  // Enters 2 and 3 still pending, the second Cancel answered
+-  r.ex.silent = false;
+-  r.kill(0);
+-  EXPECT_EQ(r.oe->stats().resent, 2u);  // the Enters; the answered Cancel is not sent again
+-  ASSERT_EQ(r.ex.applied.size(), 3u);
+-  EXPECT_EQ(r.ex.applied[1], 2u);
+-  EXPECT_EQ(r.ex.applied[2], 3u);
+-  EXPECT_EQ(r.ex.resends_ignored, 2u);  // the engine already had both: exactly once by UserRefNum
+-}
+-
+-TEST(OrderEntry, CancelAnswersAckTheirOwnEntryAndConsumingResponsesStayCumulative) {
+-  OrderEntryConfig c;
+-  c.pending_capacity = 16;
+-  HaOrderEntry oe(c);
+-  ASSERT_TRUE(oe.send(cancel(7), 0));   // pos 0
+-  ASSERT_TRUE(oe.send(cancel(8), 0));   // pos 1
+-  ASSERT_TRUE(oe.send(enter(20), 0));   // pos 2
+-  ASSERT_TRUE(oe.send(cancel(9), 0));   // pos 3
+-  ASSERT_TRUE(oe.send(enter(21), 0));   // pos 4
+-  // Cancel Reject of order 8 answers the second Cancel only; the head stays.
+-  oe.on_response(cancel_reject(8));
+-  EXPECT_EQ(oe.pending(), 5u);
+-  // Cancel Pending of order 7 answers the head: it advances over both answered Cancels.
+-  oe.on_response(cancel_pending(7));
+-  EXPECT_EQ(oe.pending(), 3u);
+-  // Rejected names Enter 20's UserRefNum: it and everything before it are released.
+-  oe.on_response(rejected(20));
+-  EXPECT_EQ(oe.pending(), 2u);
+-  // An unsolicited cancel of order 9 does not touch its pending Cancel.
+-  oe.on_response(canceled(9, ouch50::CancelReason::System));
+-  EXPECT_EQ(oe.pending(), 2u);
+-  // Accepted of Enter 21 releases the Cancel of 9 before it.
+-  ouch50::out::OrderAccepted a;
+-  a.user_ref_num = 21;
+-  oe.on_response(out(a));
+-  EXPECT_EQ(oe.pending(), 0u);
+-  EXPECT_EQ(oe.stats().acked, 5u);  // each entry counted once
+-}
+-
+ }  // namespace
+ }  // namespace lle::client

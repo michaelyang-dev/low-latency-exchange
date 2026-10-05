@@ -60,6 +60,24 @@ TEST(Sequencer, DayStartJournalsConfigThenEpochStart) {
   EXPECT_NE(es->config_digest, 0u);
 }
 
+// seq::config_digest is the digest the day start stamps into EpochStart (a paired node
+// restarting on an empty journal joins under it, DST-006).
+TEST(Sequencer, ConfigDigestIsTheDayStartsDigest) {
+  Rig rig;
+  std::vector<std::byte> symbols(5'000), limits(10);
+  for (std::size_t i = 0; i < symbols.size(); ++i) symbols[i] = static_cast<std::byte>(i * 7);
+  const std::vector<ConfigBlob> cfg{ConfigBlob{journal::ConfigTable::Symbols, symbols},
+                                    ConfigBlob{journal::ConfigTable::RiskLimits, limits}};
+  rig.start(cfg);
+  const auto recs = rig.take();
+  const auto es = journal::decode_epoch_start(RecordView(recs.back()));
+  ASSERT_TRUE(es.has_value());
+  EXPECT_EQ(config_digest(cfg), es->config_digest);
+  EXPECT_EQ(config_digest(cfg), rig.seq->config_digest());
+  limits[3] = std::byte{1};
+  EXPECT_NE(config_digest(cfg), es->config_digest);
+}
+
 TEST(Sequencer, StampsIndexEpochTimestampAndChain) {
   Rig rig;
   rig.start();
@@ -437,6 +455,91 @@ TEST(Sequencer, FirstEventsWaitOutBackpressureAndSurviveResume) {
   EXPECT_EQ(RecordView(recs[3]).type(), RecordType::Timer);
   EXPECT_EQ(RecordView(recs[4]).type(), RecordType::OuchInbound);
   EXPECT_EQ(rig.seq->first_pending(), 0u);
+}
+
+// A promotion's re-injected input (the backup's pending FORWARDs) goes ahead of the OUCH
+// queue, where a gateway may have queued newer input of the same session meanwhile; after
+// the session events that go first and after due timers, like all input. A full ring
+// holds it back without reordering.
+TEST(Sequencer, ReinjectedInputGoesAheadOfTheQueueAfterDueTimers) {
+  const Nanos t0 = 1'790'000'000'000'000'000;
+  std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::Cross, 1}};
+  Rig rig(256 * 1024, sched);
+  rig.clock.real = t0;
+  rig.start();
+  (void)rig.take(0);
+  (void)rig.take(1);
+  ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(4, 0xC0)));  // queued first, but newer
+  rig.seq->reserve_ahead(3);
+  rig.seq->reserve_first(1);
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(4, 0xA0)));
+  ASSERT_TRUE(rig.seq->inject_ahead(session_event_inbound(SessionEventMsg{4, 1, journal::SessionEventKind::Disconnect, 0})));
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(4, 0xB0)));
+  ASSERT_TRUE(rig.seq->inject_first(SessionEventMsg{9, 0, journal::SessionEventKind::InstanceDown, 0}));
+  EXPECT_EQ(rig.seq->ahead_pending(), 3u);
+  rig.clock.real = t0 + 5000;  // the cross is due
+  EXPECT_TRUE(rig.seq->poll());
+  const auto recs = rig.take(0);
+  using enum RecordType;
+  ASSERT_EQ(types(recs), (std::vector<RecordType>{SessionEvent, Timer, OuchInbound, SessionEvent, OuchInbound, OuchInbound}));
+  EXPECT_EQ(journal::decode_session_event(RecordView(recs[0]))->event, journal::SessionEventKind::InstanceDown);
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[2]))->msg[0], std::byte{0xA0});
+  EXPECT_EQ(journal::decode_session_event(RecordView(recs[3]))->event, journal::SessionEventKind::Disconnect);
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[4]))->msg[0], std::byte{0xB0});
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[5]))->msg[0], std::byte{0xC0});
+  EXPECT_EQ(rig.seq->stats().ahead, 3u);
+  EXPECT_EQ(rig.seq->ahead_pending(), 0u);
+  EXPECT_GE(rig.seq->ahead_capacity(), 3u);
+  // A full ring: the list waits, staged, and keeps its place ahead of the queue.
+  std::uint32_t pushed = 0;
+  for (int round = 0; round < 100 && rig.seq->stats().backpressure == 0; ++round) {
+    while (rig.ouch->try_push(Rig::ouch_msg(pushed % 3, 1))) ++pushed;
+    (void)rig.seq->poll();
+    (void)rig.take(0);
+  }
+  ASSERT_GT(rig.seq->stats().backpressure, 0u);
+  std::vector<std::vector<std::byte>> drained;
+  (void)rig.take(0);
+  // Whatever the queue still holds was queued before; the re-injected one goes before it.
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(7, 0xD0)));
+  (void)rig.take(1);
+  EXPECT_TRUE(rig.seq->poll());
+  const auto after = rig.take(0);
+  ASSERT_GE(after.size(), 2u);
+  // The order staged when the ring filled is emitted first (it was taken before the
+  // re-injection), then the re-injected one, then the rest of the queue.
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[0]))->msg[0], std::byte{1});
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[1]))->msg[0], std::byte{0xD0});
+}
+
+// DST-008: a node that takes over, joins or resumes after the close resumes the sequencer
+// after the new EpochStart, but the journal already holds DayEnd: day_already_ended()
+// keeps it stopped, with queued input, due timers and its lists, and no second DayEnd.
+TEST(Sequencer, NothingIsSequencedOnceTheDayAlreadyEnded) {
+  const Nanos t0 = 1'790'000'000'000'000'000;
+  std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::Cross, 1}};
+  Rig rig(std::size_t{1} << 20, sched);
+  rig.clock.real = t0;
+  rig.start();
+  ASSERT_TRUE(rig.seq->end_day(0, 0).has_value());
+  const auto day = rig.take();
+  ASSERT_EQ(RecordView(day.back()).type(), RecordType::DayEnd);
+  // The resync of a takeover after the close.
+  rig.seq->resume(rig.seq->chain(), rig.seq->next_timer(), rig.seq->next_snapshot_id(), rig.seq->config_digest());
+  rig.seq->reserve_first(1);
+  rig.seq->reserve_ahead(1);
+  ASSERT_TRUE(rig.seq->inject_first(SessionEventMsg{1, 0, journal::SessionEventKind::InstanceDown, 0}));
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(1, 1)));
+  ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(2, 2)));
+  rig.seq->day_already_ended();
+  EXPECT_FALSE(rig.seq->started());
+  EXPECT_EQ(rig.seq->first_pending(), 0u);
+  EXPECT_EQ(rig.seq->ahead_pending(), 0u);
+  rig.clock.real = t0 + 5000;  // the cross is due
+  EXPECT_FALSE(rig.seq->poll());
+  EXPECT_TRUE(rig.take().empty());
+  EXPECT_FALSE(rig.seq->end_day(0, 0).has_value());
+  EXPECT_TRUE(rig.take().empty());
 }
 
 TEST(Sequencer, BackpressureStopsPoppingAndLosesNothing) {

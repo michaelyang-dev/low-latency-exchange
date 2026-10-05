@@ -153,6 +153,15 @@ struct RejoinParts {
   std::string incarnation_path;   // <journal dir>/incarnation
 };
 
+// A paired node restarting mid-day rejoins (10 §5), also when its journal recovered empty:
+// the incarnation file (written at the day start, before the node serves anything) says
+// this day already started here, and records it released (held by both L2s, 10 §4) may
+// never have reached its journal. Starting the day again would re-sequence it from the day
+// start under incarnation 1 while its partner runs the day (DST-006).
+[[nodiscard]] inline bool restart_must_rejoin(bool paired, std::uint64_t recovered_index, bool incarnation_exists) noexcept {
+  return paired && (recovered_index != 0 || incarnation_exists);
+}
+
 struct RejoinStart {
   std::uint64_t incarnation = 0;
   std::uint64_t config_digest = 0;  // the day's, from its EpochStart
@@ -172,9 +181,14 @@ std::expected<RejoinStart, std::string> begin_rejoin(Io& io, Parts& p) {
     if (const auto e = journal::decode_epoch_start(v)) digest = e->config_digest;
     return false;
   });
+  // An empty journal (restart_must_rejoin: the day started here, nothing became durable):
+  // the node joins from nothing under its configuration file's digest; the handshake
+  // reloads it to 0, output log included.
+  if (digest == 0 && p.recovered_index == 0) digest = seq::config_digest(p.config);
   if (digest == 0)
     return std::unexpected(std::string("rejoin: the journal holds an incomplete day start (no EpochStart); move "
-                                       "the journal directory aside to join from an empty journal"));
+                                       "its segment files (*.seg) aside, keeping the incarnation file, to join "
+                                       "from an empty journal"));
   const std::uint64_t inc = io.read_incarnation(p.incarnation_path) + 1;
   if (!io.write_incarnation(p.incarnation_path, inc))
     return std::unexpected("rejoin: cannot record incarnation in " + p.incarnation_path);

@@ -18,6 +18,7 @@
 #include "env/entropy.h"
 #include "exchanged/config.h"
 #include "exchanged/node.h"
+#include "exchanged/restart_guard.h"
 #include "gateway/credentials.h"
 
 namespace {
@@ -78,7 +79,7 @@ int main(int argc, char** argv) {
   node.set_stop_flag(&g_stop);
   if (auto r = node.start(); !r) {
     std::fprintf(stderr, "exchanged: %s\n", r.error().c_str());
-    return 2;
+    return node.restart_loop_refused() ? lle::exch::kExitRestartLoop : 2;
   }
   const int code = node.run(g_stop);
   std::printf("exchanged: stopped (%d)\n", code);
