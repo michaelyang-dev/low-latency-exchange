@@ -7,17 +7,9 @@
 // enforced here:
 //   - every message is sent on ONE instance only, the active one;
 //   - a message stays pending until the response to it, or to a later message,
-//     arrives. A response that names the UserRefNum a message consumed (Accepted,
-//     Replaced, Rejected, or any later message about that order) proves the
-//     message was processed, and the engine applies a session's messages in
-//     order, so every earlier message was processed too, including those it
-//     ignored without a response: they are all released. A solicited answer to a
-//     Cancel or Modify (Canceled with reason User Requested, Cancel Pending,
-//     Cancel Reject, Order Modified) names an order, not a message, so it releases
-//     that one pending Cancel or Modify only. Unsolicited cancels (cancel on
-//     disconnect, IOC, close, halt, self-match and AIQ prevention) release nothing
-//     (DST-007: such a message used to release every earlier pending entry, which
-//     a takeover then never re-sent);
+//     arrives (the engine applies a session's messages in order, so a response
+//     to message k means messages before k were processed, including those it
+//     ignored without a response);
 //   - when the active instance fails (TCP closed, idle timeout, end of session,
 //     protocol violation), the other instance takes over and every pending
 //     message is re-sent on it in its original order. Splitting messages across
@@ -106,8 +98,6 @@ class HaOrderEntry {
 
   [[nodiscard]] InstState state(std::size_t i) const noexcept { return inst_[i].state; }
   [[nodiscard]] int active() const noexcept { return active_; }
-  // Messages not yet released (a Cancel or Modify answered while an earlier message is
-  // still pending stays counted until the earlier one is released).
   [[nodiscard]] std::size_t pending() const noexcept { return static_cast<std::size_t>(tail_ - head_); }
   [[nodiscard]] SeqNo next_seq() const noexcept { return next_seq_; }
   [[nodiscard]] Nanos next_deadline() const noexcept;
@@ -121,7 +111,6 @@ class HaOrderEntry {
     UserRefNum consumed = 0;  // the new UserRefNum it consumes (Enter, Replace, ...), 0 = none
     UserRefNum refers = 0;    // the order it references (Cancel, Modify, Replace's original)
     char type = 0;
-    bool acked = false;       // answered by its own response (a Cancel or Modify): not re-sent
     std::uint16_t len = 0;
     std::array<std::byte, kMaxMsg> bytes{};
   };
@@ -137,7 +126,6 @@ class HaOrderEntry {
   void maybe_activate(Nanos now);
   void fail(std::size_t i, Nanos now);
   void pump(Nanos now);  // writes unsent pending messages on the active instance
-  void advance_head() noexcept;  // past answered entries at the head of the ring
 
   OrderEntryConfig cfg_;
   std::array<Instance, kInstances> inst_{};
