@@ -147,6 +147,19 @@ struct ConfigBlob {
   std::span<const std::byte> bytes;
 };
 
+// The configuration digest the day start stamps into EpochStart (ADR-028): FNV-1a 64 over
+// each table's id, size and bytes, in order. A paired node that restarts on an empty
+// journal joins under the digest of its configuration file (DST-006).
+[[nodiscard]] inline std::uint64_t config_digest(std::span<const ConfigBlob> config) noexcept {
+  Fnv1a64 digest;
+  for (const auto& c : config) {
+    digest.u(static_cast<std::uint16_t>(c.table));
+    digest.u(static_cast<std::uint64_t>(c.bytes.size()));
+    digest.bytes(c.bytes);
+  }
+  return digest.value();
+}
+
 // ---- environment ---------------------------------------------------------------------
 
 template <class Q>
@@ -237,12 +250,8 @@ class Sequencer {
     pending_mark_ = false;
     started_ = true;
     if (!emit_now(ds)) return std::unexpected(SeqError::RingFull);
-    Fnv1a64 digest;
     for (const auto& c : config) {
       const std::uint32_t n = chunks_of(c);
-      digest.u(static_cast<std::uint16_t>(c.table));
-      digest.u(static_cast<std::uint64_t>(c.bytes.size()));
-      digest.bytes(c.bytes);
       for (std::uint32_t k = 0; k < n; ++k) {
         const std::size_t off = std::size_t{k} * journal::ConfigChunk::kMaxChunkBytes;
         const std::size_t len = std::min<std::size_t>(journal::ConfigChunk::kMaxChunkBytes, c.bytes.size() - off);
@@ -251,7 +260,7 @@ class Sequencer {
         if (!emit_now(chunk)) return std::unexpected(SeqError::RingFull);
       }
     }
-    config_digest_ = digest.value();
+    config_digest_ = seq::config_digest(config);
     if (!emit_now(journal::EpochStart{epoch, primary_node, config_digest_})) return std::unexpected(SeqError::RingFull);
     return {};
   }

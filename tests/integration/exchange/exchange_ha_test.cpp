@@ -528,6 +528,102 @@ TEST_P(DeadInstancesFirst, ResumeCancelsItsOwnDeadOrdersBeforeAnOverdueCross) {
 INSTANTIATE_TEST_SUITE_P(Adr032, DeadInstancesFirst, ::testing::Values(false, true),
                          [](const ::testing::TestParamInfo<bool>& i) { return i.param ? "Split" : "Combined"; });
 
+// DST-006: a paired node whose journal recovered empty must rejoin, not start the day
+// again. A, the primary, has traded; it dies and loses every segment (the journal write
+// failed before anything became durable, while both L2s held what it released), but its
+// incarnation file says this day already started here. It restarts at once, before B
+// suspects it. Starting the day again (incarnation 1, start_paired as the primary of
+// epoch 1) would re-sequence from the day start under B's feet; instead it comes up
+// RECOVERING with incarnation 2, B takes over, and A rejoins from an empty journal.
+TEST(ExchangeHa, PrimaryWithAnEmptyJournalRejoinsInsteadOfStartingTheDayAgain) {
+  const auto dir = fresh_dir("ha-empty");
+  const ScopedDir cleanup(dir);
+  ha::TrialOptions o;
+  ha::Witness w(dir, o.tie_break_ms);
+  ASSERT_NE(w.port(), 0) << w.init_output() << w.output();
+  ha::UdpRelay relay;
+  const std::uint16_t bind[2] = {free_port(SOCK_DGRAM), free_port(SOCK_DGRAM)};
+  relay.start(bind[0], bind[1]);
+  MoldSubscriber sub;
+  Exchange a(ha::paired_node(0, dir, sub, w.port(), relay, bind, o), dir);
+  Exchange b(ha::paired_node(1, dir, sub, w.port(), relay, bind, o), dir);
+  a.launch();
+  b.launch();
+  ASSERT_TRUE(a.wait_ready()) << a.output();
+  ASSERT_TRUE(b.wait_ready()) << b.output();
+  auto role = [](Exchange& e) {
+    const std::string s = e.status();
+    const auto at = s.find("role=");
+    return at == std::string::npos ? std::string("?") : s.substr(at + 5, s.find(' ', at) - at - 5);
+  };
+  auto wait_roles = [&](const std::string& ra, const std::string& rb) {
+    for (int i = 0; i < 3000; ++i) {
+      if (role(a) == ra && role(b) == rb) return true;
+      std::this_thread::sleep_for(10ms);
+    }
+    return false;
+  };
+  ASSERT_TRUE(wait_roles("P", "B")) << a.status() << "\n" << b.status();
+  b.clock("09:31:00");
+  a.clock("09:31:00");
+  OuchClient alpha("ALPHA", "alpha-pw"), bravo("BRAVO", "bravo-pw");
+  ASSERT_EQ(alpha.login(a.port("gw0")), 'A');
+  ASSERT_EQ(bravo.login(a.port("gw1")), 'A');
+  auto enter = [](std::uint32_t urn, char side) {
+    engine::EnterArgs e;
+    e.urn = urn;
+    e.side = static_cast<ouch50::Side>(side);
+    e.qty = 100;
+    e.symbol = "AAPL";
+    e.price = 1'500'000;
+    return engine::enter_msg(e);
+  };
+  for (std::uint32_t u = 1; u <= 20; ++u) {
+    alpha.send(enter(u, 'S'));
+    bravo.send(enter(u, 'B'));
+  }
+  ASSERT_TRUE(alpha.wait_count(1 + 2 * 20, 10s)) << a.status();
+  const std::uint64_t seq_a = Control::field(a.status(), "seq");
+  for (int i = 0; i < 500 && Control::field(b.status(), "seq") < seq_a; ++i) std::this_thread::sleep_for(10ms);
+  ASSERT_GE(Control::field(b.status(), "seq"), seq_a) << b.status();
+  // A dies with nothing durable: every segment gone, the incarnation file kept.
+  a.kill9();
+  alpha.drop();
+  bravo.drop();
+  std::size_t removed = 0;
+  for (const auto& e : std::filesystem::directory_iterator(a.journal_dir()))
+    if (e.path().extension() == ".seg") removed += std::filesystem::remove(e.path()) ? std::size_t{1} : std::size_t{0};
+  ASSERT_GT(removed, 0u);
+  ASSERT_TRUE(std::filesystem::exists(a.journal_dir() + "/incarnation"));
+  a.launch();
+  ASSERT_TRUE(a.wait_ready(30s)) << a.output();
+  const std::string out = a.output();
+  EXPECT_EQ(out.find("day 20261001 started"), std::string::npos) << "the day started again:\n" << out;
+  EXPECT_NE(out.find("rejoin: incarnation 2, journal at 0"), std::string::npos) << out;
+  // B takes over (A, RECOVERING, is not the primary any more); A rejoins as the backup.
+  ASSERT_TRUE(wait_roles("B", "P")) << a.status() << "\n" << b.status() << "\n" << w.output();
+  EXPECT_NE(a.output().find("rejoin: catching up from 0"), std::string::npos) << a.output();
+  // Trading goes on on B; A ends with the same journal.
+  ASSERT_EQ(alpha.login(b.port("gw0")), 'A');
+  ASSERT_EQ(bravo.login(b.port("gw1")), 'A');
+  for (std::uint32_t u = 21; u <= 30; ++u) {
+    alpha.send(enter(u, 'S'));
+    bravo.send(enter(u, 'B'));
+  }
+  ASSERT_TRUE(alpha.wait_count(1 + 2 * 30, 10s)) << b.status();
+  EXPECT_NE(Control::value(b.cmd("sync")), 0u);
+  const std::uint64_t seq_b = Control::field(b.status(), "seq");
+  for (int i = 0; i < 1000 && Control::field(a.status(), "seq") < seq_b; ++i) std::this_thread::sleep_for(10ms);
+  EXPECT_GE(Control::field(a.status(), "seq"), seq_b) << a.status();
+  EXPECT_EQ(w.count("PROMOTE granted"), 1u) << w.output();
+  EXPECT_EQ(w.count("JOIN granted"), 1u) << w.output();
+  EXPECT_EQ(a.stop(), 0) << a.output();
+  EXPECT_EQ(b.stop(), 0) << b.output();
+  int code = -1;
+  const std::string d = run_capture({LLE_JOURNAL_DIFF, a.journal_dir(), b.journal_dir()}, &code);
+  EXPECT_EQ(code, 0) << d;
+}
+
 // DST-008: after the day's DayEnd nothing more is journaled (06 §10), also when a node
 // takes over, a node rejoins (JOIN) or a solo primary resumes after the close. The pair
 // ends the day; A dies; B takes over: its journal holds nothing after DayEnd but the new
