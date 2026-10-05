@@ -344,9 +344,6 @@ void ExchangeProc::finish_boot() {
   ec.hash_interval = paired ? 65'536 : 0;
   engine_stage_ = std::make_unique<SimEngineStage>(*sh_, *engine_, ec, recovered_index_, clock_);
   if (recovered_index_ != 0) engine_stage_->set_totals(recovered_.itch_total, recovered_.soup_total);
-  // Node::build_stages: a rejoin's reloaded outputs still to release (DST-013).
-  engine_stage_->stage_deferred(recovered_.deferred);
-  recovered_.deferred = {};
   io_stage_ = std::make_unique<SimIoStage>(*sh_, *dir_, *prep_, *writer_, *outlog_, p_.spares, !paired, clock_);
   seq_ring_->set_meter(&driver_->meter());
   if (paired) {

@@ -267,10 +267,6 @@ class Replica {
     return false;
   }
   [[nodiscard]] bool joining() const noexcept { return join_.active; }
-  // True during the Host::reload_state call of a RESUME: the node resumes as the solo
-  // primary of record, whose journal is the day's history (a joiner's reload instead may
-  // hold records its primary has not released, DST-013).
-  [[nodiscard]] bool reload_is_resume() const noexcept { return resume_reload_; }
   // The solo primary has relayed a JOIN that the witness may grant (failure-model gating).
   [[nodiscard]] bool join_sent() const noexcept { return join_.active && join_.join_sent; }
   struct JoinView {
@@ -541,9 +537,7 @@ class Replica {
         break;
       case witness::MsgType::kResume:
         if (role_ != Role::kRecovering) return;
-        resume_reload_ = true;  // the host's reload is the solo primary of record's
         reload_state(h_.log_tail().last_index);
-        resume_reload_ = false;
         reloaded_ = true;
         enter_solo(g, now);
         break;
@@ -1436,21 +1430,11 @@ class Replica {
     }
     const bool snap_ready = !join_.snap.active || join_.snap.done;
     if (!join_window_ && snap_ready && tail.last_index - join_.acked <= cfg_.join_lag_records) {
-      // 10 §5 step 5: pause sequencing and drain the joiner to zero lag. Release goes on
-      // until it reaches the tail: a joiner applies only what we have released, so its
-      // L2 must otherwise hold everything between our release and our tail, and a disk
-      // stall that holds our durable index back while we sequence can make that more
-      // than its L2 holds. Frozen there, it never reached zero lag (DST-009).
+      // 10 §5 step 5: pause sequencing and release, drain the joiner to zero lag.
       join_window_ = true;
       did = true;
     }
-    // The JOIN leaves only when the joiner holds our whole log and everything in it is
-    // released: from the JOIN on we neither sequence nor release (HotStandby's atomic
-    // Rejoin, with the primary paused), and nothing is left that we would have to.
-    if (join_window_ && !join_.join_sent && release_ < tail.last_index && h_.durable_index() < tail.last_index) {
-      h_.request_flush();  // the tail must be durable to be released before the JOIN
-    }
-    if (join_window_ && !join_.join_sent && join_.acked == tail.last_index && release_ == tail.last_index) {
+    if (join_window_ && !join_.join_sent && join_.acked == tail.last_index) {
       join_.join_sent = true;
       join_.join_last = tail.last_index;
       if (relays_.epoch != epoch_) relays_ = Relays{epoch_, 0, 0, 0, false};
@@ -1622,12 +1606,6 @@ class Replica {
     snap_rx_ = {};
     set_role(Role::kBackup);
     trace(TraceKind::kRejoined, epoch);
-    // The primary counts our ACKs of the new epoch from the catch-up position, and its
-    // T_ack runs from the grant. Acknowledge the EpochStart we hold now: when nothing
-    // follows it (after the close), its APPEND reaches us as a duplicate inside the ACK
-    // rate limit, and the retransmission can come after T_ack (DST-010).
-    send_ack(false);
-    last_ack_sent_ = now;
     return true;
   }
 
@@ -1774,22 +1752,12 @@ class Replica {
       case Role::kSoloPrimary: {
         const std::uint64_t durable = h_.durable_index();
         // Solo mode releases only L3-durable records, and nothing before its own
-        // EpochStart is durable (10 §4 step 4; mutant SoloReleaseFromL2). Release goes on
-        // while a joiner drains (sequencing is paused, so it can only catch up with the
-        // tail) and stops from the JOIN on (DST-009).
-        const bool join_pending = relays_.pending && relays_.epoch == epoch_;
-        if (!es_pending_ && !join_pending && durable >= release_gate_) w = std::min(tail, durable);
+        // EpochStart is durable (10 §4 step 4; mutant SoloReleaseFromL2).
+        if (!es_pending_ && !join_window_ && durable >= release_gate_) w = std::min(tail, durable);
         break;
       }
       case Role::kBackup:
         w = std::min(tail, commit_ann_);
-        break;
-      case Role::kRecovering:
-        // A catching-up joiner applies what the primary has released, and its node holds
-        // every output in its egress ring until release covers it (it transmits nothing:
-        // no line, mirror gateways). Held at 0, a catch-up longer than the egress ring and
-        // L2 together stopped the applier, then L2, then the catch-up (DST-011).
-        if (reloaded_ && !(snap_rx_.active && !snap_rx_.installed)) w = std::min(tail, commit_ann_);
         break;
       default:
         break;
@@ -1827,7 +1795,6 @@ class Replica {
 
   // Backup / candidate.
   std::uint64_t commit_ann_ = 0;
-  bool resume_reload_ = false;  // reload_is_resume()
   std::uint64_t frozen_last_ = 0;
   std::uint64_t apply_frozen_ = 0;
   bool promote_sent_ = false;
