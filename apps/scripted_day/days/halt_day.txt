@@ -1,0 +1,39 @@
+# T03 halt day: a news halt with a quotation-only period, one collar
+# extension and the halt cross (HALT), then a LULD limit state, trading pause
+# and reopening cross (FLAT). Script format: src/admin/day_runner.h.
+#
+# HALT: last sale 50.00; halted at 10:00 (T1); quotes 10:00:05-10:00:06 build a
+# halt cross at 56.00 (buy imbalance), outside the 45.00-55.00 collars the
+# quotation-only period opens with at 10:05 (ARP 50.00 +/- max($1, 10%)). At
+# 10:10 the period ends with the imbalance unresolved: extension 1 widens the
+# collars by max($1, 10%) to 40.00-60.00. At 10:15 the cross qualifies.
+#
+# FLAT: LULD bands 31.00-37.00 at 10:20; a bid at the upper band is a limit
+# state; 15 s later the trading pause (LUDP) opens with collars 31.00 (the lower
+# band) and 38.85 (37.00 + 5%). The pause cross at 37.00 reopens it at 10:25.
+
+day 20261001
+symbol HALT prior=49.50 tier=2
+symbol FLAT prior=34.00 tier=2
+account 100 FIRM
+account 200 OTHR
+session 1 account=100 flags=cod,market
+session 2 account=200 flags=cod,market
+param halt-period 300
+param extension 300
+param luld-pause 300
+param limit-state 15
+
+04:00:00.500 login 1
+04:00:00.500 login 2
+09:30:30 enter 1 1 B 500 HALT 50.00
+09:30:31 enter 2 1 S 300 HALT 50.00
+10:00:00 admin halt HALT T1
+10:00:05 enter 1 2 B 400 HALT 56.00
+10:00:06 enter 2 2 S 200 HALT 56.00
+10:05:00 admin quote-only HALT --price 50.00
+10:20:00 admin luld-bands FLAT 31.00 37.00
+10:20:00.500 enter 1 3 B 100 FLAT 37.00
+10:20:30 enter 2 3 S 100 FLAT 37.00
+10:30:00 run
+end 10:30:00

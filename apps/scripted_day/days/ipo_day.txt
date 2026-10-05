@@ -1,0 +1,32 @@
+# T03 IPO day: NEWCO is halted before the open (IPO1), released for
+# quotation (IPOQ) after the IPO schedule message ('K'), quoted, released by
+# the underwriter, and opened by the IPO cross (liquidity 'H'). AAPL trades
+# normally around it. Script format: src/admin/day_runner.h.
+#
+# Interest at the cross: buy 500 @ 26.00, sell 300 @ 25.00 and a market
+# halt-cross sell of 200: 500 shares pair at 25.00 (the IPO price, step D),
+# every market order executes and the price is within $0.10 of the expected
+# price, so the pre-launch period releases at the first clock tick.
+
+day 20261001
+symbol AAPL prior=100.00 tier=1
+symbol NEWCO tier=2
+account 100 FIRM
+account 200 OTHR
+session 1 account=100 flags=cod,market
+session 2 account=200 flags=cod,market
+
+04:00:00.500 login 1
+04:00:00.500 login 2
+04:00:01 admin halt NEWCO IPO1
+09:00:00 enter 1 1 B 100 AAPL 99.90 tif=gtx
+09:00:01 enter 2 1 S 100 AAPL 100.10 tif=gtx
+09:31:00 enter 1 2 B 100 AAPL 100.10
+10:00:00 admin ipo-schedule NEWCO 25.00 11:00:00
+10:00:01 admin ipo-quote NEWCO
+10:01:00 enter 1 3 B 500 NEWCO 26.00
+10:01:01 enter 2 2 S 300 NEWCO 25.00
+10:01:02 enter 2 3 S 200 NEWCO MKT cross=H
+10:59:00 admin ipo-release NEWCO --band 0.10
+11:00:00 run
+end 11:00:00
