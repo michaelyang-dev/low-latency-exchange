@@ -1,0 +1,48 @@
+diff --git a/src/witness/witness.cpp b/src/witness/witness.cpp
+--- a/src/witness/witness.cpp
++++ b/src/witness/witness.cpp
+@@ -21,19 +21,6 @@
+ }
+ 
+ bool valid_request(MsgType t) noexcept { return t == MsgType::kPromote || t == MsgType::kSolo || t == MsgType::kJoin || t == MsgType::kResume; }
+-
+-// Whether a request whose key equals last_grant asks for what that grant gave.
+-// The key (type, sender, from_epoch, sender incarnation) covers every field of
+-// PROMOTE, SOLO and RESUME that the grant depends on. JOIN also names the
+-// joiner's incarnation; the grant recorded it in inc[], and since last_grant is
+-// always the latest grant, the current state still holds it.
+-template <class Req>
+-bool repeats_grant(const State&, const Req&) noexcept {
+-  return true;
+-}
+-bool repeats_grant(const State& s, const Join& j) noexcept {
+-  return is_member(s.members, j.node) && s.inc[j.node] == j.node_incarnation;
+-}
+ 
+ }  // namespace
+ 
+@@ -149,7 +136,7 @@
+ void Witness::on_request(const Req& r, MsgType type, NodeId node, std::uint64_t inc, const env::Endpoint& from,
+                          Nanos now) {
+   const LastGrant key{type, node, r.from_epoch, inc, true};
+-  if (state_.last_grant == key && repeats_grant(state_, r)) {
++  if (state_.last_grant == key) {
+     // A retransmission of the request W last granted (its GRANT was lost):
+     // answer with the same grant. last_grant is always the latest grant, so the
+     // current configuration is exactly what was granted.
+diff --git a/src/witness/witness.h b/src/witness/witness.h
+--- a/src/witness/witness.h
++++ b/src/witness/witness.h
+@@ -17,12 +17,6 @@
+ //     incarnation newer than the recorded one; records it.
+ //   - No reply leaves before the state it reflects is durable ("persist before
+ //     reply"): replies wait for the generation they were created at.
+-//   - A retransmitted request is answered from last_grant only if it asks for
+-//     exactly what was granted. For JOIN that includes the joiner's
+-//     incarnation: a JOIN relayed again for a joiner that restarted in the
+-//     meantime is a new request (rejected as stale), never the old grant
+-//     (DST-001: the old grant left W recording a dead incarnation, so the
+-//     joiner could never be promoted).
+ // Liveness (HotStandbyLive.tla): PROMOTE is granted only once W has not heard
+ // W.primary's *current incarnation* for tie_break_ns. Heartbeats from a
+ // restarted primary (a newer incarnation) do not count.

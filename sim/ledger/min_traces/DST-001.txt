@@ -1,0 +1,13 @@
+# exsim minimal trace (tools/ledger/shrink.py)
+# seed=0x0000000000000340
+# args=--world=witness --mode=swarm --disable=buggify,clock,disk --ticks-max=6813
+# oracle=O-WITNESS-INC
+# signature=O-WITNESS-INC:6813:0xacea96fd5f4960d2
+# original_signature=O-WITNESS-INC:6783:0xacea96fd5f4960d2
+# replay: exsim --seed=0x0000000000000340 --world=witness --mode=swarm --disable=buggify,clock,disk --ticks-max=6813 --replay=<this file>
+# fault events: <world> <at_ns> <kind> <node> <a> <b> <dur_ns>
+witness 19973876 1 1 0 0 73580806
+witness 98463336 1 2 0 0 140332992
+witness 137146198 0 1 1 0 429080997
+witness 202038510 2 1 4 3 182621681
+witness 255151750 0 2 0 0 1223142939

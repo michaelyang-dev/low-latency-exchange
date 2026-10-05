@@ -1,0 +1,30 @@
+{
+ "09eee2bc681f71be16527296384572da08d97f28": {
+  "O-LIVE": {
+   "campaign_id": "20261002T122528Z-09eee2bc-46494e414c410000",
+   "dirty": true,
+   "events": 14841231,
+   "exsim_args": [
+    "--mode=swarm",
+    "--world=all",
+    "--check-determinism"
+   ],
+   "seed": "0x46494e414c412c72",
+   "signature": "O-LIVE:14123362:0x77fd32fd4725b7f4",
+   "world": "ha"
+  },
+  "O-OUTPUT-COMMIT": {
+   "campaign_id": "20261003T183105Z-09eee2bc-4ace5581ede6a714",
+   "dirty": true,
+   "events": 61629,
+   "exsim_args": [
+    "--mode=swarm",
+    "--world=exchange",
+    "--check-determinism"
+   ],
+   "seed": "0x4ace5581ede6d6cf",
+   "signature": "O-OUTPUT-COMMIT:61629:0x28ecb60b6eccdfa9",
+   "world": "exchange"
+  }
+ }
+}

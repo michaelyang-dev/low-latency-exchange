@@ -1,0 +1,239 @@
+# DST bug ledger: source of truth for T23 (docs/plan/09-deterministic-simulation.md §10).
+#
+# docs/testing/bug-ledger.md is generated from this file and the latest verification:
+#   python3 tools/ledger/gen_ledger_md.py --verified sim/ledger/verified.jsonl > docs/testing/bug-ledger.md
+# Validate:      python3 tools/ledger/ledger.py
+# Verify counted bugs (weekly and on change):
+#   python3 tools/ledger/verify_bugs.py --json sim/ledger/verified.jsonl
+#
+# Field schema and counting rules: tools/ledger/ledger.py (FIELDS, validate()).
+# Example entry: tools/ledger/testdata/bugs.example.yaml.
+# Canaries, mutants, planted bugs and harness bugs are never counted.
+schema_version: 1
+bugs:
+  - id: DST-001
+    title: "witness answers a JOIN for a restarted joiner with the old grant, recording a dead incarnation"
+    component: witness
+    targets: [T24, T27]
+    category: production
+    found_utc: "2026-10-01T07:58:00Z"
+    campaign_id: dev-sweep-2026-10-01-witness-3000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-001.patch
+    seed: "0x0000000000000340"
+    exsim_args: ["--world=witness", "--mode=swarm"]
+    swarm_digest: "0xd5056481edbf89f8"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-WITNESS-INC
+    signature: "O-WITNESS-INC:6783:0xacea96fd5f4960d2"
+    root_cause: >-
+      Witness::on_request answered any request whose (type, sender, from_epoch,
+      sender incarnation) equalled last_grant with a copy of that grant. JOIN
+      also carries the joiner's incarnation, which the key left out. When the
+      first JOIN's GRANT was lost and the joiner restarted, the primary's
+      re-relayed JOIN (same epoch, new joiner incarnation) got the old grant:
+      the primary paired with the new incarnation while W recorded the dead
+      one, so the backup's later PROMOTE would fail WrongIncarnation and a
+      primary failure could never be taken over. Fix: a request repeats the
+      last grant only if it asks for exactly what was granted (for JOIN, the
+      joiner is a member at the recorded incarnation); otherwise it is a new,
+      stale request and is rejected.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-001_witness_join_dedupe
+    min_trace: sim/ledger/min_traces/DST-001.txt
+    counted: false
+    count_reason: >-
+      Not counted: unreachable by a primary that follows standard retransmission
+      discipline. It needs a primary that re-relays JOIN with a new joiner incarnation
+      at the same epoch, and that behavior is itself unsafe under the current protocol
+      (a delayed GRANT for the earlier relay is indistinguishable, because GRANT does
+      not name the joiner incarnation: campaign seed 0x5048415345320b3b). With the
+      world's actors following 10 §4 (requests retransmitted unchanged; a candidate
+      never thaws), 130,000 witness seeds pass with this fix reverted (seeds 1..30000
+      and 0x5749540000000000 + 100,000), seed 0x340 included, with event totals
+      identical to the fixed tree: the fixed branch never changes a decision. The fix
+      is kept as hardening (W's reply must describe what it granted); the protocol gap
+      is reported for the replication design. The recorded signature reproduced with
+      the earlier actor only.
+  - id: DST-002
+    title: "journal recovery reports records found only in the page cache as durable (fsyncgate / kill before fdatasync)"
+    component: journal
+    targets: [T05, T26]
+    category: production
+    found_utc: "2026-10-01T15:20:00Z"
+    campaign_id: dev-sweep-2026-10-01-journal-500
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-002.patch
+    seed: "0x0000000000000009"
+    exsim_args: ["--world=journal", "--mode=swarm"]
+    swarm_digest: "0xf48ff3aefebf7b52"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-WAL-DURABLE
+    signature: "O-WAL-DURABLE:3220:0x49e6d3c415621b7a"
+    root_cause: >-
+      recover() bases its verdicts on what reads return (the page cache) and synced
+      only after repairing a torn tail. After a failed fdatasync (the kernel marks the
+      pages clean: fsyncgate) or a process killed between pwrite and fdatasync, a clean
+      tail can hold records that never reached the disk; resume() then sets
+      durable_index to them, so outputs released on that basis are lost at the next
+      power cut. The same flaw let a segment whose recycling failed at its header
+      invalidation reappear after a power cut, so recovery refused to start
+      (SegmentChainBreak / DataAfterSealedSegment). Fix: recovery rewrites with dsync
+      everything it relies on: the writer's in-flight window before the tail of the
+      last segment and the header block of every segment file.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-002_journal_recovery_repersist
+    min_trace: sim/ledger/min_traces/DST-002.txt
+    counted: true
+    count_reason: >-
+      production journal recovery; reproduces from seed at the found tree; one root
+      cause (deduplicated: the resurrection and data-after-sealed-segment refusals are
+      the same defect); fixed with a seed-independent regression test and two unit
+      tests. Note: the defect class was flagged by a code review made while designing
+      the journal world, then found and reproduced by exsim (O-WAL-DURABLE).
+  - id: DST-003
+    title: "solo primary gives up a JOIN that W granted, on a late refusal of an earlier JOIN of the same epoch, and never learns W's epoch"
+    component: repl
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-02T12:25:28Z"
+    campaign_id: 20261002T122528Z-09eee2bc-46494e414c410000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-003.patch
+    seed: "0x46494e414c412c72"
+    exsim_args: ["--mode=swarm", "--world=ha"]
+    swarm_digest: "0xe891b0a585d33365"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:14123362:0x77fd32fd4725b7f4"
+    root_cause: >-
+      Replica's solo primary treated any REJECT of a JOIN at its epoch as the final answer
+      to its current JOIN and gave the JOIN up (resuming sequencing and release), and it
+      acted on a JOIN GRANT only while that JOIN was still pending. W's GRANT and REJECT
+      name neither the joiner nor its incarnation. When the first JOIN of an epoch named a
+      joiner incarnation that died (W, having heard the next one, refused it), the primary
+      relayed a JOIN for the next incarnation in the same epoch; a late duplicate of the
+      first refusal then made it give up the second JOIN, which W had granted. The GRANT
+      arrived after that, or was lost, and was ignored. The primary stayed solo in the old
+      epoch while W was one epoch ahead with the joiner as a member: W's tie-break refused
+      the joiner's PROMOTE for as long as it heard the primary (livelock, O-LIVE). Had the
+      primary then crashed, W would have promoted the joiner without the records the
+      primary released after giving up the JOIN (lost fills; second regression test). Also
+      seed 0x29d with --world=ha. Fix: a relayed JOIN stays pending, paused and
+      retransmitted, until W answers it. A REJECT gives it up only when it is the epoch's
+      only JOIN or when its joiner is known dead (a newer incarnation of the peer has been
+      seen). A GRANT, or a REJECT showing W one epoch ahead with this primary and both
+      members, is applied for whichever JOIN W granted. The partner is the joiner of the
+      epoch's only JOIN; after a second JOIN it is the backup whose HEARTBEAT proves that
+      W's own copy of the grant admitted it (new HEARTBEAT flag); without that proof the
+      primary hears no ACK and goes solo.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-003_repl_join_pending
+    counted: true
+    count_reason: >-
+      production replication code (src/repl), found by exsim in a 20,000-seed all-worlds
+      campaign (and in 1 of 2,000 ha seeds as 0x29d); reproduces from seed at the found
+      tree with the recorded signature; one root cause with one fix; fixed with a
+      seed-independent regression test that fails at the found tree (it also shows the
+      lost-fill consequence there) and a unit test (Repl.JoinStaysPendingThroughALateRefusalOfAnEarlierJoin).
+      Both seeds pass at the fix, and a fresh 20,000-seed ha campaign passes. The found patch
+      also reverts the later EPOCH_END query-id fix (not part of DST-003, found by integration
+      tests): it changes this seed's trajectory, and the found tree is the tree the seed was
+      found at.
+  - id: DST-004
+    title: "cancel-on-disconnect leaves a dropped connection's orders open: its Disconnect is journaled before OUCH it sent earlier (and a reconnect's orders before the old Disconnect, which cancels them)"
+    component: sequencer
+    targets: [T04, T05]
+    category: production
+    found_utc: "2026-10-03T09:29:00Z"
+    campaign_id: dst-004-found-exchange-2000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-004.patch
+    seed: "0x00000000000006b7"
+    exsim_args: ["--mode=swarm", "--world=exchange"]
+    swarm_digest: "0x4d571b83a320536b"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-COD
+    signature: "O-COD:10972:0x35046f5f12038311"
+    root_cause: >-
+      The gateways pushed a connection's OUCH messages into the OUCH SCQ and its session
+      events (Login, Logout, Disconnect) into a separate SCQ. Sequencer::poll took up to
+      ouch_batch (64) OUCH per poll and then the session events, so the journal did not
+      keep a gateway's push order across the two inputs. With 64 or more OUCH queued ahead
+      (one client's burst, or other sessions' backlog after a stall), a Disconnect was
+      journaled before OUCH that the same gateway had pushed earlier on the dying
+      connection: the engine's cancel-on-disconnect ran first, those orders were entered
+      after it and stayed open (adopted by the next connection, or orphans that execute).
+      The mirror image needed no backlog: a client reconnecting quickly had its new Login
+      and orders pushed before the sequencer took the old Disconnect; the new orders were
+      journaled first and the old Disconnect cancelled them on a live connection. Fix: one
+      ordered channel per producer. Session events travel in the OUCH SCQ as tagged
+      InboundMsg entries (seq::session_event_inbound), from the gateways, the replication
+      stage (inject, instance_down, forward) and start-up (InstanceDown); a gateway holds
+      later OUCH behind an event the full queue refused.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-004_cod_session_order
+    counted: true
+    count_reason: >-
+      Production sequencer and gateway (src/sequencer, src/gateway, apps/exchanged). Found
+      by exsim's exchange world on 2026-10-03 in development sweeps of the tree before the
+      fix (Mac Debug: seeds 0x65, 0x69, 0x6c, 0x7c, 0x7d5 and others), through O-COD, which
+      maps every journal record to the gateway push that produced it (taps on the gateways'
+      queues, matched per incarnation, session and class by O-SEQ), so "sent before the
+      disconnect" is the gateway's own order. Reproduces from seed at the found tree in the
+      verify build: 170 of 2,000 exchange seeds fail O-COD there (campaign
+      dst-004-found-exchange-2000, recorded in campaigns.jsonl); the recorded seed has no
+      crash, and all of them pass at the fix. One root cause, one fix (option A, reviewed by
+      the coordinator; implemented by the node's owner). The seed-independent regression
+      test drives the production gateway (in-memory stream port), sequencer and engine:
+      100 orders and a drop in one gateway poll leave 36 open at the found tree, and a
+      reconnect's 10 orders are all cancelled by the old Disconnect; both pass at the fix.
+  - id: DST-005
+    title: "recovery refuses an incomplete day start with the wrong verdict (configuration mismatch, ADR-028), so the documented remedy is never named"
+    component: exchanged
+    targets: [T05]
+    category: production
+    found_utc: "2026-10-03T17:40:00Z"
+    campaign_id: dst-005-found-exchange-2000
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-005.patch
+    seed: "0x000000000000025d"
+    exsim_args: ["--mode=swarm", "--world=exchange"]
+    swarm_digest: "0x2844833718778543"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-RECOVER
+    signature: "O-RECOVER:1162:0x54c37fc53e30e670"
+    root_cause: >-
+      When the process died, or a journal write failed, while the day-start records were
+      being written, the journal held DayStart and some Config chunks but no EpochStart.
+      Every later start is refused by design (nothing was released; the remedy is to move
+      the journal aside and start the day again, recovery.h, exchange-node.md §8). But
+      basic_replay_day (previously recovery.cpp) compared the journaled configuration with
+      the configuration file (ADR-028) before checking that the day start was complete; a
+      partial Config is a prefix of the tables, so the refusal read "the journaled
+      configuration differs from the configuration file (ADR-028): restore the file the day
+      was started with". Fix: the incomplete-day-start verdict is checked first; a complete
+      day start with a genuinely different configuration still gets the ADR-028 verdict.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-005_incomplete_day_start_verdict
+    counted: true
+    count_reason: >-
+      Production recovery of exchanged (apps/exchanged/recovery_impl.h, the code a solo
+      node runs at every restart). Availability defect: the refusal names the wrong remedy,
+      so an operator following the runbook keyed on the message restores an identical
+      configuration file and the node keeps refusing; the day never comes back without
+      diagnosis the message misdirects. Found by exsim's exchange world (O-RECOVER: the node
+      refused to start after healing), then pinned by the oracle's check of the verdict
+      against the journal's actual state (records but no EpochStart must be reported as an
+      incomplete day start; the world's operator then runs the runbook). Reproduces from
+      seed at the found tree: 13 of 2,000 exchange seeds (campaign
+      dst-005-found-exchange-2000), all passing at the fix. One root cause, one fix. The
+      seed-independent regression test runs the production sequencer, journal writer,
+      journal::recover and exch::basic_replay_day: DayStart plus one Config chunk gets the
+      ADR-028 verdict at the found tree and the incomplete-day-start verdict at the fix,
+      and a complete day start with another configuration keeps the ADR-028 verdict.

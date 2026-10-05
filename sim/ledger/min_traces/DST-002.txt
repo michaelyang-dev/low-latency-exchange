@@ -1,0 +1,9 @@
+# exsim minimal trace (tools/ledger/shrink.py)
+# seed=0x0000000000000009
+# args=--world=journal --mode=swarm --disable=buggify,clock,net,partition,pause
+# oracle=O-WAL-DURABLE
+# signature=O-WAL-DURABLE:3668:0xe367f0fb892fc50a
+# original_signature=O-WAL-DURABLE:3220:0x49e6d3c415621b7a
+# replay: exsim --seed=0x0000000000000009 --world=journal --mode=swarm --disable=buggify,clock,net,partition,pause --replay=<this file>
+# fault events: <world> <at_ns> <kind> <node> <a> <b> <dur_ns>
+journal 45691521 0 0 1 0 116704467

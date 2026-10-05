@@ -1,0 +1,81 @@
+// Swarm fault ranges (09 §4). These are design choices tuned by probe hit
+// rates, not sourced facts (R4b R2).
+//
+// LLE_SWARM_PARAM(id, "name", class, base, lo, hi, lite_hi, shape, off_ppm)
+//   base     value used when the class is disabled, in no-faults mode, or when
+//            the swarm switches the knob off for this seed
+//   lo..hi   swarm range; lite mode uses lo..lite_hi
+//   shape    Uniform or LogUniform
+//   off_ppm  probability (per 10^6) that the swarm turns this knob off for the
+//            seed entirely, so some variants are disabled and the rest get
+//            wildly different rates (swarm testing, TB random_enum_weights)
+//
+// Units: *_ns nanoseconds, *_ppm parts per million, *_ppb parts per billion.
+
+// --- network: loss, duplication, reordering, delay (class net) ---
+LLE_SWARM_PARAM(NetLossPpm, "net.loss_ppm", Net, 0, 0, 300000, 20000, Uniform, 250000)
+LLE_SWARM_PARAM(NetAbLossPpm, "net.ab_loss_ppm", Net, 0, 0, 500000, 50000, Uniform, 250000)
+LLE_SWARM_PARAM(NetDelayMinNs, "net.delay_min_ns", Net, 10000, 0, 50000, 50000, Uniform, 0)
+LLE_SWARM_PARAM(NetDelayMeanNs, "net.delay_mean_ns", Net, 0, 5000, 5000000, 200000, LogUniform, 0)
+LLE_SWARM_PARAM(NetSpikePpm, "net.spike_ppm", Net, 0, 0, 2000, 100, Uniform, 500000)
+LLE_SWARM_PARAM(NetSpikeNs, "net.spike_ns", Net, 0, 100000000, 100000000, 100000000, Uniform, 0)
+LLE_SWARM_PARAM(NetDupPpm, "net.dup_ppm", Net, 0, 0, 200000, 10000, Uniform, 250000)
+LLE_SWARM_PARAM(NetReorderPpm, "net.reorder_ppm", Net, 0, 0, 100000, 10000, Uniform, 250000)
+LLE_SWARM_PARAM(NetStreamSegPpm, "net.stream_seg_ppm", Net, 0, 0, 1000000, 200000, Uniform, 250000)
+LLE_SWARM_PARAM(NetStreamStallPpm, "net.stream_stall_ppm", Net, 0, 0, 5000, 500, Uniform, 250000)
+LLE_SWARM_PARAM(NetStreamStallMaxNs, "net.stream_stall_max_ns", Net, 0, 1000000, 200000000, 10000000, LogUniform, 0)
+LLE_SWARM_PARAM(NetResetTimeoutNs, "net.stream_reset_timeout_ns", Net, 1000000000, 100000000, 2000000000, 2000000000, LogUniform, 0)
+
+// --- partitions (class partition; also disabled by --disable=net) ---
+LLE_SWARM_PARAM(PartIntervalNs, "part.interval_ns", Partition, 0, 20000000, 2000000000, 1000000000, LogUniform, 250000)
+LLE_SWARM_PARAM(PartMinNs, "part.min_ns", Partition, 0, 5000000, 200000000, 50000000, LogUniform, 0)
+LLE_SWARM_PARAM(PartMaxNs, "part.max_ns", Partition, 0, 50000000, 3000000000, 300000000, LogUniform, 0)
+LLE_SWARM_PARAM(PartAsymPpm, "part.asym_ppm", Partition, 0, 0, 1000000, 1000000, Uniform, 0)
+LLE_SWARM_PARAM(PartFlapPpm, "part.flap_ppm", Partition, 0, 0, 1000000, 1000000, Uniform, 0)
+
+// --- crashes (class crash) ---
+LLE_SWARM_PARAM(CrashIntervalNs, "crash.interval_ns", Crash, 0, 50000000, 5000000000, 2000000000, LogUniform, 250000)
+LLE_SWARM_PARAM(CrashHostPpm, "crash.host_ppm", Crash, 0, 0, 1000000, 1000000, Uniform, 0)
+LLE_SWARM_PARAM(CrashRestartMaxNs, "crash.restart_max_ns", Crash, 0, 0, 2000000000, 200000000, Uniform, 0)
+
+// --- pauses, SIGSTOP model (class pause; also disabled by --disable=crash) ---
+LLE_SWARM_PARAM(PauseIntervalNs, "pause.interval_ns", Pause, 0, 50000000, 5000000000, 2000000000, LogUniform, 250000)
+LLE_SWARM_PARAM(PauseMaxNs, "pause.max_ns", Pause, 0, 10000000, 500000000, 100000000, LogUniform, 0)
+
+// --- disk: latency, stalls, EIO, crash semantics, fault atlas (class disk) ---
+LLE_SWARM_PARAM(DiskWriteMinNs, "disk.write_min_ns", Disk, 10000, 1000, 100000, 100000, LogUniform, 0)
+LLE_SWARM_PARAM(DiskWriteMeanNs, "disk.write_mean_ns", Disk, 0, 1000, 2000000, 100000, LogUniform, 0)
+LLE_SWARM_PARAM(DiskSyncMinNs, "disk.sync_min_ns", Disk, 20000, 5000, 500000, 500000, LogUniform, 0)
+LLE_SWARM_PARAM(DiskSyncMeanNs, "disk.sync_mean_ns", Disk, 0, 5000, 5000000, 200000, LogUniform, 0)
+LLE_SWARM_PARAM(DiskStallPpm, "disk.stall_ppm", Disk, 0, 0, 20000, 1000, Uniform, 250000)
+LLE_SWARM_PARAM(DiskStallMaxNs, "disk.stall_max_ns", Disk, 0, 1000000, 5000000000, 20000000, LogUniform, 0)
+LLE_SWARM_PARAM(DiskEioWritePpm, "disk.eio_write_ppm", Disk, 0, 0, 50000, 2000, Uniform, 500000)
+LLE_SWARM_PARAM(DiskEioSyncPpm, "disk.eio_sync_ppm", Disk, 0, 0, 50000, 2000, Uniform, 500000)
+LLE_SWARM_PARAM(DiskCrashKeepPpm, "disk.crash_keep_ppm", Disk, 0, 0, 500000, 500000, Uniform, 0)
+LLE_SWARM_PARAM(DiskCrashTornPpm, "disk.crash_torn_ppm", Disk, 0, 0, 500000, 500000, Uniform, 0)
+LLE_SWARM_PARAM(DiskTear4kPpm, "disk.tear_4k_ppm", Disk, 0, 0, 1000000, 1000000, Uniform, 0)
+LLE_SWARM_PARAM(DiskAtlasPpm, "disk.atlas_ppm", Disk, 0, 0, 300000, 100000, Uniform, 250000)
+LLE_SWARM_PARAM(DiskMisdirectPpm, "disk.misdirect_ppm", Disk, 0, 0, 50000, 5000, Uniform, 250000)
+LLE_SWARM_PARAM(DiskBitflipPpm, "disk.bitflip_ppm", Disk, 0, 0, 50000, 5000, Uniform, 250000)
+
+// --- realtime clocks (class clock) ---
+LLE_SWARM_PARAM(ClockDriftPpb, "clock.drift_max_ppb", Clock, 0, 0, 500000, 100000, Uniform, 0)
+LLE_SWARM_PARAM(ClockOffsetNs, "clock.offset_max_ns", Clock, 0, 0, 50000000, 1000000, Uniform, 0)
+LLE_SWARM_PARAM(ClockStepIntervalNs, "clock.step_interval_ns", Clock, 0, 100000000, 10000000000, 5000000000, LogUniform, 250000)
+LLE_SWARM_PARAM(ClockStepMaxNs, "clock.step_max_ns", Clock, 0, 1000000, 1000000000, 10000000, LogUniform, 0)
+
+// --- code-level faults, FoundationDB-style (class buggify) ---
+LLE_SWARM_PARAM(BuggifyEnabled, "buggify.enabled", Buggify, 0, 1, 1, 1, Uniform, 0)
+LLE_SWARM_PARAM(BuggifyActivatePpm, "buggify.activate_ppm", Buggify, 0, 250000, 250000, 250000, Uniform, 0)
+LLE_SWARM_PARAM(BuggifyFirePpm, "buggify.fire_ppm", Buggify, 0, 250000, 250000, 250000, Uniform, 0)
+
+// --- scheduler interleaving (never disabled; varies with every seed) ---
+LLE_SWARM_PARAM(SchedPolicy, "sched.policy", Sched, 0, 0, 2, 2, Uniform, 0)
+LLE_SWARM_PARAM(SchedCpuMinNs, "sched.cpu_min_ns", Sched, 100, 20, 500, 500, Uniform, 0)
+LLE_SWARM_PARAM(SchedCpuJitterNs, "sched.cpu_jitter_ns", Sched, 0, 0, 2000, 2000, Uniform, 0)
+LLE_SWARM_PARAM(SchedIdleMinNs, "sched.idle_min_ns", Sched, 1000, 500, 5000, 5000, Uniform, 0)
+LLE_SWARM_PARAM(SchedIdleMaxNs, "sched.idle_max_ns", Sched, 100000, 20000, 1000000, 1000000, LogUniform, 0)
+LLE_SWARM_PARAM(SchedWakeJitterNs, "sched.wake_jitter_ns", Sched, 0, 0, 2000, 2000, Uniform, 0)
+LLE_SWARM_PARAM(SchedPctStepNs, "sched.pct_step_ns", Sched, 0, 100, 20000, 20000, LogUniform, 0)
+LLE_SWARM_PARAM(SchedPctChangePpm, "sched.pct_change_ppm", Sched, 0, 0, 2000, 2000, Uniform, 0)
+LLE_SWARM_PARAM(SchedStarveFactor, "sched.starve_factor", Sched, 1, 2, 50, 50, Uniform, 0)

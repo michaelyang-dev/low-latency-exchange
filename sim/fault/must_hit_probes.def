@@ -1,0 +1,48 @@
+// Must-hit probe manifest (09 §8).
+// LLE_MUST_HIT(name, rare, pending)
+//   rare     must be hit at least once per week across nightly runs (else nightly)
+//   pending  the owning component has not landed; reported, never failing.
+//            Flip to false in the PR that adds the SIM_PROBE.
+
+// Implemented by the simulator itself (generic disk-level versions).
+LLE_MUST_HIT("disk.crash_between_write_and_fsync", false, false)
+LLE_MUST_HIT("disk.stall_longer_than_heartbeat", false, false)
+LLE_MUST_HIT("disk.ooo_persist_at_crash", true, false)
+
+// Witness core (src/witness), exercised by the witness world.
+LLE_MUST_HIT("witness.grant_promote", false, false)
+LLE_MUST_HIT("witness.grant_resume", false, false)
+LLE_MUST_HIT("witness.retransmission_answered_from_last_grant", false, false)
+LLE_MUST_HIT("witness.promote_refused_primary_heard", false, false)
+
+// Journal (src/journal), observed by the journal world's simulated device and
+// harness: the production journal cannot see its own crash.
+LLE_MUST_HIT("journal.crash_between_write_and_fsync", false, false)
+LLE_MUST_HIT("journal.stall_longer_than_heartbeat", false, false)
+LLE_MUST_HIT("journal.ooo_persist_inflight_at_crash", true, false)
+
+// Owned by later components (journal, replication, gateways, feeds, engine).
+LLE_MUST_HIT("ha.failover_during_partial_fill", false, false)  // ha world
+LLE_MUST_HIT("client.resend_after_lost_ack", false, false)  // ha world
+LLE_MUST_HIT("arb.a_gap_filled_by_b", false, false)  // LineArbiter, arbiter world
+LLE_MUST_HIT("arb.both_lines_loss_rerequest", false, false)  // LineArbiter, arbiter world
+LLE_MUST_HIT("soup.relogin_mid_stream", false, false)  // ServerSession, soupbin world
+// snapshotd's follower publishes a snapshot while an auction collects interest (the
+// opening or closing freeze, or a halt), exchange world: 74 hits in 60 seeds.
+LLE_MUST_HIT("snap.during_auction", false, false)
+LLE_MUST_HIT("ha.halt_reopen_cross_spans_failover", false, true)
+LLE_MUST_HIT("ha.witness_unreachable_during_promotion", true, false)  // witness world
+LLE_MUST_HIT("repl.rejoin_truncates_divergent_tail", true, false)  // ha world
+// A fill of a COD session sequenced after its gateway pushed the Disconnect and before
+// the Disconnect was sequenced, exchange world: 2,053 hits in 60 seeds.
+LLE_MUST_HIT("gw.cancel_on_disconnect_races_fill", false, false)
+LLE_MUST_HIT("repl.candidate_append_after_freeze", false, false)  // ha world
+
+// Rejoin protocol paths (10 §5), ha world. Rates from a 4,000-seed swarm census
+// (2026-10-02), so a 20,000-seed nightly expects at least ~35 hits of each.
+LLE_MUST_HIT("repl.joiner_adopts_join_grant", false, false)  // 7,578 hits
+LLE_MUST_HIT("repl.joiner_learns_admission_from_reject", false, false)  // 66 hits
+LLE_MUST_HIT("repl.primary_pairs_on_admission_proof", false, false)  // 7 hits; DST-003
+LLE_MUST_HIT("repl.resume_adopted_epoch", false, false)  // 57 hits
+LLE_MUST_HIT("repl.snapshot_catchup", false, false)  // 738 hits
+LLE_MUST_HIT("witness.request_from_superseded_incarnation", false, false)  // 45 hits

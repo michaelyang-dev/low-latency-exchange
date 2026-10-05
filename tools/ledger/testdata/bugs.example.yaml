@@ -1,0 +1,46 @@
+# Example ledger used by tools/ledger/selftest.py. These entries are
+# fictitious fixtures for the tooling, not findings.
+schema_version: 1
+bugs:
+  - id: DST-001
+    title: "journal acknowledges a record before its fsync completes"
+    component: journal
+    targets: [T05, T26]
+    category: production
+    found_utc: "2026-11-02T03:14:15Z"
+    campaign_id: nightly-2026-11-02-a
+    sha_found: "0123456789abcdef0123456789abcdef01234567"
+    seed: "0x00000000000004d2"
+    exsim_args: ["--world=wal", "--mode=swarm"]
+    swarm_digest: "0x07e282d3b5c04024"
+    platform: linux-x86_64
+    build: sim-RelWithDebInfo
+    oracle: O-WAL-DURABLE
+    signature:
+      oracle: O-WAL-DURABLE
+      event_index: 50981
+      msg_hash: "0x74bdb58f99487cd1"
+    introduced_sha: "89abcdef"
+    root_cause: "ack issued on write completion; sync not awaited"   # comment
+    fix_sha: "fedcba9876543210fedcba9876543210fedcba98"
+    regression_test: tests/sim_regressions/DST-001_ack_after_fsync.cpp
+    min_trace: sim/ledger/min_traces/DST-001.txt
+    verify_run_url: ""
+    counted: true
+    count_reason: "production journal code; reproduces at sha_found; fixed with regression test"
+  - id: DST-002
+    title: "canary: planted duplicate delivery"
+    component: sim-demo
+    targets: [T21]
+    category: canary
+    found_utc: "2026-11-02T03:20:00Z"
+    campaign_id: canary-check
+    sha_found: "0123456"
+    seed: 1
+    swarm_digest: "0x0"
+    platform: macos-arm64
+    build: sim-Debug
+    oracle: O-EXACTLY-ONCE
+    signature: "O-EXACTLY-ONCE:67:0x0f327b2f17363b7e"
+    counted: false
+    count_reason: "canary (exsim --canary): infrastructure check, never counted"
