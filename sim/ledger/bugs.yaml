@@ -539,3 +539,54 @@ bugs:
       70, at the fix it catches up and the pair forms. A unit test
       (Repl.JoinerReleasesNoMoreThanItsPrimaryWhileCatchingUp) checks at every step that the
       joiner never releases more than its primary.
+  - id: DST-012
+    title: "a rejoin truncation stopped by a failed write (or a crash) while zeroing the records after t left zeros right after t and valid records beyond recovery's in-flight window: recovery refused the journal at every start"
+    component: repl
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-05T11:49:48Z"
+    campaign_id: 20261005T104613Z-0d95174f-347d4c19f625b579
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-012.patch
+    seed: "0x347d4c19f625f8cc"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x25fae7d452179a03"
+    platform: linux-aarch64
+    build: sim-RelWithDebInfo
+    oracle: O-RECOVER
+    signature: "O-RECOVER:213046:0xf187ba10f1ea9656"
+    root_cause: >-
+      Rejoin truncation (src/repl/journal_truncate.h, 10 §5 step 2) zeroes everything after
+      the truncation point t in the segment holding it. It zeroed forwards from t, with
+      durable 1 MiB writes (journal::detail::zero_range). A write that failed with EIO
+      after the first ones, or a process killed between them, left zeros right after t and
+      the old records further on, which still carry the segment's seal. Recovery (06 §7)
+      reads validly sealed records beyond the in-flight window after the end of the valid
+      prefix as corruption and refuses, so the node could not start again: in the seed the
+      rejoining node's truncation to 116 failed ("zeroing failed"), it exited, and every
+      later start was refused ("valid record beyond in-flight window: sealed record at
+      offset 282624, last valid index 116 ends at 18960") until the end of the run
+      (O-RECOVER). The file's own comment claimed a crash at any point was harmless. Fix
+      (truncate_detail::zero_tail_backwards): zero from the end of data backwards towards
+      t, in durable chunks of half the in-flight window, the partial first block last.
+      Stopped at any point, the segment holds the records after t up to some offset and
+      zeros after it, with at most one torn chunk in between, which recovery treats as a
+      torn tail; the journal is valid and ends after t, and the rejoin truncates again.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-012_truncation_zeroing_order
+    counted: true
+    count_reason: >-
+      Production replication code (src/repl/journal_truncate.h, called by exchanged's
+      rejoin). Availability defect under one failure (an I/O error or a crash during a
+      rejoin's truncation): the node's journal is refused at every start and the node
+      needs manual repair, while the model only asks for a restart. Found by exsim in a
+      20,000-seed all-worlds campaign: 2 failing seeds, both exchange_ha O-RECOVER with the
+      same cause (0x...f8cc truncating to 116, 0x...ff08 truncating to 1100), both passing
+      at the fix; diagnosed from the node's "journal truncation to t failed: zeroing
+      failed" followed by the refusal. Reproduces from seed at the found tree with the
+      recorded signature on linux-aarch64 and macos-arm64. One root cause, one fix. The
+      seed-independent regression test truncates a journal whose tail after t is several
+      in-flight windows long, failing each write of the truncation in turn
+      (MemJournalDevice -EIO), and requires recovery to accept the journal with records 1..t
+      intact and a second truncation to end it at t: at the found tree recovery refuses at
+      the first failure point, at the fix every failure point recovers.

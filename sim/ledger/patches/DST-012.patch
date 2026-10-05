@@ -1,0 +1,70 @@
+diff --git a/src/repl/journal_truncate.h b/src/repl/journal_truncate.h
+--- a/src/repl/journal_truncate.h
++++ b/src/repl/journal_truncate.h
+@@ -7,18 +7,12 @@
+ // durable here. Cold path; the journal writer must be quiesced (no writes in flight)
+ // and is repositioned afterwards by recover() + resume_writer().
+ //
+-// Order makes a crash or a failed write at any point harmless:
++// Order makes a crash at any point harmless:
+ //   1. segments whose first index is > t are recycled (re-zeroed, re-nonced: their
+ //      records can never validate again), newest first;
+ //   2. in the segment holding t, everything after t is zeroed and the 4 KiB block is
+ //      closed with a Pad (exactly what recovery does for a torn tail), then synced.
+-//      The zeroing runs backwards, from the end of data towards t, in durable chunks of
+-//      at most half recovery's in-flight window (truncate_detail::zero_tail_backwards). Stopped at any
+-//      point, the segment holds the records after t up to some offset and zeros after
+-//      it, with at most one torn chunk in between, which recovery reads as a torn tail.
+-//      Forwards, a stop left zeros right after t and valid records beyond the in-flight
+-//      window, which recovery must refuse as corruption, at every start (DST-012).
+-// Stopped anywhere, the journal is valid and still ends at or after t; the rejoining
++// A crash after step 1 leaves a valid journal that still ends after t; the rejoining
+ // node then simply truncates again. A crash never leaves a chain break.
+ //
+ // This belongs next to journal recovery; it lives in lle::repl until the journal owner
+@@ -47,36 +41,6 @@
+   std::uint64_t zeroed_from = 0; // offset in the segment holding t where zeros begin
+   std::string detail;
+ };
+-
+-namespace truncate_detail {
+-
+-// Zeroes [from, to) like journal::detail::zero_range, but from the end backwards in
+-// durable chunks of at most kChunk bytes, the partial first block (read-modify-write)
+-// last. kChunk plus a record straddling a chunk's start stays inside recovery's
+-// in-flight window, so a torn chunk is a torn tail, never corruption.
+-template <journal::JournalDeviceLike Device>
+-bool zero_tail_backwards(Device& dev, std::uint64_t from, std::uint64_t to, std::uint64_t limit) {
+-  using namespace journal;
+-  constexpr std::size_t kChunk = kInflightWindow / 2;
+-  static_assert(kChunk % kBlockBytes == 0 && kChunk + kMaxRecordBytes < kInflightWindow);
+-  to = std::min(align_up_block(to), limit);
+-  if (from >= to) return true;
+-  journal::detail::AlignedBuf buf = journal::detail::aligned_zeroed(kChunk);
+-  if (buf == nullptr) return false;
+-  const std::uint64_t first_full = align_up_block(from);
+-  for (std::uint64_t end = to; end > first_full;) {
+-    const std::uint64_t begin = end - std::min<std::uint64_t>(kChunk, end - first_full);
+-    const auto n = static_cast<std::size_t>(end - begin);
+-    if (write_sync(dev, begin, std::span<const std::byte>(buf.get(), n), true) != static_cast<std::int32_t>(n)) {
+-      return false;
+-    }
+-    end = begin;
+-  }
+-  if (from < first_full) return journal::detail::zero_range(dev, from, first_full, limit);
+-  return true;
+-}
+-
+-}  // namespace truncate_detail
+ 
+ template <journal::SegmentDirLike Dir, env::RngLike Rng>
+ TruncateResult truncate_journal(Dir& dir, journal::SegmentPreparer<Dir, Rng>& prep, std::uint32_t day,
+@@ -153,7 +117,7 @@
+     const std::uint64_t limit = std::min(dev.size(), s.header.segment_bytes);
+     r.zeroed_from = t_end;
+     if (s.data_end > t_end) {
+-      if (!truncate_detail::zero_tail_backwards(dev, t_end, s.data_end, limit)) {
++      if (!detail::zero_range(dev, t_end, s.data_end, limit)) {
+         r.detail = "zeroing failed";
+         return r;
+       }

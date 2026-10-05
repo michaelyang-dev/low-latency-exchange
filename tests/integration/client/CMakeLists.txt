@@ -16,19 +16,22 @@ if(NOT _have_apps)
 endif()
 set(_d ${CMAKE_CURRENT_SOURCE_DIR})
 set(_w ${CMAKE_CURRENT_BINARY_DIR})
+# Each test's PORT_BASE (and the ~200 ports above it) lies below every OS's ephemeral
+# range (Linux 32768-60999, macOS 49152-65535), so no socket another test opens meanwhile
+# can be given one of them.
 add_test(NAME client_feed_lossy_dual_lines
   COMMAND bash ${_d}/feed_lossy_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:mold_replay> $<TARGET_FILE:refclient>
-          ${_w}/feed 48100)
-add_test(NAME client_loadgen_loopback_server COMMAND bash ${_d}/loadgen_test.sh $<TARGET_FILE:loadgen> ${_w}/loadgen 48200)
+          ${_w}/feed 28100)
+add_test(NAME client_loadgen_loopback_server COMMAND bash ${_d}/loadgen_test.sh $<TARGET_FILE:loadgen> ${_w}/loadgen 28200)
 add_test(NAME client_refclient_trading
   COMMAND bash ${_d}/refclient_trading_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:mold_replay>
-          $<TARGET_FILE:refclient> $<TARGET_FILE:loadgen> ${_w}/trading 48300)
+          $<TARGET_FILE:refclient> $<TARGET_FILE:loadgen> ${_w}/trading 28300)
 add_test(NAME client_refclient_ha_takeover
   COMMAND bash ${_d}/refclient_ha_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:mold_replay>
-          $<TARGET_FILE:refclient> $<TARGET_FILE:loadgen> ${_w}/ha 48400)
+          $<TARGET_FILE:refclient> $<TARGET_FILE:loadgen> ${_w}/ha 28400)
 add_test(NAME client_refclient_glimpse_retry
   COMMAND bash ${_d}/refclient_glimpse_retry_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:mold_replay>
-          $<TARGET_FILE:refclient> ${_w}/glimpse_retry 48700)
+          $<TARGET_FILE:refclient> ${_w}/glimpse_retry 28700)
 add_test(NAME client_itch2ouch_synthetic_day
   COMMAND bash ${_d}/itch2ouch_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:itch2ouch> ${_w}/i2o)
 # T18 instrument loop over every kernel-socket variant this host has (the AF_XDP
@@ -40,7 +43,7 @@ else()
 endif()
 add_test(NAME client_ttt_loop_variants
   COMMAND bash ${_d}/ttt_loop_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:ttt_harness> $<TARGET_FILE:refclient>
-          ${_w}/ttt 48500 ${_variants})
+          ${_w}/ttt 28500 ${_variants})
 set_tests_properties(client_feed_lossy_dual_lines client_loadgen_loopback_server client_refclient_trading
                      client_refclient_ha_takeover client_itch2ouch_synthetic_day client_ttt_loop_variants
                      client_refclient_glimpse_retry
