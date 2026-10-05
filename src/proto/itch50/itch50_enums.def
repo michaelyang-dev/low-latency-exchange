@@ -1,0 +1,222 @@
+// TotalView-ITCH 5.0 enumerations (1-byte codes), verbatim value sets from the
+// 2026-02-19 spec; cross-reference R1a Q3 "Remaining enumerations".
+//
+// The consumer defines ITCH_ENUM(Name), ITCH_VALUE(Name, Enumerator, 'c') and
+// ITCH_ENUM_END(Name); this file #undefs them at the end.
+//
+// Enums are tolerant: the underlying type is char, so every wire byte decodes to
+// a value (NASDAQ keeps adding codes, e.g. Market Category 'M' in 2025, IPO Flag
+// 'Z' in 2026). is_valid() reports whether the byte is in the published set;
+// itch_validate --strict counts out-of-set values instead of rejecting them.
+// Buy/Sell Indicator uses lle::Side (common/types.h) and is not listed here.
+// clang-format off
+
+// 1.1 System Event Codes.
+ITCH_ENUM(EventCode)
+  ITCH_VALUE(EventCode, StartOfMessages,    'O')
+  ITCH_VALUE(EventCode, StartOfSystemHours, 'S')
+  ITCH_VALUE(EventCode, StartOfMarketHours, 'Q')
+  ITCH_VALUE(EventCode, EndOfMarketHours,   'M')
+  ITCH_VALUE(EventCode, EndOfSystemHours,   'E')
+  ITCH_VALUE(EventCode, EndOfMessages,      'C')
+ITCH_ENUM_END(EventCode)
+
+// R Market Category ('M' NYSE Texas added 2025-06-16).
+ITCH_ENUM(MarketCategory)
+  ITCH_VALUE(MarketCategory, NasdaqGlobalSelect,  'Q')
+  ITCH_VALUE(MarketCategory, NasdaqGlobalMarket,  'G')
+  ITCH_VALUE(MarketCategory, NasdaqCapitalMarket, 'S')
+  ITCH_VALUE(MarketCategory, Nyse,                'N')
+  ITCH_VALUE(MarketCategory, NyseAmerican,        'A')
+  ITCH_VALUE(MarketCategory, NyseArca,            'P')
+  ITCH_VALUE(MarketCategory, BatsZ,               'Z')
+  ITCH_VALUE(MarketCategory, Iex,                 'V')
+  ITCH_VALUE(MarketCategory, NyseTexas,           'M')
+  ITCH_VALUE(MarketCategory, NotAvailable,        ' ')
+ITCH_ENUM_END(MarketCategory)
+
+// R Financial Status Indicator (space = not Nasdaq-listed).
+ITCH_ENUM(FinancialStatus)
+  ITCH_VALUE(FinancialStatus, Deficient,                     'D')
+  ITCH_VALUE(FinancialStatus, Delinquent,                    'E')
+  ITCH_VALUE(FinancialStatus, Bankrupt,                      'Q')
+  ITCH_VALUE(FinancialStatus, Suspended,                     'S')
+  ITCH_VALUE(FinancialStatus, DeficientBankrupt,             'G')
+  ITCH_VALUE(FinancialStatus, DeficientDelinquent,           'H')
+  ITCH_VALUE(FinancialStatus, DelinquentBankrupt,            'J')
+  ITCH_VALUE(FinancialStatus, DeficientDelinquentBankrupt,   'K')
+  ITCH_VALUE(FinancialStatus, CreationsRedemptionsSuspended, 'C')
+  ITCH_VALUE(FinancialStatus, Normal,                        'N')
+  ITCH_VALUE(FinancialStatus, NotAvailable,                  ' ')
+ITCH_ENUM_END(FinancialStatus)
+
+// Y/N flags: Round Lots Only, Inverse Indicator, Primary Market Maker,
+// Printable, Open Eligibility Status.
+ITCH_ENUM(YesNo)
+  ITCH_VALUE(YesNo, Yes, 'Y')
+  ITCH_VALUE(YesNo, No,  'N')
+ITCH_ENUM_END(YesNo)
+
+// Y/N/space flags: Short Sale Threshold Indicator, ETP Flag.
+ITCH_ENUM(YesNoBlank)
+  ITCH_VALUE(YesNoBlank, Yes,          'Y')
+  ITCH_VALUE(YesNoBlank, No,           'N')
+  ITCH_VALUE(YesNoBlank, NotAvailable, ' ')
+ITCH_ENUM_END(YesNoBlank)
+
+// Appendix D Issue Classification.
+ITCH_ENUM(IssueClassification)
+  ITCH_VALUE(IssueClassification, AmericanDepositaryShare,    'A')
+  ITCH_VALUE(IssueClassification, Bond,                       'B')
+  ITCH_VALUE(IssueClassification, CommonStock,                'C')
+  ITCH_VALUE(IssueClassification, DepositoryReceipt,          'F')
+  ITCH_VALUE(IssueClassification, Rule144A,                   'I')
+  ITCH_VALUE(IssueClassification, LimitedPartnership,         'L')
+  ITCH_VALUE(IssueClassification, Notes,                      'N')
+  ITCH_VALUE(IssueClassification, OrdinaryShare,              'O')
+  ITCH_VALUE(IssueClassification, PreferredStock,             'P')
+  ITCH_VALUE(IssueClassification, OtherSecurities,            'Q')
+  ITCH_VALUE(IssueClassification, Right,                      'R')
+  ITCH_VALUE(IssueClassification, SharesOfBeneficialInterest, 'S')
+  ITCH_VALUE(IssueClassification, ConvertibleDebenture,       'T')
+  ITCH_VALUE(IssueClassification, Unit,                       'U')
+  ITCH_VALUE(IssueClassification, UnitsBenefInt,              'V')
+  ITCH_VALUE(IssueClassification, Warrant,                    'W')
+ITCH_ENUM_END(IssueClassification)
+
+// R Authenticity.
+ITCH_ENUM(Authenticity)
+  ITCH_VALUE(Authenticity, LiveProduction, 'P')
+  ITCH_VALUE(Authenticity, Test,           'T')
+ITCH_ENUM_END(Authenticity)
+
+// R IPO Flag ('Z' Nasdaq-listed non-IPO new listing added 2026-02-19).
+ITCH_ENUM(IpoFlag)
+  ITCH_VALUE(IpoFlag, NewIpo,           'Y')
+  ITCH_VALUE(IpoFlag, NotNewIpo,        'N')
+  ITCH_VALUE(IpoFlag, NonIpoNewListing, 'Z')
+  ITCH_VALUE(IpoFlag, NotAvailable,     ' ')
+ITCH_ENUM_END(IpoFlag)
+
+// R LULD Reference Price Tier.
+ITCH_ENUM(LuldTier)
+  ITCH_VALUE(LuldTier, Tier1,        '1')
+  ITCH_VALUE(LuldTier, Tier2,        '2')
+  ITCH_VALUE(LuldTier, NotAvailable, ' ')
+ITCH_ENUM_END(LuldTier)
+
+// H Trading State.
+ITCH_ENUM(TradingState)
+  ITCH_VALUE(TradingState, Halted,        'H')
+  ITCH_VALUE(TradingState, Paused,        'P')
+  ITCH_VALUE(TradingState, QuotationOnly, 'Q')
+  ITCH_VALUE(TradingState, Trading,       'T')
+ITCH_ENUM_END(TradingState)
+
+// Y Reg SHO Action.
+ITCH_ENUM(RegShoAction)
+  ITCH_VALUE(RegShoAction, NoPriceTest,             '0')
+  ITCH_VALUE(RegShoAction, RestrictionIntradayDrop, '1')
+  ITCH_VALUE(RegShoAction, RestrictionRemains,      '2')
+ITCH_ENUM_END(RegShoAction)
+
+// L Market Maker Mode.
+ITCH_ENUM(MarketMakerMode)
+  ITCH_VALUE(MarketMakerMode, Normal,       'N')
+  ITCH_VALUE(MarketMakerMode, Passive,      'P')
+  ITCH_VALUE(MarketMakerMode, Syndicate,    'S')
+  ITCH_VALUE(MarketMakerMode, PreSyndicate, 'R')
+  ITCH_VALUE(MarketMakerMode, Penalty,      'L')
+ITCH_ENUM_END(MarketMakerMode)
+
+// L Market Participant State.
+ITCH_ENUM(ParticipantState)
+  ITCH_VALUE(ParticipantState, Active,    'A')
+  ITCH_VALUE(ParticipantState, Excused,   'E')
+  ITCH_VALUE(ParticipantState, Withdrawn, 'W')
+  ITCH_VALUE(ParticipantState, Suspended, 'S')
+  ITCH_VALUE(ParticipantState, Deleted,   'D')
+ITCH_ENUM_END(ParticipantState)
+
+// W Breached Level.
+ITCH_ENUM(BreachedLevel)
+  ITCH_VALUE(BreachedLevel, Level1, '1')
+  ITCH_VALUE(BreachedLevel, Level2, '2')
+  ITCH_VALUE(BreachedLevel, Level3, '3')
+ITCH_ENUM_END(BreachedLevel)
+
+// K IPO Quotation Release Qualifier.
+ITCH_ENUM(IpoReleaseQualifier)
+  ITCH_VALUE(IpoReleaseQualifier, Anticipated,        'A')
+  ITCH_VALUE(IpoReleaseQualifier, CanceledPostponed,  'C')
+ITCH_ENUM_END(IpoReleaseQualifier)
+
+// h Market Code ('B' relabelled Nasdaq Texas, formerly BX, 2026-02-13).
+ITCH_ENUM(MarketCode)
+  ITCH_VALUE(MarketCode, Nasdaq,      'Q')
+  ITCH_VALUE(MarketCode, NasdaqTexas, 'B')
+  ITCH_VALUE(MarketCode, Psx,         'X')
+ITCH_ENUM_END(MarketCode)
+
+// h Operational Halt Action.
+ITCH_ENUM(OperationalHaltAction)
+  ITCH_VALUE(OperationalHaltAction, Halted,  'H')
+  ITCH_VALUE(OperationalHaltAction, Resumed, 'T')
+ITCH_ENUM_END(OperationalHaltAction)
+
+// Q Cross Type. 'I' is legacy: listed in the 2015 spec, silently removed later;
+// decoders keep accepting it (R1a Q1 "Silent change").
+ITCH_ENUM(CrossType)
+  ITCH_VALUE(CrossType, Opening,         'O')
+  ITCH_VALUE(CrossType, Closing,         'C')
+  ITCH_VALUE(CrossType, HaltOrIpo,       'H')
+  ITCH_VALUE(CrossType, IntradayLegacy,  'I')
+ITCH_ENUM_END(CrossType)
+
+// I Cross Type ('A' Extended Trading Close added 2022-01-07).
+ITCH_ENUM(NoiiCrossType)
+  ITCH_VALUE(NoiiCrossType, Opening,              'O')
+  ITCH_VALUE(NoiiCrossType, Closing,              'C')
+  ITCH_VALUE(NoiiCrossType, HaltOrIpo,            'H')
+  ITCH_VALUE(NoiiCrossType, ExtendedTradingClose, 'A')
+ITCH_ENUM_END(NoiiCrossType)
+
+// I Imbalance Direction ('P' Paused added 2023-04-28).
+ITCH_ENUM(ImbalanceDirection)
+  ITCH_VALUE(ImbalanceDirection, Buy,                'B')
+  ITCH_VALUE(ImbalanceDirection, Sell,               'S')
+  ITCH_VALUE(ImbalanceDirection, NoImbalance,        'N')
+  ITCH_VALUE(ImbalanceDirection, InsufficientOrders, 'O')
+  ITCH_VALUE(ImbalanceDirection, Paused,             'P')
+ITCH_ENUM_END(ImbalanceDirection)
+
+// I Price Variation Indicator.
+ITCH_ENUM(PriceVariation)
+  ITCH_VALUE(PriceVariation, LessThan1Pct,   'L')
+  ITCH_VALUE(PriceVariation, Pct1To2,        '1')
+  ITCH_VALUE(PriceVariation, Pct2To3,        '2')
+  ITCH_VALUE(PriceVariation, Pct3To4,        '3')
+  ITCH_VALUE(PriceVariation, Pct4To5,        '4')
+  ITCH_VALUE(PriceVariation, Pct5To6,        '5')
+  ITCH_VALUE(PriceVariation, Pct6To7,        '6')
+  ITCH_VALUE(PriceVariation, Pct7To8,        '7')
+  ITCH_VALUE(PriceVariation, Pct8To9,        '8')
+  ITCH_VALUE(PriceVariation, Pct9To10,       '9')
+  ITCH_VALUE(PriceVariation, Pct10To20,      'A')
+  ITCH_VALUE(PriceVariation, Pct20To30,      'B')
+  ITCH_VALUE(PriceVariation, Pct30OrMore,    'C')
+  ITCH_VALUE(PriceVariation, CannotCalculate,' ')
+ITCH_ENUM_END(PriceVariation)
+
+// N Interest Flag.
+ITCH_ENUM(InterestFlag)
+  ITCH_VALUE(InterestFlag, BuySide,  'B')
+  ITCH_VALUE(InterestFlag, SellSide, 'S')
+  ITCH_VALUE(InterestFlag, BothSides,'A')
+  ITCH_VALUE(InterestFlag, None,     'N')
+ITCH_ENUM_END(InterestFlag)
+
+// clang-format on
+#undef ITCH_ENUM
+#undef ITCH_VALUE
+#undef ITCH_ENUM_END

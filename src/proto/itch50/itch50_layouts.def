@@ -1,0 +1,237 @@
+// TotalView-ITCH 5.0 message layouts: the single source of truth (03-protocols §2).
+//
+// Spec: "Nasdaq TotalView-ITCH 5.0", revision 2026-02-19 (layouts unchanged since
+// 2023-04-28). Cross-reference: docs/plan/research/R1a-itch50.md "Q3. Complete
+// message catalog". Every row below must be reviewed against the spec PDF.
+//
+// The consumer defines, before each inclusion:
+//   ITCH_MSG(type_char, Name, total_len)                     -- opens a message
+//   ITCH_FIELD(Name, field, offset, len, Kind, EnumType)     -- one body field
+//   ITCH_END(Name)                                           -- closes a message
+// and this file #undefs all three at the end.
+//
+// Every message starts with the common 11-byte header: Message Type @0/1 (the
+// ITCH_MSG type byte) followed by LLE_ITCH50_HEADER_FIELDS (@1..10). Body fields
+// start at offset 11. itch50.h static_asserts that the header and body fields
+// tile each message with no gap or overlap and that every total equals the
+// spec length.
+//
+// Kinds (field_codec.h): U16 U32 U48 U64 unsigned big-endian integers; Px4 =
+// Price(4) (u32, 4 implied decimals); Px8 = Price(8) (u64, 8 implied decimals);
+// Alpha = left-justified space-padded ASCII; Enum = 1-byte code kept raw
+// (tolerant: any byte decodes); Char = 1 raw byte with no defined value set.
+//
+// Spec errata honored (R1a Q3 "Spec errata to handle"):
+//  - K IPO Price is binary Price(4) on the wire; the ASCII "padded with spaces"
+//    note in the spec is a leftover from ASCII ITCH (verified on real bytes).
+//  - Q Cross Type 'I' (Intraday/Post-Close) was removed from the spec without a
+//    revision note; it stays in CrossType as a legacy value.
+//  - The E table title ("Add Order - Order Executed"), the Q table title
+//    ("Trade Message (Non-Cross)") and the "4.2.x" section numbers in the
+//    revision log are typos and are ignored.
+// clang-format off
+
+#ifndef LLE_ITCH50_HEADER_FIELDS
+// X(field, offset, len, Kind, EnumType): common header after the type byte.
+#define LLE_ITCH50_HEADER_FIELDS(X)       \
+  X(stock_locate,    1, 2, U16, void)     \
+  X(tracking_number, 3, 2, U16, void)     \
+  X(timestamp,       5, 6, U48, void)
+#endif
+
+// 1.1 System Event Message. Locate is always 0.
+ITCH_MSG('S', SystemEvent, 12)
+  ITCH_FIELD(SystemEvent, event_code, 11, 1, Enum, EventCode)
+ITCH_END(SystemEvent)
+
+// 1.2.1 Stock Directory.
+ITCH_MSG('R', StockDirectory, 39)
+  ITCH_FIELD(StockDirectory, stock,                 11, 8, Alpha, void)
+  ITCH_FIELD(StockDirectory, market_category,       19, 1, Enum,  MarketCategory)
+  ITCH_FIELD(StockDirectory, financial_status,      20, 1, Enum,  FinancialStatus)
+  ITCH_FIELD(StockDirectory, round_lot_size,        21, 4, U32,   void)
+  ITCH_FIELD(StockDirectory, round_lots_only,       25, 1, Enum,  YesNo)
+  ITCH_FIELD(StockDirectory, issue_classification,  26, 1, Enum,  IssueClassification)
+  ITCH_FIELD(StockDirectory, issue_sub_type,        27, 2, Alpha, void)
+  ITCH_FIELD(StockDirectory, authenticity,          29, 1, Enum,  Authenticity)
+  ITCH_FIELD(StockDirectory, short_sale_threshold,  30, 1, Enum,  YesNoBlank)
+  ITCH_FIELD(StockDirectory, ipo_flag,              31, 1, Enum,  IpoFlag)
+  ITCH_FIELD(StockDirectory, luld_tier,             32, 1, Enum,  LuldTier)
+  ITCH_FIELD(StockDirectory, etp_flag,              33, 1, Enum,  YesNoBlank)
+  ITCH_FIELD(StockDirectory, etp_leverage_factor,   34, 4, U32,   void)
+  ITCH_FIELD(StockDirectory, inverse_indicator,     38, 1, Enum,  YesNo)
+ITCH_END(StockDirectory)
+
+// 1.2.2 Stock Trading Action.
+ITCH_MSG('H', StockTradingAction, 25)
+  ITCH_FIELD(StockTradingAction, stock,         11, 8, Alpha, void)
+  ITCH_FIELD(StockTradingAction, trading_state, 19, 1, Enum,  TradingState)
+  ITCH_FIELD(StockTradingAction, reserved,      20, 1, Char,  void)
+  ITCH_FIELD(StockTradingAction, reason,        21, 4, Alpha, void)
+ITCH_END(StockTradingAction)
+
+// 1.2.3 Reg SHO Short Sale Price Test Restricted Indicator.
+ITCH_MSG('Y', RegShoRestriction, 20)
+  ITCH_FIELD(RegShoRestriction, stock,          11, 8, Alpha, void)
+  ITCH_FIELD(RegShoRestriction, reg_sho_action, 19, 1, Enum,  RegShoAction)
+ITCH_END(RegShoRestriction)
+
+// 1.2.4 Market Participant Position.
+ITCH_MSG('L', MarketParticipantPosition, 26)
+  ITCH_FIELD(MarketParticipantPosition, mpid,                 11, 4, Alpha, void)
+  ITCH_FIELD(MarketParticipantPosition, stock,                15, 8, Alpha, void)
+  ITCH_FIELD(MarketParticipantPosition, primary_market_maker, 23, 1, Enum,  YesNo)
+  ITCH_FIELD(MarketParticipantPosition, market_maker_mode,    24, 1, Enum,  MarketMakerMode)
+  ITCH_FIELD(MarketParticipantPosition, participant_state,    25, 1, Enum,  ParticipantState)
+ITCH_END(MarketParticipantPosition)
+
+// 1.2.5.1 MWCB Decline Level. Locate 0. Levels are Price(8).
+ITCH_MSG('V', MwcbDeclineLevel, 35)
+  ITCH_FIELD(MwcbDeclineLevel, level1, 11, 8, Px8, void)
+  ITCH_FIELD(MwcbDeclineLevel, level2, 19, 8, Px8, void)
+  ITCH_FIELD(MwcbDeclineLevel, level3, 27, 8, Px8, void)
+ITCH_END(MwcbDeclineLevel)
+
+// 1.2.5.2 MWCB Status. Locate 0.
+ITCH_MSG('W', MwcbStatus, 12)
+  ITCH_FIELD(MwcbStatus, breached_level, 11, 1, Enum, BreachedLevel)
+ITCH_END(MwcbStatus)
+
+// 1.2.6 IPO Quoting Period Update. Locate "always 0". IPO Price: binary Price(4) (erratum).
+ITCH_MSG('K', IpoQuotingPeriodUpdate, 28)
+  ITCH_FIELD(IpoQuotingPeriodUpdate, stock,             11, 8, Alpha, void)
+  ITCH_FIELD(IpoQuotingPeriodUpdate, release_time,      19, 4, U32,   void)
+  ITCH_FIELD(IpoQuotingPeriodUpdate, release_qualifier, 23, 1, Enum,  IpoReleaseQualifier)
+  ITCH_FIELD(IpoQuotingPeriodUpdate, ipo_price,         24, 4, Px4,   void)
+ITCH_END(IpoQuotingPeriodUpdate)
+
+// 1.2.7 LULD Auction Collar.
+ITCH_MSG('J', LuldAuctionCollar, 35)
+  ITCH_FIELD(LuldAuctionCollar, stock,           11, 8, Alpha, void)
+  ITCH_FIELD(LuldAuctionCollar, reference_price, 19, 4, Px4,   void)
+  ITCH_FIELD(LuldAuctionCollar, upper_price,     23, 4, Px4,   void)
+  ITCH_FIELD(LuldAuctionCollar, lower_price,     27, 4, Px4,   void)
+  ITCH_FIELD(LuldAuctionCollar, extension,       31, 4, U32,   void)
+ITCH_END(LuldAuctionCollar)
+
+// 1.2.8 Operational Halt.
+ITCH_MSG('h', OperationalHalt, 21)
+  ITCH_FIELD(OperationalHalt, stock,       11, 8, Alpha, void)
+  ITCH_FIELD(OperationalHalt, market_code, 19, 1, Enum,  MarketCode)
+  ITCH_FIELD(OperationalHalt, action,      20, 1, Enum,  OperationalHaltAction)
+ITCH_END(OperationalHalt)
+
+// 1.3.1 Add Order - No MPID Attribution.
+ITCH_MSG('A', AddOrder, 36)
+  ITCH_FIELD(AddOrder, order_ref, 11, 8, U64,   void)
+  ITCH_FIELD(AddOrder, side,      19, 1, Enum,  ::lle::Side)
+  ITCH_FIELD(AddOrder, shares,    20, 4, U32,   void)
+  ITCH_FIELD(AddOrder, stock,     24, 8, Alpha, void)
+  ITCH_FIELD(AddOrder, price,     32, 4, Px4,   void)
+ITCH_END(AddOrder)
+
+// 1.3.2 Add Order with MPID Attribution.
+ITCH_MSG('F', AddOrderMpid, 40)
+  ITCH_FIELD(AddOrderMpid, order_ref,   11, 8, U64,   void)
+  ITCH_FIELD(AddOrderMpid, side,        19, 1, Enum,  ::lle::Side)
+  ITCH_FIELD(AddOrderMpid, shares,      20, 4, U32,   void)
+  ITCH_FIELD(AddOrderMpid, stock,       24, 8, Alpha, void)
+  ITCH_FIELD(AddOrderMpid, price,       32, 4, Px4,   void)
+  ITCH_FIELD(AddOrderMpid, attribution, 36, 4, Alpha, void)
+ITCH_END(AddOrderMpid)
+
+// 1.4.1 Order Executed.
+ITCH_MSG('E', OrderExecuted, 31)
+  ITCH_FIELD(OrderExecuted, order_ref,       11, 8, U64, void)
+  ITCH_FIELD(OrderExecuted, executed_shares, 19, 4, U32, void)
+  ITCH_FIELD(OrderExecuted, match_number,    23, 8, U64, void)
+ITCH_END(OrderExecuted)
+
+// 1.4.2 Order Executed With Price.
+ITCH_MSG('C', OrderExecutedWithPrice, 36)
+  ITCH_FIELD(OrderExecutedWithPrice, order_ref,       11, 8, U64,  void)
+  ITCH_FIELD(OrderExecutedWithPrice, executed_shares, 19, 4, U32,  void)
+  ITCH_FIELD(OrderExecutedWithPrice, match_number,    23, 8, U64,  void)
+  ITCH_FIELD(OrderExecutedWithPrice, printable,       31, 1, Enum, YesNo)
+  ITCH_FIELD(OrderExecutedWithPrice, execution_price, 32, 4, Px4,  void)
+ITCH_END(OrderExecutedWithPrice)
+
+// 1.4.3 Order Cancel.
+ITCH_MSG('X', OrderCancel, 23)
+  ITCH_FIELD(OrderCancel, order_ref,        11, 8, U64, void)
+  ITCH_FIELD(OrderCancel, cancelled_shares, 19, 4, U32, void)
+ITCH_END(OrderCancel)
+
+// 1.4.4 Order Delete.
+ITCH_MSG('D', OrderDelete, 19)
+  ITCH_FIELD(OrderDelete, order_ref, 11, 8, U64, void)
+ITCH_END(OrderDelete)
+
+// 1.4.5 Order Replace.
+ITCH_MSG('U', OrderReplace, 35)
+  ITCH_FIELD(OrderReplace, original_order_ref, 11, 8, U64, void)
+  ITCH_FIELD(OrderReplace, new_order_ref,      19, 8, U64, void)
+  ITCH_FIELD(OrderReplace, shares,             27, 4, U32, void)
+  ITCH_FIELD(OrderReplace, price,              31, 4, Px4, void)
+ITCH_END(OrderReplace)
+
+// 1.5.1 Trade Message (Non-Cross). Order ref is always 0, side always 'B'.
+ITCH_MSG('P', Trade, 44)
+  ITCH_FIELD(Trade, order_ref,    11, 8, U64,   void)
+  ITCH_FIELD(Trade, side,         19, 1, Enum,  ::lle::Side)
+  ITCH_FIELD(Trade, shares,       20, 4, U32,   void)
+  ITCH_FIELD(Trade, stock,        24, 8, Alpha, void)
+  ITCH_FIELD(Trade, price,        32, 4, Px4,   void)
+  ITCH_FIELD(Trade, match_number, 36, 8, U64,   void)
+ITCH_END(Trade)
+
+// 1.5.2 Cross Trade Message. Shares are 8 bytes.
+ITCH_MSG('Q', CrossTrade, 40)
+  ITCH_FIELD(CrossTrade, shares,       11, 8, U64,   void)
+  ITCH_FIELD(CrossTrade, stock,        19, 8, Alpha, void)
+  ITCH_FIELD(CrossTrade, cross_price,  27, 4, Px4,   void)
+  ITCH_FIELD(CrossTrade, match_number, 31, 8, U64,   void)
+  ITCH_FIELD(CrossTrade, cross_type,   39, 1, Enum,  CrossType)
+ITCH_END(CrossTrade)
+
+// 1.5.3 Broken Trade / Order Execution.
+ITCH_MSG('B', BrokenTrade, 19)
+  ITCH_FIELD(BrokenTrade, match_number, 11, 8, U64, void)
+ITCH_END(BrokenTrade)
+
+// 1.6 Net Order Imbalance Indicator (NOII).
+ITCH_MSG('I', Noii, 50)
+  ITCH_FIELD(Noii, paired_shares,             11, 8, U64,   void)
+  ITCH_FIELD(Noii, imbalance_shares,          19, 8, U64,   void)
+  ITCH_FIELD(Noii, imbalance_direction,       27, 1, Enum,  ImbalanceDirection)
+  ITCH_FIELD(Noii, stock,                     28, 8, Alpha, void)
+  ITCH_FIELD(Noii, far_price,                 36, 4, Px4,   void)
+  ITCH_FIELD(Noii, near_price,                40, 4, Px4,   void)
+  ITCH_FIELD(Noii, current_reference_price,   44, 4, Px4,   void)
+  ITCH_FIELD(Noii, cross_type,                48, 1, Enum,  NoiiCrossType)
+  ITCH_FIELD(Noii, price_variation_indicator, 49, 1, Enum,  PriceVariation)
+ITCH_END(Noii)
+
+// 1.7 Retail Price Improvement Indicator (RPII).
+ITCH_MSG('N', RetailInterest, 20)
+  ITCH_FIELD(RetailInterest, stock,         11, 8, Alpha, void)
+  ITCH_FIELD(RetailInterest, interest_flag, 19, 1, Enum,  InterestFlag)
+ITCH_END(RetailInterest)
+
+// 1.8 Direct Listing with Capital Raise Price Discovery (added 2023-04-28).
+// Near Execution Time units are not stated by the spec (R1a, Risks).
+ITCH_MSG('O', DlcrPriceDiscovery, 48)
+  ITCH_FIELD(DlcrPriceDiscovery, stock,                   11, 8, Alpha, void)
+  ITCH_FIELD(DlcrPriceDiscovery, open_eligibility_status, 19, 1, Enum,  YesNo)
+  ITCH_FIELD(DlcrPriceDiscovery, min_allowable_price,     20, 4, Px4,   void)
+  ITCH_FIELD(DlcrPriceDiscovery, max_allowable_price,     24, 4, Px4,   void)
+  ITCH_FIELD(DlcrPriceDiscovery, near_execution_price,    28, 4, Px4,   void)
+  ITCH_FIELD(DlcrPriceDiscovery, near_execution_time,     32, 8, U64,   void)
+  ITCH_FIELD(DlcrPriceDiscovery, lower_price_range_collar,40, 4, Px4,   void)
+  ITCH_FIELD(DlcrPriceDiscovery, upper_price_range_collar,44, 4, Px4,   void)
+ITCH_END(DlcrPriceDiscovery)
+
+// clang-format on
+#undef ITCH_MSG
+#undef ITCH_FIELD
+#undef ITCH_END

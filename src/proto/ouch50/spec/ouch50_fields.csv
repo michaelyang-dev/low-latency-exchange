@@ -1,0 +1,418 @@
+kind,message,direction,field,offset,len,type,enum,check,reject,appendage,allowed_tags,value,doc
+# OUCH 5.0 rev 1.05 (Nasdaq: Updated October 2025; PDF sha256 770253de8b257ab68700ab5dbf179f806d890890683bf695ab8257585d8c2c00).,,,,,,,,,,,,,
+# Single source of truth for tools/specgen/specgen.py. Every row is checked against the spec PDF by a human reviewer (03-protocols s2).,,,,,,,,,,,,,
+# kind=msg   : message=type letter; direction=in|out; field=message name; len=fixed bytes including Appendage Length; appendage=Req|Opt|Opt*|none; allowed_tags=space separated tag numbers,,,,,,,,,,,,,
+# kind=field : one row per wire field in offset order; type in {type u8 u16 u32 u64 price ts alpha char applen}; enum=Enum or Enum:v1|v2 (subset); check=limit_or_market|zero_or_limit|range:LO:HI; reject=reject code for a bad value (blank = 0x000F Other),,,,,,,,,,,,,
+# kind=tag   : value=tag number; field=tag name; len=value bytes (excluding the [len][tag] header); type in {u8 u16 u32 u64 price sprice4 alpha char},,,,,,,,,,,,,
+# kind=enum  : enum=enumeration name; field=enumerator; value=wire value (single character; 0x.. for a byte value or a u16 code); direction=both|in|out (which messages may carry it),,,,,,,,,,,,,
+# Spec section references: s2.x inbound messages; s3.x outbound messages; Appendix A tags; Appendix B cancel reasons; Appendix C reject reasons; Appendix D liquidity flags.,,,,,,,,,,,,,
+#,,,,,,,,,,,,,
+# ---------------------------------------------------------------- inbound (s2),,,,,,,,,,,,,
+msg,O,in,EnterOrder,,47,,,,,Req,2 3 4 5 6 7 9 10 11 12 13 15 16 17 24 25 26 28 29 30,,s2.1 Enter Order
+field,O,in,Type,0,1,type,,,,,,,'O'
+field,O,in,UserRefNum,1,4,u32,,,,,,,Day-unique and strictly increasing per account (or per UserRefIdx channel)
+field,O,in,Side,5,1,char,Side,,0x0009,,,,
+field,O,in,Quantity,6,4,u32,,range:1:999999,0x0013,,,,Must be > 0 and < 1000000
+field,O,in,Symbol,10,8,alpha,,,,,,,
+field,O,in,Price,18,8,price,,limit_or_market,0x001D,,,,4 implied decimals; market = 0x7FFFFFFF or 2000000000
+field,O,in,TimeInForce,26,1,char,TimeInForce,,,,,,
+field,O,in,Display,27,1,char,Display,,0x0003,,,,
+field,O,in,Capacity,28,1,char,Capacity,,,,,,
+field,O,in,InterMarketSweepEligibility,29,1,char,IsoEligibility,,,,,,
+field,O,in,CrossType,30,1,char,CrossType,,0x0014,,,,
+field,O,in,ClOrdID,31,14,alpha,,,,,,,Not checked for uniqueness
+field,O,in,AppendageLength,45,2,applen,,,,,,,Always present (0 when no tags)
+msg,U,in,ReplaceOrder,,40,,,,,Req,3 5 6 7 9 10 11 12 13 15 16 17 25 26 27 28 29 30,,s2.2 Replace Order Request; Firm and GroupID are inherited from the original order
+field,U,in,Type,0,1,type,,,,,,,'U'
+field,U,in,OrigUserRefNum,1,4,u32,,,,,,,UserRefNum of the order being replaced
+field,U,in,UserRefNum,5,4,u32,,,,,,,New UserRefNum for the replacement
+field,U,in,Quantity,9,4,u32,,range:1:999999,0x0013,,,,Total shares liable for the whole chain
+field,U,in,Price,13,8,price,,limit_or_market,0x001D,,,,
+field,U,in,TimeInForce,21,1,char,TimeInForce:0|3|5|6,,,,,,Replace lists 0/3/5/6 only (no E)
+field,U,in,Display,22,1,char,Display,,0x0003,,,,
+field,U,in,InterMarketSweepEligibility,23,1,char,IsoEligibility,,,,,,
+field,U,in,ClOrdID,24,14,alpha,,,,,,,
+field,U,in,AppendageLength,38,2,applen,,,,,,,
+msg,X,in,CancelOrder,,11,,,,,Opt,28,,s2.3 Cancel Order Request; Appendage Length may be omitted
+field,X,in,Type,0,1,type,,,,,,,'X'
+field,X,in,UserRefNum,1,4,u32,,,,,,,References an existing order
+field,X,in,Quantity,5,4,u32,,,,,,,New intended order size (0 cancels the rest)
+field,X,in,AppendageLength,9,2,applen,,,,,,,Optional
+msg,M,in,ModifyOrder,,12,,,,,Opt,25 26 28,,s2.4 Modify Order Request; Appendage Length may be omitted
+field,M,in,Type,0,1,type,,,,,,,'M'
+field,M,in,UserRefNum,1,4,u32,,,,,,,References an existing order
+field,M,in,Side,5,1,char,Side,,0x0009,,,,Only S<->E; S<->T; E<->T changes are allowed (engine rule)
+field,M,in,Quantity,6,4,u32,,,,,,,New intended order size; increases are ignored (engine rule)
+field,M,in,AppendageLength,10,2,applen,,,,,,,Optional
+msg,C,in,MassCancel,,19,,,,,Req,24 27 28,,s2.5 Mass Cancel Request
+field,C,in,Type,0,1,type,,,,,,,'C'
+field,C,in,UserRefNum,1,4,u32,,,,,,,
+field,C,in,Firm,5,4,alpha,,,,,,,
+field,C,in,Symbol,9,8,alpha,,,,,,,Spaces = all symbols
+field,C,in,AppendageLength,17,2,applen,,,,,,,
+msg,D,in,DisableOrderEntry,,11,,,,,Req,28,,s2.6 Disable Order Entry Request
+field,D,in,Type,0,1,type,,,,,,,'D'
+field,D,in,UserRefNum,1,4,u32,,,,,,,
+field,D,in,Firm,5,4,alpha,,,,,,,
+field,D,in,AppendageLength,9,2,applen,,,,,,,
+msg,E,in,EnableOrderEntry,,11,,,,,Req,28,,s2.7 Enable Order Entry Request
+field,E,in,Type,0,1,type,,,,,,,'E'
+field,E,in,UserRefNum,1,4,u32,,,,,,,
+field,E,in,Firm,5,4,alpha,,,,,,,
+field,E,in,AppendageLength,9,2,applen,,,,,,,
+msg,Q,in,AccountQuery,,3,,,,,Opt,28,,s2.8 Account Query Request; Appendage Length may be omitted
+field,Q,in,Type,0,1,type,,,,,,,'Q'
+field,Q,in,AppendageLength,1,2,applen,,,,,,,Optional
+# ---------------------------------------------------------------- outbound (s3),,,,,,,,,,,,,
+msg,S,out,SystemEvent,,10,,,,,none,,,s3.1 System Event (no appendage)
+field,S,out,Type,0,1,type,,,,,,,'S'
+field,S,out,Timestamp,1,8,ts,,,,,,,ns since midnight
+field,S,out,EventCode,9,1,char,EventCode,,,,,,
+msg,A,out,OrderAccepted,,64,,,,,Req,2 3 4 5 6 7 9 10 11 12 13 14 15 16 17 18 24 25 28 29 30,,s3.2 Order Accepted
+field,A,out,Type,0,1,type,,,,,,,'A'
+field,A,out,Timestamp,1,8,ts,,,,,,,
+field,A,out,UserRefNum,9,4,u32,,,,,,,
+field,A,out,Side,13,1,char,Side,,,,,,
+field,A,out,Quantity,14,4,u32,,,,,,,Shares accepted
+field,A,out,Symbol,18,8,alpha,,,,,,,
+field,A,out,Price,26,8,price,,,,,,,Accepted price (may be repriced)
+field,A,out,TimeInForce,34,1,char,TimeInForce,,,,,,
+field,A,out,Display,35,1,char,Display,,,,,,
+field,A,out,OrderReferenceNumber,36,8,u64,,,,,,,Day-unique exchange order reference
+field,A,out,Capacity,44,1,char,Capacity,,,,,,
+field,A,out,InterMarketSweepEligibility,45,1,char,IsoEligibility,,,,,,
+field,A,out,CrossType,46,1,char,CrossType,,,,,,
+field,A,out,OrderState,47,1,char,OrderState,,,,,,
+field,A,out,ClOrdID,48,14,alpha,,,,,,,
+field,A,out,AppendageLength,62,2,applen,,,,,,,
+msg,U,out,OrderReplaced,,68,,,,,Req,2 3 5 6 12 15 16 17 18 28 29 30,,s3.3 Order Replaced
+field,U,out,Type,0,1,type,,,,,,,'U'
+field,U,out,Timestamp,1,8,ts,,,,,,,
+field,U,out,OrigUserRefNum,9,4,u32,,,,,,,
+field,U,out,UserRefNum,13,4,u32,,,,,,,
+field,U,out,Side,17,1,char,Side,,,,,,
+field,U,out,Quantity,18,4,u32,,,,,,,Shares outstanding after the replace
+field,U,out,Symbol,22,8,alpha,,,,,,,
+field,U,out,Price,30,8,price,,,,,,,
+field,U,out,TimeInForce,38,1,char,TimeInForce,,,,,,
+field,U,out,Display,39,1,char,Display,,,,,,
+field,U,out,OrderReferenceNumber,40,8,u64,,,,,,,
+field,U,out,Capacity,48,1,char,Capacity,,,,,,
+field,U,out,InterMarketSweepEligibility,49,1,char,IsoEligibility,,,,,,
+field,U,out,CrossType,50,1,char,CrossType,,,,,,
+field,U,out,OrderState,51,1,char,OrderState,,,,,,
+field,U,out,ClOrdID,52,14,alpha,,,,,,,
+field,U,out,AppendageLength,66,2,applen,,,,,,,
+msg,C,out,OrderCanceled,,20,,,,,Opt*,28,,s3.4 Order Canceled; appendage only with a non-zero UserRefIdx
+field,C,out,Type,0,1,type,,,,,,,'C'
+field,C,out,Timestamp,1,8,ts,,,,,,,
+field,C,out,UserRefNum,9,4,u32,,,,,,,
+field,C,out,Quantity,13,4,u32,,,,,,,Incremental decrement
+field,C,out,Reason,17,1,char,CancelReason,,,,,,
+field,C,out,AppendageLength,18,2,applen,,,,,,,
+msg,D,out,AiqCanceled,,34,,,,,Opt*,28,,s3.5 AIQ Canceled; appendage only with a non-zero UserRefIdx
+field,D,out,Type,0,1,type,,,,,,,'D'
+field,D,out,Timestamp,1,8,ts,,,,,,,
+field,D,out,UserRefNum,9,4,u32,,,,,,,
+field,D,out,DecrementShares,13,4,u32,,,,,,,Incremental decrement
+field,D,out,Reason,17,1,char,CancelReason:Q,,,,,,Always 'Q'
+field,D,out,QuantityPreventedFromTrading,18,4,u32,,,,,,,
+field,D,out,ExecutionPrice,22,8,price,,,,,,,
+field,D,out,LiquidityFlag,30,1,char,LiquidityFlag,,,,,,
+field,D,out,AIQStrategy,31,1,char,AiqStrategy,,,,,,
+field,D,out,AppendageLength,32,2,applen,,,,,,,
+msg,E,out,OrderExecuted,,36,,,,,Req,28,,s3.6 Order Executed; Appendage Length is not marked optional (R1b risk 2)
+field,E,out,Type,0,1,type,,,,,,,'E'
+field,E,out,Timestamp,1,8,ts,,,,,,,
+field,E,out,UserRefNum,9,4,u32,,,,,,,
+field,E,out,Quantity,13,4,u32,,,,,,,Incremental shares executed
+field,E,out,Price,17,8,price,,,,,,,
+field,E,out,LiquidityFlag,25,1,char,LiquidityFlag,,,,,,
+field,E,out,MatchNumber,26,8,u64,,,,,,,
+field,E,out,AppendageLength,34,2,applen,,,,,,,
+msg,B,out,BrokenTrade,,38,,,,,Opt*,28,,s3.7 Broken Trade; appendage only with a non-zero UserRefIdx
+field,B,out,Type,0,1,type,,,,,,,'B'
+field,B,out,Timestamp,1,8,ts,,,,,,,
+field,B,out,UserRefNum,9,4,u32,,,,,,,
+field,B,out,MatchNumber,13,8,u64,,,,,,,
+field,B,out,Reason,21,1,char,BrokenTradeReason,,,,,,
+field,B,out,ClOrdID,22,14,alpha,,,,,,,
+field,B,out,AppendageLength,36,2,applen,,,,,,,
+msg,J,out,Rejected,,31,,,,,Opt*,28,,s3.8 Rejected; appendage only with a non-zero UserRefIdx
+field,J,out,Type,0,1,type,,,,,,,'J'
+field,J,out,Timestamp,1,8,ts,,,,,,,
+field,J,out,UserRefNum,9,4,u32,,,,,,,
+field,J,out,Reason,13,2,u16,RejectReason,,,,,,Appendix C code
+field,J,out,ClOrdID,15,14,alpha,,,,,,,
+field,J,out,AppendageLength,29,2,applen,,,,,,,
+msg,P,out,CancelPending,,15,,,,,Opt*,28,,s3.9 Cancel Pending; appendage only with a non-zero UserRefIdx
+field,P,out,Type,0,1,type,,,,,,,'P'
+field,P,out,Timestamp,1,8,ts,,,,,,,
+field,P,out,UserRefNum,9,4,u32,,,,,,,
+field,P,out,AppendageLength,13,2,applen,,,,,,,
+msg,I,out,CancelReject,,15,,,,,Opt*,28,,s3.10 Cancel Reject; appendage only with a non-zero UserRefIdx
+field,I,out,Type,0,1,type,,,,,,,'I'
+field,I,out,Timestamp,1,8,ts,,,,,,,
+field,I,out,UserRefNum,9,4,u32,,,,,,,
+field,I,out,AppendageLength,13,2,applen,,,,,,,
+msg,T,out,OrderPriorityUpdate,,32,,,,,Opt*,28,,s3.11 Order Priority Update; appendage only with a non-zero UserRefIdx
+field,T,out,Type,0,1,type,,,,,,,'T'
+field,T,out,Timestamp,1,8,ts,,,,,,,
+field,T,out,UserRefNum,9,4,u32,,,,,,,
+field,T,out,Price,13,8,price,,,,,,,
+field,T,out,Display,21,1,char,Display,,,,,,
+field,T,out,OrderReferenceNumber,22,8,u64,,,,,,,New order reference number
+field,T,out,AppendageLength,30,2,applen,,,,,,,
+msg,M,out,OrderModified,,20,,,,,Opt*,25 26 28,,s3.12 Order Modified; appendage only with a non-zero UserRefIdx
+field,M,out,Type,0,1,type,,,,,,,'M'
+field,M,out,Timestamp,1,8,ts,,,,,,,
+field,M,out,UserRefNum,9,4,u32,,,,,,,
+field,M,out,Side,13,1,char,Side,,,,,,
+field,M,out,Quantity,14,4,u32,,,,,,,Total shares outstanding
+field,M,out,AppendageLength,18,2,applen,,,,,,,
+msg,R,out,OrderRestated,,16,,,,,Req,1 22 23 28,,s3.13 Order Restated (table title in the PDF is a copy-paste error)
+field,R,out,Type,0,1,type,,,,,,,'R'
+field,R,out,Timestamp,1,8,ts,,,,,,,
+field,R,out,UserRefNum,9,4,u32,,,,,,,
+field,R,out,Reason,13,1,char,RestatedReason,,,,,,
+field,R,out,AppendageLength,14,2,applen,,,,,,,
+msg,X,out,MassCancelResponse,,27,,,,,Req,24 27 28,,s3.14 Mass Cancel Response
+field,X,out,Type,0,1,type,,,,,,,'X'
+field,X,out,Timestamp,1,8,ts,,,,,,,
+field,X,out,UserRefNum,9,4,u32,,,,,,,
+field,X,out,Firm,13,4,alpha,,,,,,,
+field,X,out,Symbol,17,8,alpha,,,,,,,
+field,X,out,AppendageLength,25,2,applen,,,,,,,
+msg,G,out,DisableOrderEntryResponse,,19,,,,,Req,28,,s3.15 Disable Order Entry Response
+field,G,out,Type,0,1,type,,,,,,,'G'
+field,G,out,Timestamp,1,8,ts,,,,,,,
+field,G,out,UserRefNum,9,4,u32,,,,,,,
+field,G,out,Firm,13,4,alpha,,,,,,,
+field,G,out,AppendageLength,17,2,applen,,,,,,,
+msg,K,out,EnableOrderEntryResponse,,19,,,,,Req,28,,s3.16 Enable Order Entry Response
+field,K,out,Type,0,1,type,,,,,,,'K'
+field,K,out,Timestamp,1,8,ts,,,,,,,
+field,K,out,UserRefNum,9,4,u32,,,,,,,
+field,K,out,Firm,13,4,alpha,,,,,,,
+field,K,out,AppendageLength,17,2,applen,,,,,,,
+msg,Q,out,AccountQueryResponse,,15,,,,,Opt*,28,,s3.17 Account Query Response; appendage only with a non-zero UserRefIdx
+field,Q,out,Type,0,1,type,,,,,,,'Q'
+field,Q,out,Timestamp,1,8,ts,,,,,,,
+field,Q,out,NextUserRefNum,9,4,u32,,,,,,,
+field,Q,out,AppendageLength,13,2,applen,,,,,,,
+# ---------------------------------------------------------------- TagValue registry (Appendix A),,,,,,,,,,,,,
+tag,,,SecondaryOrdRefNum,,8,u64,,,,,,1,Alternative order reference used on the market data feeds (type printed as 'Q' in the PDF)
+tag,,,Firm,,4,alpha,,,,,,2,Blank = account default firm
+tag,,,MinQty,,4,u32,,,,,,3,Round lot; 0 = none
+tag,,,CustomerType,,1,char,CustomerType,,,,,4,Space = port default
+tag,,,MaxFloor,,4,u32,,,,,,5,Displayed portion; 0 = none
+tag,,,PriceType,,1,char,PriceType,,0x0005,,,6,Default L
+tag,,,PegOffset,,4,sprice4,,,,,,7,Signed price; 0 = none
+tag,,,DiscretionPrice,,8,price,,zero_or_limit,0x001D,,,9,0 = none
+tag,,,DiscretionPriceType,,1,char,DiscretionPriceType,,0x0005,,,10,Default L
+tag,,,DiscretionPegOffset,,4,sprice4,,,,,,11,Signed price; 0 = none
+tag,,,PostOnly,,1,char,PostOnly,,,,,12,Default N
+tag,,,RandomReserves,,4,u32,,,,,,13,0 = none
+tag,,,Route,,4,alpha,,,,,,14,Outbound (Accepted) only per the allowed-tag lists
+tag,,,ExpireTime,,4,u32,,range:0:86399,,,,15,Seconds to live; must be < 86400
+tag,,,TradeNow,,1,char,TradeNow,,,,,16,Space = port default
+tag,,,HandleInst,,1,char,HandleInst,,,,,17,Space = none
+tag,,,BBOWeightIndicator,,1,char,BboWeightIndicator,,,,,18,Outbound only
+tag,,,DisplayQuantity,,4,u32,,,,,,22,Order Restated only
+tag,,,DisplayPrice,,8,price,,,,,,23,Order Restated only
+tag,,,GroupID,,2,u16,,,,,,24,0 = no group (Mass Cancel: 0 = orders without a group)
+tag,,,SharesLocated,,1,char,SharesLocated,,,,,25,Default N; must be resent on every Replace
+tag,,,LocateBroker,,4,alpha,,,,,,26,Must be resent on every Replace
+tag,,,Side,,1,char,Side,,0x0009,,,27,
+tag,,,UserRefIdx,,1,u8,,,,,,28,UserRefNum channel within the port
+tag,,,AIQStrategy,,1,char,AiqStrategy,,0x0040,,,29,Default '*' (port default)
+tag,,,AIQGroupID,,2,alpha,,,,,,30,Default '**' (port default)
+# ---------------------------------------------------------------- enumerations,,,,,,,,,,,,,
+enum,,both,Buy,,,char,Side,,,,,B,
+enum,,both,Sell,,,char,Side,,,,,S,
+enum,,both,SellShort,,,char,Side,,,,,T,
+enum,,both,SellShortExempt,,,char,Side,,,,,E,
+enum,,both,Day,,,char,TimeInForce,,,,,0,Market hours
+enum,,both,Ioc,,,char,TimeInForce,,,,,3,Immediate or cancel
+enum,,both,Gtx,,,char,TimeInForce,,,,,5,Extended hours
+enum,,both,Gtt,,,char,TimeInForce,,,,,6,Needs ExpireTime
+enum,,both,AfterHours,,,char,TimeInForce,,,,,E,Enter only (not listed for Replace)
+enum,,both,Visible,,,char,Display,,,,,Y,On Priority Update: anonymous price to comply
+enum,,both,Hidden,,,char,Display,,,,,N,
+enum,,both,Attributable,,,char,Display,,,,,A,
+enum,,out,Conformant,,,char,Display,,,,,Z,Outbound only
+enum,,both,Agency,,,char,Capacity,,,,,A,
+enum,,both,Principal,,,char,Capacity,,,,,P,
+enum,,both,Riskless,,,char,Capacity,,,,,R,
+enum,,both,Other,,,char,Capacity,,,,,O,
+enum,,both,Eligible,,,char,IsoEligibility,,,,,Y,
+enum,,both,NotEligible,,,char,IsoEligibility,,,,,N,
+enum,,both,Continuous,,,char,CrossType,,,,,N,
+enum,,both,Opening,,,char,CrossType,,,,,O,
+enum,,both,Closing,,,char,CrossType,,,,,C,
+enum,,both,HaltIpo,,,char,CrossType,,,,,H,
+enum,,both,Supplemental,,,char,CrossType,,,,,S,
+enum,,both,Retail,,,char,CrossType,,,,,R,BX only
+enum,,both,ExtendedLife,,,char,CrossType,,,,,E,
+enum,,both,AfterHoursClose,,,char,CrossType,,,,,A,
+enum,,out,Live,,,char,OrderState,,,,,L,
+enum,,out,Dead,,,char,OrderState,,,,,D,Accepted then immediately canceled
+enum,,out,StartOfDay,,,char,EventCode,,,,,S,
+enum,,out,EndOfDay,,,char,EventCode,,,,,E,
+enum,,out,Erroneous,,,char,BrokenTradeReason,,,,,E,
+enum,,out,Consent,,,char,BrokenTradeReason,,,,,C,
+enum,,out,Supervisory,,,char,BrokenTradeReason,,,,,S,
+enum,,out,External,,,char,BrokenTradeReason,,,,,X,
+enum,,out,DisplayRefresh,,,char,RestatedReason,,,,,R,Reserve replenishment
+enum,,out,DisplayPriceUpdate,,,char,RestatedReason,,,,,P,
+enum,,out,RegulatoryRestriction,,,char,CancelReason,,,,,D,
+enum,,out,Closed,,,char,CancelReason,,,,,E,DAY order after the closing cross
+enum,,out,PostOnlyNms,,,char,CancelReason,,,,,F,Post-only would have been slid for NMS
+enum,,out,PostOnlyContra,,,char,CancelReason,,,,,G,Post-only would have been slid by a contra displayed order
+enum,,out,HaltedAfterOpen,,,char,CancelReason,,,,,H,
+enum,,out,ImmediateOrCancel,,,char,CancelReason,,,,,I,
+enum,,out,MarketCollars,,,char,CancelReason,,,,,K,
+enum,,out,SelfMatchPrevention,,,char,CancelReason,,,,,Q,
+enum,,out,Supervisory,,,char,CancelReason,,,,,S,
+enum,,out,Timeout,,,char,CancelReason,,,,,T,
+enum,,out,UserRequested,,,char,CancelReason,,,,,U,
+enum,,out,OpenProtection,,,char,CancelReason,,,,,X,
+enum,,out,System,,,char,CancelReason,,,,,Z,
+enum,,out,DlcrSharesExceeded,,,char,CancelReason,,,,,e,
+enum,,out,Added,,,char,LiquidityFlag,,,,,A,
+enum,,out,ClosingCross,,,char,LiquidityFlag,,,,,C,
+enum,,out,RetailAddedDisplayed,,,char,LiquidityFlag,,,,,e,
+enum,,out,HaltIpoCross,,,char,LiquidityFlag,,,,,H,
+enum,,out,AfterHoursClosingCross,,,char,LiquidityFlag,,,,,i,
+enum,,out,NonDisplayedAdded,,,char,LiquidityFlag,,,,,J,
+enum,,out,RpiProvidesLiquidity,,,char,LiquidityFlag,,,,,j,BX only
+enum,,out,MidpointAdded,,,char,LiquidityFlag,,,,,k,
+enum,,out,HaltCross,,,char,LiquidityFlag,,,,,K,
+enum,,out,ClosingCrossImbalanceOnly,,,char,LiquidityFlag,,,,,L,
+enum,,out,OpeningCrossImbalanceOnly,,,char,LiquidityFlag,,,,,M,
+enum,,out,MidpointRemoved,,,char,LiquidityFlag,,,,,m,
+enum,,out,PassiveMidpoint,,,char,LiquidityFlag,,,,,N,
+enum,,out,MidpointExtendedLife,,,char,LiquidityFlag,,,,,n,
+enum,,out,OpeningCross,,,char,LiquidityFlag,,,,,O,
+enum,,out,RemovedPriceImprovingNonDisplayed,,,char,LiquidityFlag,,,,,p,BX only
+enum,,out,RmoRemovesNonRpiMidpoint,,,char,LiquidityFlag,,,,,q,BX only
+enum,,out,Removed,,,char,LiquidityFlag,,,,,R,
+enum,,out,RetailRemovesRpi,,,char,LiquidityFlag,,,,,r,BX only
+enum,,out,RetailRemovesPriceImprovingNonDisplayed,,,char,LiquidityFlag,,,,,t,BX only
+enum,,out,ReserveAddedNonDisplayed,,,char,LiquidityFlag,,,,,u,
+enum,,out,SupplementalExecution,,,char,LiquidityFlag,,,,,0,
+enum,,out,DisplayedImprovesNbbo,,,char,LiquidityFlag,,,,,7,
+enum,,out,DisplayedSetsQbboJoinsNbbo,,,char,LiquidityFlag,,,,,8,
+enum,,out,RpiProvidesLiquidityNoRpii,,,char,LiquidityFlag,,,,,1,BX only
+enum,,out,AddedPreMarket,,,char,LiquidityFlag,,,,,2,
+enum,,out,RemovedPreMarket,,,char,LiquidityFlag,,,,,3,
+enum,,out,DisplayedImprovesNbboPreMarket,,,char,LiquidityFlag,,,,,5,
+enum,,out,NonDisplayedAddedPreMarket,,,char,LiquidityFlag,,,,,9,
+enum,,both,RetailDesignated,,,char,CustomerType,,,,,R,
+enum,,both,NotRetailDesignated,,,char,CustomerType,,,,,N,
+enum,,both,PortDefault,,,char,CustomerType,,,,,0x20,Space
+enum,,both,Limit,,,char,PriceType,,,,,L,
+enum,,both,MarketPeg,,,char,PriceType,,,,,P,
+enum,,both,MidpointPeg,,,char,PriceType,,,,,M,
+enum,,both,PrimaryPeg,,,char,PriceType,,,,,R,
+enum,,both,MarketMakerPeg,,,char,PriceType,,,,,Q,
+enum,,both,Midpoint,,,char,PriceType,,,,,m,
+enum,,both,Limit,,,char,DiscretionPriceType,,,,,L,
+enum,,both,MarketPeg,,,char,DiscretionPriceType,,,,,P,
+enum,,both,MidpointPeg,,,char,DiscretionPriceType,,,,,M,
+enum,,both,PrimaryPeg,,,char,DiscretionPriceType,,,,,R,
+enum,,both,PostOnly,,,char,PostOnly,,,,,P,
+enum,,both,No,,,char,PostOnly,,,,,N,
+enum,,both,Yes,,,char,TradeNow,,,,,Y,
+enum,,both,No,,,char,TradeNow,,,,,N,
+enum,,both,PortDefault,,,char,TradeNow,,,,,0x20,Space
+enum,,both,ImbalanceOnly,,,char,HandleInst,,,,,I,CrossType O and C
+enum,,both,RetailOrderType1,,,char,HandleInst,,,,,O,CrossType R
+enum,,both,RetailOrderType2,,,char,HandleInst,,,,,T,CrossType R
+enum,,both,RetailPriceImprovement,,,char,HandleInst,,,,,Q,CrossType R
+enum,,both,ExtendedLifeContinuous,,,char,HandleInst,,,,,B,CrossType E
+enum,,both,DirectListingCapitalRaise,,,char,HandleInst,,,,,D,CrossType H
+enum,,both,None,,,char,HandleInst,,,,,0x20,Space
+enum,,both,Range0To0p2,,,char,BboWeightIndicator,,,,,0,0-0.2%
+enum,,both,Range0p2To1,,,char,BboWeightIndicator,,,,,1,0.2%-1%
+enum,,both,Range1To2,,,char,BboWeightIndicator,,,,,2,1%-2%
+enum,,both,Above2,,,char,BboWeightIndicator,,,,,3,> 2%
+enum,,both,Unspecified,,,char,BboWeightIndicator,,,,,0x20,Space
+enum,,both,SetsQbboJoinsNbbo,,,char,BboWeightIndicator,,,,,S,
+enum,,both,ImprovesNbbo,,,char,BboWeightIndicator,,,,,N,
+enum,,both,Yes,,,char,SharesLocated,,,,,Y,
+enum,,both,No,,,char,SharesLocated,,,,,N,
+enum,,both,PortDefault,,,char,AiqStrategy,,,,,*,
+enum,,both,Disabled,,,char,AiqStrategy,,,,,N,
+enum,,both,FirmDecrementBothNoDetails,,,char,AiqStrategy,,,,,Y,
+enum,,both,FirmDecrementBoth,,,char,AiqStrategy,,,,,D,
+enum,,both,FirmCancelOldest,,,char,AiqStrategy,,,,,O,
+enum,,both,FirmCancelNewest,,,char,AiqStrategy,,,,,W,
+enum,,both,FirmUseRemover,,,char,AiqStrategy,,,,,R,
+enum,,both,OrgDecrementBothNoDetails,,,char,AiqStrategy,,,,,y,
+enum,,both,OrgDecrementBoth,,,char,AiqStrategy,,,,,d,
+enum,,both,OrgCancelOldest,,,char,AiqStrategy,,,,,o,
+enum,,both,OrgCancelNewest,,,char,AiqStrategy,,,,,w,
+enum,,both,OrgUseRemover,,,char,AiqStrategy,,,,,r,
+enum,,both,AffiliateDecrementBothNoDetails,,,char,AiqStrategy,,,,,Z,
+enum,,both,AffiliateDecrementBoth,,,char,AiqStrategy,,,,,E,
+enum,,both,AffiliateCancelOldest,,,char,AiqStrategy,,,,,P,
+enum,,both,AffiliateCancelNewest,,,char,AiqStrategy,,,,,X,
+enum,,both,AffiliateUseRemover,,,char,AiqStrategy,,,,,S,
+enum,,both,AnyDecrementBothNoDetails,,,char,AiqStrategy,,,,,0,
+enum,,both,AnyDecrementBoth,,,char,AiqStrategy,,,,,1,
+enum,,both,AnyCancelOldest,,,char,AiqStrategy,,,,,2,
+enum,,both,AnyCancelNewest,,,char,AiqStrategy,,,,,4,
+enum,,both,AnyUseRemover,,,char,AiqStrategy,,,,,5,
+enum,,out,QuoteUnavailable,,,u16,RejectReason,,,,,0x0001,
+enum,,out,DestinationClosed,,,u16,RejectReason,,,,,0x0002,
+enum,,out,InvalidDisplay,,,u16,RejectReason,,,,,0x0003,
+enum,,out,InvalidMaxFloor,,,u16,RejectReason,,,,,0x0004,
+enum,,out,InvalidPegType,,,u16,RejectReason,,,,,0x0005,
+enum,,out,FatFinger,,,u16,RejectReason,,,,,0x0006,
+enum,,out,Halted,,,u16,RejectReason,,,,,0x0007,
+enum,,out,IsoNotAllowed,,,u16,RejectReason,,,,,0x0008,
+enum,,out,InvalidSide,,,u16,RejectReason,,,,,0x0009,
+enum,,out,ProcessingError,,,u16,RejectReason,,,,,0x000A,
+enum,,out,CancelPending,,,u16,RejectReason,,,,,0x000B,
+enum,,out,FirmNotAuthorized,,,u16,RejectReason,,,,,0x000C,
+enum,,out,InvalidMinQuantity,,,u16,RejectReason,,,,,0x000D,
+enum,,out,NoClosingReferencePrice,,,u16,RejectReason,,,,,0x000E,
+enum,,out,Other,,,u16,RejectReason,,,,,0x000F,
+enum,,out,CancelNotAllowed,,,u16,RejectReason,,,,,0x0010,
+enum,,out,PeggingNotAllowed,,,u16,RejectReason,,,,,0x0011,
+enum,,out,CrossedMarket,,,u16,RejectReason,,,,,0x0012,
+enum,,out,InvalidQuantity,,,u16,RejectReason,,,,,0x0013,
+enum,,out,InvalidCrossOrder,,,u16,RejectReason,,,,,0x0014,
+enum,,out,ReplaceNotAllowed,,,u16,RejectReason,,,,,0x0015,
+enum,,out,RoutingNotAllowed,,,u16,RejectReason,,,,,0x0016,
+enum,,out,InvalidSymbol,,,u16,RejectReason,,,,,0x0017,
+enum,,out,Test,,,u16,RejectReason,,,,,0x0018,
+enum,,out,LateLocTooAggressive,,,u16,RejectReason,,,,,0x0019,
+enum,,out,RetailNotAllowed,,,u16,RejectReason,,,,,0x001A,
+enum,,out,InvalidMidpointPostOnlyPrice,,,u16,RejectReason,,,,,0x001B,
+enum,,out,InvalidDestination,,,u16,RejectReason,,,,,0x001C,
+enum,,out,InvalidPrice,,,u16,RejectReason,,,,,0x001D,
+enum,,out,SharesExceedThreshold,,,u16,RejectReason,,,,,0x001E,
+enum,,out,ExceedsMaxAllowedNotional,,,u16,RejectReason,,,,,0x001F,
+enum,,out,RiskAggregateExposureExceeded,,,u16,RejectReason,,,,,0x0020,
+enum,,out,RiskMarketImpact,,,u16,RejectReason,,,,,0x0021,
+enum,,out,RiskRestrictedStock,,,u16,RejectReason,,,,,0x0022,
+enum,,out,RiskShortSellRestricted,,,u16,RejectReason,,,,,0x0023,
+enum,,out,RiskIsoNotAllowed,,,u16,RejectReason,,,,,0x0024,
+enum,,out,RiskExceedsAdvLimit,,,u16,RejectReason,,,,,0x0025,
+enum,,out,RiskFatFinger,,,u16,RejectReason,,,,,0x0026,
+enum,,out,RiskLocateRequired,,,u16,RejectReason,,,,,0x0027,
+enum,,out,RiskSymbolMsgRateRestriction,,,u16,RejectReason,,,,,0x0028,
+enum,,out,RiskPortMsgRateRestriction,,,u16,RejectReason,,,,,0x0029,
+enum,,out,RiskDuplicateMsgRateRestriction,,,u16,RejectReason,,,,,0x002A,
+enum,,out,RiskShortSellNotAllowed,,,u16,RejectReason,,,,,0x002B,
+enum,,out,RiskMarketOrderNotAllowed,,,u16,RejectReason,,,,,0x002C,
+enum,,out,RiskPreMarketNotAllowed,,,u16,RejectReason,,,,,0x002D,
+enum,,out,RiskPostMarketNotAllowed,,,u16,RejectReason,,,,,0x002E,
+enum,,out,RiskShortSellExemptNotAllowed,,,u16,RejectReason,,,,,0x002F,
+enum,,out,RiskSingleOrderNotionalExceeded,,,u16,RejectReason,,,,,0x0030,
+enum,,out,RiskMaxQuantityExceeded,,,u16,RejectReason,,,,,0x0031,
+enum,,out,RegShoStateNotAvailable,,,u16,RejectReason,,,,,0x0032,
+enum,,out,RiskIpoMarketBuyNotAllowed,,,u16,RejectReason,,,,,0x0033,
+enum,,out,InvalidAiq,,,u16,RejectReason,,,,,0x0040,
