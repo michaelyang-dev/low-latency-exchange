@@ -634,7 +634,10 @@ bugs:
       released, so the output log, the stores and the lines keep the Output Rule. Until
       they are all in the ring, egress keeps every consumer's done watermark below them
       (EgressState::hold); the engine's applied position is unchanged, since the
-      replication stage compares it with a truncation point.
+      replication stage compares it with a truncation point. A RESUME's reload is
+      the solo primary of record's: its journal is the day's history, solo release
+      follows its durable index, and the outputs are written at once
+      (Replica::reload_is_resume; tests/integration/exchange F7-resume).
     fix_sha: uncommitted
     regression_test: tests/sim_regressions/DST-013_rejoin_unreleased_outputs
     counted: true

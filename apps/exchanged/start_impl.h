@@ -221,7 +221,7 @@ bool truncate_journal_to(Io& io, Parts& p, std::uint64_t t) {
 // RejoinHooks::reload: the engine and the output log from records 1..t (10 §5 step 3);
 // snapshots above t describe records that are gone.
 template <class Io, class Parts>
-ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t) {
+ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t, bool resume = false) {
   ReloadResult out;
   journal::RecoveryOptions again;
   again.day = p.date;
@@ -242,8 +242,10 @@ ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t) {
   } else {
     for (const std::uint64_t i : io.remove_snapshots_above(p.snapshots_dir, t))
       io.note("exchanged: rejoin: snapshot at " + std::to_string(i) + " above the truncation point removed");
-    // What the output log does not hold yet waits for the release watermark (DST-013).
-    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots, true);
+    // A joiner's outputs that the output log does not hold yet wait for the release
+    // watermark: its primary may not have released, and may still lose, their records
+    // (DST-013). A RESUME's journal is the day's history: they are written at once.
+    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots, !resume);
     if (!day) {
       io.warn("exchanged: rejoin: " + day.error());
       return out;
@@ -251,8 +253,9 @@ ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t) {
     p.recovered = std::move(*day);
   }
   io.note("exchanged: rejoin: engine reloaded to " + std::to_string(t) + "; output log: " +
-          std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_deferred) +
-          " to release, " + std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
+          std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_appended) +
+          " regenerated, " + std::to_string(p.recovered.outlog_deferred) + " to release, " +
+          std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
   nodelog::replayed(t, p.recovered.outlog_verified, p.recovered.outlog_appended);
   out.ok = true;
   out.timers = p.recovered.timers;
@@ -267,7 +270,7 @@ template <class Io, class Parts>
 RejoinHooks rejoin_hooks(Io& io, Parts& p) {
   RejoinHooks h;
   h.truncate = [&io, &p](std::uint64_t t) { return truncate_journal_to(io, p, t); };
-  h.reload = [&io, &p](std::uint64_t t) { return reload_to(io, p, t); };
+  h.reload = [&io, &p](std::uint64_t t, bool resume) { return reload_to(io, p, t, resume); };
   return h;
 }
 

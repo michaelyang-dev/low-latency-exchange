@@ -473,7 +473,7 @@ std::expected<void, std::string> Node::rejoin() {
                                       repl_config(cfg_, inc, begun->config_digest), *metrics_, split_);
   RejoinHooks hooks;
   hooks.truncate = [this](std::uint64_t t) { return truncate_journal_to(t); };
-  hooks.reload = [this](std::uint64_t t) { return reload_to(t); };
+  hooks.reload = [this](std::uint64_t t, bool resume) { return reload_to(t, resume); };
   hooks.before_restart = [this](const char* what, std::uint64_t t) {
     const RestartRecord rec =
         next_restart_record(read_restart_record(restart_guard_path()), what, t, start_recovered_index_);
@@ -518,11 +518,11 @@ bool Node::truncate_journal_to(std::uint64_t t) {
   return exch::truncate_journal_to(io, parts, t);
 }
 
-ReloadResult Node::reload_to(std::uint64_t t) {
+ReloadResult Node::reload_to(std::uint64_t t, bool resume) {
   PosixRejoinIo io;
   NodeRejoinParts parts = rejoin_parts(*dir_, *prep_, *rlog_, *sh_, *engine_, *outlog_, recovered_, recovered_index_,
                                        cfg_, day_->config());
-  return exch::reload_to(io, parts, t);
+  return exch::reload_to(io, parts, t, resume);
 }
 
 void Node::build_stages() {

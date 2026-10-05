@@ -50,6 +50,29 @@ diff --git a/apps/exchanged/engine_stage.h b/apps/exchanged/engine_stage.h
 diff --git a/apps/exchanged/node.cpp b/apps/exchanged/node.cpp
 --- a/apps/exchanged/node.cpp
 +++ b/apps/exchanged/node.cpp
+@@ -473,7 +473,7 @@
+                                       repl_config(cfg_, inc, begun->config_digest), *metrics_, split_);
+   RejoinHooks hooks;
+   hooks.truncate = [this](std::uint64_t t) { return truncate_journal_to(t); };
+-  hooks.reload = [this](std::uint64_t t, bool resume) { return reload_to(t, resume); };
++  hooks.reload = [this](std::uint64_t t) { return reload_to(t); };
+   hooks.before_restart = [this](const char* what, std::uint64_t t) {
+     const RestartRecord rec =
+         next_restart_record(read_restart_record(restart_guard_path()), what, t, start_recovered_index_);
+@@ -518,11 +518,11 @@
+   return exch::truncate_journal_to(io, parts, t);
+ }
+ 
+-ReloadResult Node::reload_to(std::uint64_t t, bool resume) {
++ReloadResult Node::reload_to(std::uint64_t t) {
+   PosixRejoinIo io;
+   NodeRejoinParts parts = rejoin_parts(*dir_, *prep_, *rlog_, *sh_, *engine_, *outlog_, recovered_, recovered_index_,
+                                        cfg_, day_->config());
+-  return exch::reload_to(io, parts, t, resume);
++  return exch::reload_to(io, parts, t);
+ }
+ 
+ void Node::build_stages() {
 @@ -531,9 +531,6 @@
    ec.hash_interval = paired ? 65'536 : 0;
    engine_stage_ = std::make_unique<EngineStage>(*sh_, *engine_, ec, recovered_index_, *clock_);
@@ -60,6 +83,18 @@ diff --git a/apps/exchanged/node.cpp b/apps/exchanged/node.cpp
    io_stage_ = std::make_unique<IoStage>(*sh_, *dir_, *prep_, *writer_, *outlog_, cfg_.spares, !paired, *clock_);
    // Work time (T32): records the sequencer reserves from here on start the driver's
    // meter (the day-start records are behind us); lle_top converts ticks with tsc_hz.
+diff --git a/apps/exchanged/node.h b/apps/exchanged/node.h
+--- a/apps/exchanged/node.h
++++ b/apps/exchanged/node.h
+@@ -78,7 +78,7 @@
+   std::expected<journal::RecoveryResult, std::string> restore_l2(journal::RecoveryResult rr);
+   std::expected<void, std::string> rejoin();
+   bool truncate_journal_to(std::uint64_t t);
+-  ReloadResult reload_to(std::uint64_t t, bool resume);
++  ReloadResult reload_to(std::uint64_t t);
+   std::expected<void, std::string> start_net();
+   bool wait_net(const std::atomic<bool>& external_stop);
+   void build_stages();
 diff --git a/apps/exchanged/recovery.h b/apps/exchanged/recovery.h
 --- a/apps/exchanged/recovery.h
 +++ b/apps/exchanged/recovery.h
@@ -165,7 +200,18 @@ diff --git a/apps/exchanged/recovery_impl.h b/apps/exchanged/recovery_impl.h
 diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
 --- a/apps/exchanged/repl_stage.h
 +++ b/apps/exchanged/repl_stage.h
-@@ -188,7 +188,6 @@
+@@ -94,9 +94,7 @@
+ // only before the pipeline starts.
+ struct RejoinHooks {
+   std::function<bool(std::uint64_t)> truncate;          // journal (L3) and RecordLog to index t
+-  // Engine and output log from records 1..t; the flag: a RESUME's (the node's journal is
+-  // the history), else a joiner's, whose outputs past the output log wait for release.
+-  std::function<ReloadResult(std::uint64_t, bool)> reload;
++  std::function<ReloadResult(std::uint64_t)> reload;    // engine and output log from records 1..t
+   // Before an exit 5 (what the node had to do, the index): the restart-loop guard's record
+   // (restart_guard.h). Optional.
+   std::function<void(const char*, std::uint64_t)> before_restart;
+@@ -190,7 +188,6 @@
      // A promotion's re-injected input: the FORWARD window and the popped message.
      pending_ahead_.reserve(cfg_.repl.forward_slots + 1);
      seq_->reserve_ahead(cfg_.repl.forward_slots + 1);
@@ -173,7 +219,7 @@ diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
    }
    BasicReplStage(const BasicReplStage&) = delete;
    BasicReplStage& operator=(const BasicReplStage&) = delete;
-@@ -283,7 +282,6 @@
+@@ -285,7 +282,6 @@
          seq_->resume(log_->tail(), std::max(timers_seen_, seq_->next_timer()),
                       std::max(snapshot_next_, seq_->next_snapshot_id()), digest_);
          resync_ = false;
@@ -181,7 +227,7 @@ diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
        }
        did |= deliver_instance_down();
        did |= push_instance_down();  // what did not fit in the first list
-@@ -363,9 +361,7 @@
+@@ -365,9 +361,7 @@
      if (want && !published_allowed_) {
        if (resync_) {
          (void)drain_tee();
@@ -192,11 +238,10 @@ diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
          sp.resync_gen.fetch_add(1, std::memory_order_release);
          resync_ = false;
        }
-@@ -429,31 +425,6 @@
-     note_record(v);
+@@ -432,31 +426,6 @@
      resync_ = true;
      return true;
--  }
+   }
 -  // 06 §10: the day's DayEnd is the log's last record but for the EpochStarts of later
 -  // epochs (a takeover, a JOIN or a RESUME after the close). Cold: a resync.
 -  [[nodiscard]] bool day_ended() {
@@ -221,10 +266,20 @@ diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
 -    pending_ahead_.clear();
 -    ahead_next_ = 0;
 -    NLOG_INFO("repl: the day ended at the close: the sequencer stays stopped");
-   }
+-  }
    // Counters the sequencer continues from (Timer records, SnapshotMark ids, config digest).
    void note_record(const journal::RecordView& v) {
-@@ -774,7 +745,6 @@
+     switch (v.type()) {
+@@ -506,7 +475,7 @@
+       if (t >= sh_->egress_state.applied.load() && t <= log_->tail().last_index) return;
+       restart_rejoin("reload the engine to", t);
+     }
+-    const ReloadResult r = hooks_.reload(t, replica_ && replica_->reload_is_resume());
++    const ReloadResult r = hooks_.reload(t);
+     if (!r.ok) {
+       std::fprintf(stderr, "exchanged: rejoin: engine reload to %llu failed\n", static_cast<unsigned long long>(t));
+       Env::exit(2);
+@@ -776,7 +745,6 @@
    std::size_t down_next_ = 0;
    bool down_overflow_noted_ = false;
    std::vector<seq::InboundMsg> pending_ahead_;  // a promotion's re-injected input (inject_ahead)
@@ -232,7 +287,7 @@ diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
    std::size_t ahead_next_ = 0;
    bool ahead_overflow_noted_ = false;
    bool staged_ = false;
-@@ -809,7 +779,6 @@
+@@ -811,7 +779,6 @@
      if (g != seen_resync_) {
        const SplitRepl::Resync& r = sp_->resync;
        seq_->resume(r.chain, r.timers, r.next_snapshot_id, r.digest);
@@ -254,28 +309,47 @@ diff --git a/apps/exchanged/shared.h b/apps/exchanged/shared.h
 diff --git a/apps/exchanged/start_impl.h b/apps/exchanged/start_impl.h
 --- a/apps/exchanged/start_impl.h
 +++ b/apps/exchanged/start_impl.h
-@@ -242,8 +242,7 @@
+@@ -221,7 +221,7 @@
+ // RejoinHooks::reload: the engine and the output log from records 1..t (10 §5 step 3);
+ // snapshots above t describe records that are gone.
+ template <class Io, class Parts>
+-ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t, bool resume = false) {
++ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t) {
+   ReloadResult out;
+   journal::RecoveryOptions again;
+   again.day = p.date;
+@@ -242,10 +242,7 @@
    } else {
      for (const std::uint64_t i : io.remove_snapshots_above(p.snapshots_dir, t))
        io.note("exchanged: rejoin: snapshot at " + std::to_string(i) + " above the truncation point removed");
--    // What the output log does not hold yet waits for the release watermark (DST-013).
--    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots, true);
+-    // A joiner's outputs that the output log does not hold yet wait for the release
+-    // watermark: its primary may not have released, and may still lose, their records
+-    // (DST-013). A RESUME's journal is the day's history: they are written at once.
+-    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots, !resume);
 +    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots);
      if (!day) {
        io.warn("exchanged: rejoin: " + day.error());
        return out;
-@@ -251,8 +250,8 @@
-     p.recovered = std::move(*day);
+@@ -254,8 +251,7 @@
    }
    io.note("exchanged: rejoin: engine reloaded to " + std::to_string(t) + "; output log: " +
--          std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_deferred) +
--          " to release, " + std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
-+          std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_appended) +
+           std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_appended) +
+-          " regenerated, " + std::to_string(p.recovered.outlog_deferred) + " to release, " +
+-          std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
 +          " regenerated, " + std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
    nodelog::replayed(t, p.recovered.outlog_verified, p.recovered.outlog_appended);
    out.ok = true;
    out.timers = p.recovered.timers;
-@@ -275,8 +274,7 @@
+@@ -270,7 +266,7 @@
+ RejoinHooks rejoin_hooks(Io& io, Parts& p) {
+   RejoinHooks h;
+   h.truncate = [&io, &p](std::uint64_t t) { return truncate_journal_to(io, p, t); };
+-  h.reload = [&io, &p](std::uint64_t t, bool resume) { return reload_to(io, p, t, resume); };
++  h.reload = [&io, &p](std::uint64_t t) { return reload_to(io, p, t); };
+   return h;
+ }
+ 
+@@ -278,8 +274,7 @@
  // the journal now ends (the truncation point, plus after RESUME the new epoch's
  // EpochStart in L2). The solo primary of record (RESUME) lost its own instances: the
  // replication stage hands their InstanceDowns to the sequencer's first list (ADR-032).
@@ -285,7 +359,7 @@ diff --git a/apps/exchanged/start_impl.h b/apps/exchanged/start_impl.h
  // (-> std::expected<void, std::string>). Returns the role the handshake ended in.
  template <class Parts, class ReplT, class ClockT, class OpenWriter>
  std::expected<repl::Role, std::string> finish_rejoin(Parts& p, ReplT& repl, ClockT& clock, OpenWriter&& open_writer) {
-@@ -298,9 +296,8 @@
+@@ -301,9 +296,8 @@
      for (const auto& [session, instance] : p.recovered.live) repl.queue_instance_down(session, instance);
    }
    if (p.recovered.ended) {
@@ -344,7 +418,28 @@ diff --git a/src/md/egress.h b/src/md/egress.h
 diff --git a/src/repl/replica.h b/src/repl/replica.h
 --- a/src/repl/replica.h
 +++ b/src/repl/replica.h
-@@ -1616,12 +1616,6 @@
+@@ -267,10 +267,6 @@
+     return false;
+   }
+   [[nodiscard]] bool joining() const noexcept { return join_.active; }
+-  // True during the Host::reload_state call of a RESUME: the node resumes as the solo
+-  // primary of record, whose journal is the day's history (a joiner's reload instead may
+-  // hold records its primary has not released, DST-013).
+-  [[nodiscard]] bool reload_is_resume() const noexcept { return resume_reload_; }
+   // The solo primary has relayed a JOIN that the witness may grant (failure-model gating).
+   [[nodiscard]] bool join_sent() const noexcept { return join_.active && join_.join_sent; }
+   struct JoinView {
+@@ -541,9 +537,7 @@
+         break;
+       case witness::MsgType::kResume:
+         if (role_ != Role::kRecovering) return;
+-        resume_reload_ = true;  // the host's reload is the solo primary of record's
+         reload_state(h_.log_tail().last_index);
+-        resume_reload_ = false;
+         reloaded_ = true;
+         enter_solo(g, now);
+         break;
+@@ -1622,12 +1616,6 @@
      snap_rx_ = {};
      set_role(Role::kBackup);
      trace(TraceKind::kRejoined, epoch);
@@ -357,20 +452,28 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
      return true;
    }
  
-@@ -1777,13 +1771,6 @@
-       }
+@@ -1784,13 +1772,6 @@
        case Role::kBackup:
          w = std::min(tail, commit_ann_);
--        break;
+         break;
 -      case Role::kRecovering:
 -        // A catching-up joiner applies what the primary has released, and its node holds
 -        // every output in its egress ring until release covers it (it transmits nothing:
 -        // no line, mirror gateways). Held at 0, a catch-up longer than the egress ring and
 -        // L2 together stopped the applier, then L2, then the catch-up (DST-011).
 -        if (reloaded_ && !(snap_rx_.active && !snap_rx_.installed)) w = std::min(tail, commit_ann_);
-         break;
+-        break;
        default:
          break;
+     }
+@@ -1827,7 +1808,6 @@
+ 
+   // Backup / candidate.
+   std::uint64_t commit_ann_ = 0;
+-  bool resume_reload_ = false;  // reload_is_resume()
+   std::uint64_t frozen_last_ = 0;
+   std::uint64_t apply_frozen_ = 0;
+   bool promote_sent_ = false;
 diff --git a/src/sequencer/sequencer.h b/src/sequencer/sequencer.h
 --- a/src/sequencer/sequencer.h
 +++ b/src/sequencer/sequencer.h
