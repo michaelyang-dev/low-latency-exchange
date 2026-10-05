@@ -1,0 +1,16 @@
+# RFC 5961 §3.2: an in-window RST that is not exactly RCV.NXT draws a challenge ACK, an
+# out-of-window RST is ignored, an exact RST resets the connection.
+config rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 8000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  < R 500:500(0) win 0
+0.100  > . 1:1(0) ack 1 win 4000
+0.100  expect state ESTABLISHED
+0.200  < R 90000:90000(0) win 0
+0.200  expect none
+0.300  < R 1:1(0) win 0
+0.300  expect state CLOSED
+0.300  expect reason reset
+0.300  expect event closed

@@ -1,0 +1,16 @@
+# Passive open, immediate ACK of in-order data, receive window accounting and receiver
+# SWS avoidance (a 100-byte read does not trigger a window update).
+config mss=1460 rx_buffer=8192 iss=7000
+0      listen
+0      < S 0:0(0) win 29200 mss 1460
+0      > S. 0:0(0) ack 1 win 8192 mss 1460
+0.001  < . 1:1(0) ack 1 win 29200
+0.001  expect state ESTABLISHED
+0.001  expect event connected
+0.002  < P. 1:101(100) ack 1 win 29200
+0.002  > . 1:1(0) ack 101 win 8092
+0.002  expect event readable
+0.003  read 100
+0.003  expect none
+0.004  write 10
+0.004  > P. 1:11(10) ack 101 win 8192

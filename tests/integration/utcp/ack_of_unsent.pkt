@@ -1,0 +1,9 @@
+# An ACK for data never sent is answered with an ACK and the segment is dropped.
+config rx_buffer=4000 mss=1000 iss=0
+0      listen
+0      < S 0:0(0) win 8000 mss 1000
+0      > S. 0:0(0) ack 1 win 4000 mss 1000
+0      < . 1:1(0) ack 1 win 8000
+0.100  < P. 1:11(10) ack 500 win 8000
+0.100  > . 1:1(0) ack 1 win 4000
+0.100  expect readable 0

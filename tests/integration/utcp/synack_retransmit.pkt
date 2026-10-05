@@ -1,0 +1,12 @@
+# Passive side: the peer retransmits its SYN (our SYN-ACK was lost) and gets an
+# immediate SYN-ACK; our own SYN-ACK RTO also fires.
+config initial_rto=1 rx_buffer=4000 mss=1000 iss=0
+0      listen
+0      < S 0:0(0) win 8000 mss 1000
+0      > S. 0:0(0) ack 1 win 4000 mss 1000
+0.5    < S 0:0(0) win 8000 mss 1000
+0.5    > S. 0:0(0) ack 1 win 4000 mss 1000
+1.0    > S. 0:0(0) ack 1 win 4000 mss 1000
+1.010  < . 1:1(0) ack 1 win 8000
+1.010  expect state ESTABLISHED
+1.010  expect event connected

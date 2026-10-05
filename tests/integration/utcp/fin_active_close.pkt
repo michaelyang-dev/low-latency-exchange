@@ -1,0 +1,24 @@
+# Active close: FIN-WAIT-1 -> FIN-WAIT-2 -> TIME-WAIT; a retransmitted FIN in TIME-WAIT
+# is re-ACKed and restarts the 2*MSL timer.
+config rx_buffer=4000 mss=1000 time_wait=0.5
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 8000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  write 10
+0.100  > P. 1:11(10) ack 1 win 4000
+0.100  close
+0.100  > F. 11:11(0) ack 1 win 4000
+0.100  expect state FIN-WAIT-1
+0.110  < . 1:1(0) ack 12 win 8000
+0.110  expect state FIN-WAIT-2
+0.200  < F. 1:1(0) ack 12 win 8000
+0.200  > . 12:12(0) ack 2 win 4000
+0.200  expect state TIME-WAIT
+0.200  expect event peer_fin
+0.200  expect event time_wait
+0.300  < F. 1:1(0) ack 12 win 8000
+0.300  > . 12:12(0) ack 2 win 4000
+0.790  expect state TIME-WAIT
+0.800  expect state CLOSED
+0.800  expect reason normal

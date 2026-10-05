@@ -1,0 +1,21 @@
+# Three duplicate ACKs trigger a fast retransmit; a partial ACK retransmits the next
+# hole at once (NewReno-style, RFC 6582); the full ACK ends recovery.
+config rx_buffer=4000 mss=1000 min_rto=0.2 initial_rto=1
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 10000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  write 4000
+0.100  > P. 1:1001(1000) ack 1 win 4000
+0.100  > P. 1001:2001(1000) ack 1 win 4000
+0.100  > P. 2001:3001(1000) ack 1 win 4000
+0.100  > P. 3001:4001(1000) ack 1 win 4000
+0.110  < . 1:1(0) ack 1001 win 10000
+0.110  < . 1:1(0) ack 1001 win 10000
+0.110  < . 1:1(0) ack 1001 win 10000
+0.110  < . 1:1(0) ack 1001 win 10000
+0.110  > P. 1001:2001(1000) ack 1 win 4000
+0.120  < . 1:1(0) ack 3001 win 10000
+0.120  > P. 3001:4001(1000) ack 1 win 4000
+0.130  < . 1:1(0) ack 4001 win 10000
+0.130  expect none

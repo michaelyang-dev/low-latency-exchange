@@ -1,0 +1,10 @@
+# A RST answering our SYN-ACK returns a passive connection to LISTEN (here: CLOSED with
+# reason reset, and the stack frees the slot without telling the application).
+config rx_buffer=4000 mss=1000 iss=0
+0      listen
+0      < S 0:0(0) win 8000 mss 1000
+0      > S. 0:0(0) ack 1 win 4000 mss 1000
+0.010  < R 1:1(0) win 0
+0.010  expect state CLOSED
+0.010  expect reason reset
+0.010  expect no_event connected

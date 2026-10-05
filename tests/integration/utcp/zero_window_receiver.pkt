@@ -1,0 +1,22 @@
+# Backpressure: the application does not read, our window falls to zero, a peer probe
+# is dropped and re-ACKed, small reads do not reopen the window (receiver SWS
+# avoidance), a large read sends a window update.
+config rx_buffer=2000 mss=1000 iss=0
+0      listen
+0      < S 0:0(0) win 8000 mss 1000
+0      > S. 0:0(0) ack 1 win 2000 mss 1000
+0      < . 1:1(0) ack 1 win 8000
+0.100  < P. 1:1001(1000) ack 1 win 8000
+0.100  > . 1:1(0) ack 1001 win 1000
+0.100  < P. 1001:2001(1000) ack 1 win 8000
+0.100  > . 1:1(0) ack 2001 win 0
+0.200  < P. 2001:2002(1) ack 1 win 8000
+0.200  > . 1:1(0) ack 2001 win 0
+0.300  read 500
+0.300  expect none
+0.400  read 700
+0.400  > . 1:1(0) ack 2001 win 1200
+0.500  < P. 2001:3001(1000) ack 1 win 8000
+0.500  > . 1:1(0) ack 3001 win 200
+0.600  read 1800
+0.600  > . 1:1(0) ack 3001 win 2000

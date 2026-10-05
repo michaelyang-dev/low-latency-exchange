@@ -1,0 +1,13 @@
+# RST race: the peer's RST crosses our FIN (FIN-WAIT-1).
+config rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 8000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  close
+0.100  > F. 1:1(0) ack 1 win 4000
+0.100  < R 1:1(0) win 0
+0.100  expect state CLOSED
+0.100  expect reason reset
+0.200  < . 1:1(0) ack 2 win 8000
+0.200  expect none

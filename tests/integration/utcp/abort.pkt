@@ -1,0 +1,12 @@
+# Abortive close: RST at SND.NXT, connection CLOSED (aborted).
+config rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 8000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  write 10
+0.100  > P. 1:11(10) ack 1 win 4000
+0.100  abort
+0.100  > R 11:11(0)
+0.100  expect state CLOSED
+0.100  expect reason aborted

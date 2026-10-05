@@ -1,0 +1,12 @@
+# SYN-SENT: a SYN-ACK whose ACK does not cover our SYN draws <SEQ=SEG.ACK><CTL=RST>
+# and is otherwise ignored; a RST,ACK that does cover it refuses the connection.
+config rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0.010  < S. 0:0(0) ack 77 win 8000 mss 1000
+0.010  > R 77:77(0)
+0.010  expect state SYN-SENT
+0.020  < R. 0:0(0) ack 1 win 0
+0.020  expect state CLOSED
+0.020  expect reason refused
+0.020  expect event closed

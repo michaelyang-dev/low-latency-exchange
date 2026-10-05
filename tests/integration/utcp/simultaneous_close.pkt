@@ -1,0 +1,15 @@
+# Simultaneous close: the FINs cross; FIN-WAIT-1 -> CLOSING -> TIME-WAIT -> CLOSED.
+config rx_buffer=4000 mss=1000 time_wait=0.5
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 8000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  close
+0.100  > F. 1:1(0) ack 1 win 4000
+0.100  < F. 1:1(0) ack 1 win 8000
+0.100  > . 2:2(0) ack 2 win 4000
+0.100  expect state CLOSING
+0.110  < . 2:2(0) ack 2 win 8000
+0.110  expect state TIME-WAIT
+0.610  expect state CLOSED
+0.610  expect reason normal

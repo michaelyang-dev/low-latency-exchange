@@ -1,0 +1,16 @@
+# Both sequence spaces wrap past 2^32 during the transfer.
+config rx_buffer=4000 mss=1000 iss=4294966800 peer_iss=4294966500
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0.010  < S. 0:0(0) ack 1 win 8000 mss 1000
+0.010  > . 1:1(0) ack 1 win 4000
+0.020  write 2000
+0.020  > P. 1:1001(1000) ack 1 win 4000
+0.020  > P. 1001:2001(1000) ack 1 win 4000
+0.030  < P. 1:1001(1000) ack 2001 win 8000
+0.030  > . 2001:2001(0) ack 1001 win 3000
+0.040  read 1000
+0.040  < P. 1001:2001(1000) ack 2001 win 8000
+0.040  > . 2001:2001(0) ack 2001 win 3000
+0.050  read 1000
+0.050  expect state ESTABLISHED

@@ -1,0 +1,9 @@
+# SYN retransmission limit: the active open gives up (no RST in SYN-SENT).
+config initial_rto=0.1 max_syn_retransmits=2 rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0.1    > S 0:0(0) win 4000 mss 1000
+0.3    > S 0:0(0) win 4000 mss 1000
+0.7    expect state CLOSED
+0.7    expect reason timeout
+0.7    expect event closed

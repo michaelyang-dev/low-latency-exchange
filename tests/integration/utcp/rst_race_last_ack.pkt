@@ -1,0 +1,14 @@
+# RST race in LAST-ACK: the connection closes quietly (RFC 9293: CLOSING, LAST-ACK and
+# TIME-WAIT treat an acceptable RST as the end).
+config rx_buffer=4000 mss=1000 iss=0
+0      listen
+0      < S 0:0(0) win 8000 mss 1000
+0      > S. 0:0(0) ack 1 win 4000 mss 1000
+0      < . 1:1(0) ack 1 win 8000
+0.100  < F. 1:1(0) ack 1 win 8000
+0.100  > . 1:1(0) ack 2 win 4000
+0.200  close
+0.200  > F. 1:1(0) ack 2 win 4000
+0.200  < R 2:2(0) win 0
+0.200  expect state CLOSED
+0.200  expect reason normal

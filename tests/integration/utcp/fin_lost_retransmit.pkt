@@ -1,0 +1,15 @@
+# Our FIN is lost and retransmitted by the RTO; a FIN-WAIT-2 peer that never closes
+# is reset after fin_wait2_timeout.
+config rx_buffer=4000 mss=1000 min_rto=0.2 fin_wait2_timeout=2
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 8000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  close
+0.100  > F. 1:1(0) ack 1 win 4000
+0.300  > F. 1:1(0) ack 1 win 4000
+0.310  < . 1:1(0) ack 2 win 8000
+0.310  expect state FIN-WAIT-2
+2.310  > R 2:2(0)
+2.310  expect state CLOSED
+2.310  expect reason timeout

@@ -1,0 +1,9 @@
+# A SYN without the MSS option: we must assume 536 (RFC 9293 §3.7.1).
+config mss=1460 rx_buffer=4000
+0      listen
+0      < S 0:0(0) win 8000
+0      > S. 0:0(0) ack 1 win 4000 mss 1460
+0.001  < . 1:1(0) ack 1 win 8000
+0.002  write 600
+0.002  > P. 1:537(536) ack 1 win 4000
+0.002  > P. 537:601(64) ack 1 win 4000

@@ -1,0 +1,16 @@
+# Data retransmission: RFC 6298 RTO (clamped to min_rto) doubling on each expiry, then
+# the retransmission limit resets the connection (RST at SND.UNA).
+config initial_rto=1 min_rto=0.2 max_retransmits=3 rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0      < S. 0:0(0) ack 1 win 8000 mss 1000
+0      > . 1:1(0) ack 1 win 4000
+0.100  write 500
+0.100  > P. 1:501(500) ack 1 win 4000
+0.300  > P. 1:501(500) ack 1 win 4000
+0.700  > P. 1:501(500) ack 1 win 4000
+1.500  > P. 1:501(500) ack 1 win 4000
+3.100  > R 1:1(0)
+3.100  expect state CLOSED
+3.100  expect reason timeout
+3.100  expect event closed

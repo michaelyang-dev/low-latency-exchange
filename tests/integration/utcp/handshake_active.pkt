@@ -1,0 +1,15 @@
+# Active open: SYN with our MSS, SYN-ACK with a smaller MSS, data segmented to it.
+config mss=1000 rx_buffer=4000 initial_rto=1 min_rto=0.2 iss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0.010  < S. 0:0(0) ack 1 win 8000 mss 536
+0.010  > . 1:1(0) ack 1 win 4000
+0.010  expect state ESTABLISHED
+0.010  expect event connected
+0.020  write 1200
+0.020  > P. 1:537(536) ack 1 win 4000
+0.020  > P. 537:1073(536) ack 1 win 4000
+0.020  > P. 1073:1201(128) ack 1 win 4000
+0.030  < . 1:1(0) ack 1201 win 8000
+0.030  expect event writable
+0.030  expect none

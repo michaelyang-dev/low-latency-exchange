@@ -1,0 +1,20 @@
+# SYN retransmission with exponential backoff; Karn's rule (no RTT sample from a
+# retransmitted SYN, so the backed-off RTO stays until a clean sample arrives).
+config initial_rto=1 min_rto=0.2 rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+1      > S 0:0(0) win 4000 mss 1000
+3      > S 0:0(0) win 4000 mss 1000
+3.010  < S. 0:0(0) ack 1 win 8000 mss 1000
+3.010  > . 1:1(0) ack 1 win 4000
+3.010  expect state ESTABLISHED
+3.020  write 10
+3.020  > P. 1:11(10) ack 1 win 4000
+7.020  > P. 1:11(10) ack 1 win 4000
+7.030  < . 1:1(0) ack 11 win 8000
+7.040  write 10
+7.040  > P. 11:21(10) ack 1 win 4000
+7.050  < . 1:1(0) ack 21 win 8000
+7.060  write 10
+7.060  > P. 21:31(10) ack 1 win 4000
+7.260  > P. 21:31(10) ack 1 win 4000

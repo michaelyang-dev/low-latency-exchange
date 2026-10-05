@@ -1,0 +1,12 @@
+# Simultaneous open (RFC 9293 §3.5 figure 7): our SYN crosses the peer's SYN; the
+# peer's SYN,ACK completes the handshake.
+config rx_buffer=4000 mss=1000
+0      connect
+0      > S 0:0(0) win 4000 mss 1000
+0.010  < S 0:0(0) win 8000 mss 1000
+0.010  > S. 0:0(0) ack 1 win 4000 mss 1000
+0.010  expect state SYN-RECEIVED
+0.020  < S. 0:0(0) ack 1 win 8000 mss 1000
+0.020  > . 1:1(0) ack 1 win 4000
+0.020  expect state ESTABLISHED
+0.020  expect event connected
