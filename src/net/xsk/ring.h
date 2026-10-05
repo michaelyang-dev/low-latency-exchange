@@ -24,15 +24,12 @@ struct RingMap {
 };
 
 namespace detail {
-inline std::uint32_t load_acquire(const std::uint32_t* p) noexcept {
-  return std::atomic_ref<const std::uint32_t>(*p).load(std::memory_order_acquire);
-}
-inline std::uint32_t load_relaxed(const std::uint32_t* p) noexcept {
-  return std::atomic_ref<const std::uint32_t>(*p).load(std::memory_order_relaxed);
-}
-inline void store_release(std::uint32_t* p, std::uint32_t v) noexcept {
-  std::atomic_ref<std::uint32_t>(*p).store(v, std::memory_order_release);
-}
+// The ring indices live in memory shared with the kernel. The __atomic builtins (GCC and
+// clang) give the same acquire/relaxed/release semantics as std::atomic_ref, and also
+// work on const pointers, which atomic_ref<const T> (C++26) does not yet in libc++.
+inline std::uint32_t load_acquire(const std::uint32_t* p) noexcept { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+inline std::uint32_t load_relaxed(const std::uint32_t* p) noexcept { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+inline void store_release(std::uint32_t* p, std::uint32_t v) noexcept { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 }  // namespace detail
 
 // We produce, the kernel consumes (FILL: u64 addresses; TX: xdp_desc).

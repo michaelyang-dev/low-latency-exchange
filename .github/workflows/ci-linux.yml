@@ -61,7 +61,7 @@ jobs:
       - run: cmake --build build/dev -j
       - name: Unit tests as root (busy-poll knobs need CAP_NET_ADMIN)
         run: sudo ctest --test-dir build/dev --output-on-failure -L unit -j 4
-      - name: veth/netns integration (label vm): every socket backend, utcp interop with kernel TCP, AF_XDP copy mode
+      - name: "veth/netns integration (label vm): every socket backend, utcp interop with kernel TCP, AF_XDP copy mode"
         run: sudo ctest --test-dir build/dev --output-on-failure -L vm
 
   docs:
