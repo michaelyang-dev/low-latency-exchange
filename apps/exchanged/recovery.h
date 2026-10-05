@@ -56,6 +56,19 @@ struct RecoveredDay {
   std::uint64_t state_hash = 0;        // engine state hash after the replay
   std::uint64_t itch_kept = 0;         // itch.bin messages that were there and verified before recovery
                                        // (md republishes the rest: MdConfig::republish_from)
+  // A rejoin's reload (reload_to, defer_unlogged): the outputs of the replayed records
+  // beyond the end of the output log as found, in emission order. The output log and the
+  // stores built from it hold released messages only, and these may come from records
+  // the primary has not released (10 §5: the joiner holds them, the primary may still lose
+  // them). The engine stage hands them to egress, which releases them in order (DST-013).
+  struct DeferredOutput {
+    std::uint64_t index = 0;  // the journal record that produced it
+    md::OutKind kind = md::OutKind::Itch;
+    std::uint32_t session = 0;  // OUCH destination (0 for ITCH and the DayEnd marker)
+    std::vector<std::byte> bytes;
+  };
+  std::vector<DeferredOutput> deferred;
+  std::uint64_t outlog_deferred = 0;  // messages in `deferred`
 };
 
 // What recovery needs of the day's configuration.

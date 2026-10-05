@@ -1,3 +1,144 @@
+diff --git a/apps/exchanged/engine_stage.h b/apps/exchanged/engine_stage.h
+--- a/apps/exchanged/engine_stage.h
++++ b/apps/exchanged/engine_stage.h
+@@ -73,22 +73,6 @@
+   }
+ 
+   [[nodiscard]] std::uint64_t applied() const noexcept { return applied_; }
+-
+-  // A rejoin's reloaded outputs that egress has not had yet (RecoveredDay::deferred:
+-  // records <= the recovered index, in emission order, possibly the DayEnd marker last).
+-  // They go to the egress ring before any new record, through the overflow staging, so
+-  // the release-gated egress stages hand them on only once released (DST-013). Until
+-  // they are all in the ring, `applied` is published as the record before the first.
+-  // Call before the stages run.
+-  template <class Range>
+-  void stage_deferred(const Range& outs) {
+-    for (const auto& o : outs) {
+-      ov_entries_.push_back(Staged{o.index, o.session, o.kind, static_cast<std::uint32_t>(ov_bytes_.size()),
+-                                   static_cast<std::uint32_t>(o.bytes.size())});
+-      ov_bytes_.insert(ov_bytes_.end(), o.bytes.begin(), o.bytes.end());
+-    }
+-    if (!ov_entries_.empty()) sh_->egress_state.applied.store(ov_entries_.front().index - 1);
+-  }
+   [[nodiscard]] const EngineStats& stats() const noexcept { return stats_; }
+   [[nodiscard]] const md::WorkStats& work() const noexcept { return work_.stats(); }
+   [[nodiscard]] const engine::Engine& engine() const noexcept { return *eng_; }
+diff --git a/apps/exchanged/node.cpp b/apps/exchanged/node.cpp
+--- a/apps/exchanged/node.cpp
++++ b/apps/exchanged/node.cpp
+@@ -531,9 +531,6 @@
+   ec.hash_interval = paired ? 65'536 : 0;
+   engine_stage_ = std::make_unique<EngineStage>(*sh_, *engine_, ec, recovered_index_, *clock_);
+   if (recovered_index_ != 0) engine_stage_->set_totals(recovered_.itch_total, recovered_.soup_total);
+-  // A rejoin's reloaded outputs still to release, and a recovered DayEnd (DST-013).
+-  engine_stage_->stage_deferred(recovered_.deferred);
+-  recovered_.deferred = {};
+   io_stage_ = std::make_unique<IoStage>(*sh_, *dir_, *prep_, *writer_, *outlog_, cfg_.spares, !paired, *clock_);
+   // Work time (T32): records the sequencer reserves from here on start the driver's
+   // meter (the day-start records are behind us); lle_top converts ticks with tsc_hz.
+diff --git a/apps/exchanged/recovery.h b/apps/exchanged/recovery.h
+--- a/apps/exchanged/recovery.h
++++ b/apps/exchanged/recovery.h
+@@ -56,19 +56,6 @@
+   std::uint64_t state_hash = 0;        // engine state hash after the replay
+   std::uint64_t itch_kept = 0;         // itch.bin messages that were there and verified before recovery
+                                        // (md republishes the rest: MdConfig::republish_from)
+-  // A rejoin's reload (reload_to, defer_unlogged): the outputs of the replayed records
+-  // beyond the end of the output log as found, in emission order. The output log and the
+-  // stores built from it hold released messages only, and these may come from records
+-  // the primary has not released (10 §5: the joiner holds them, the primary may still lose
+-  // them). The engine stage hands them to egress, which releases them in order (DST-013).
+-  struct DeferredOutput {
+-    std::uint64_t index = 0;  // the journal record that produced it
+-    md::OutKind kind = md::OutKind::Itch;
+-    std::uint32_t session = 0;  // OUCH destination (0 for ITCH and the DayEnd marker)
+-    std::vector<std::byte> bytes;
+-  };
+-  std::vector<DeferredOutput> deferred;
+-  std::uint64_t outlog_deferred = 0;  // messages in `deferred`
+ };
+ 
+ // What recovery needs of the day's configuration.
+diff --git a/apps/exchanged/recovery_impl.h b/apps/exchanged/recovery_impl.h
+--- a/apps/exchanged/recovery_impl.h
++++ b/apps/exchanged/recovery_impl.h
+@@ -95,30 +95,26 @@
+   return s;
+ }
+ 
+-// Verifies the regenerated output against the output log as found and appends what
+-// follows its end, or, with `defer` (a rejoin's reload), keeps what follows its end in
+-// RecoveredDay::deferred for egress to release (DST-013).
+ template <class OutDay, class Reader>
+ class RegenSink {
+  public:
+-  RegenSink(Streams<OutDay, Reader>& s, RecoveredDay& d, bool defer = false)
+-      : s_(&s), d_(&d), defer_(defer), scratch_(std::make_unique<std::byte[]>(outlog::kMaxMessageBytes)) {}
+-  void itch(std::uint64_t idx, std::span<const std::byte> b) {
++  RegenSink(Streams<OutDay, Reader>& s, RecoveredDay& d)
++      : s_(&s), d_(&d), scratch_(std::make_unique<std::byte[]>(outlog::kMaxMessageBytes)) {}
++  void itch(std::uint64_t, std::span<const std::byte> b) {
+     ++d_->itch_total;
+-    put(s_->itch, b, idx, md::OutKind::Itch, 0);
+-  }
+-  void ouch(std::uint64_t idx, std::uint32_t session, std::span<const std::byte> b) {
++    put(s_->itch, b);
++  }
++  void ouch(std::uint64_t, std::uint32_t session, std::span<const std::byte> b) {
+     ++d_->soup_total;
+     const auto it = std::lower_bound(s_->ids.begin(), s_->ids.end(), session);
+     if (it == s_->ids.end() || *it != session) return;
+-    put(s_->soup[static_cast<std::size_t>(it - s_->ids.begin())], b, idx, md::OutKind::Ouch, session);
++    put(s_->soup[static_cast<std::size_t>(it - s_->ids.begin())], b);
+   }
+   void audit(std::uint64_t, const engine::AuditEvent&) {}
+   [[nodiscard]] bool failed() const noexcept { return failed_; }
+ 
+  private:
+-  void put(Stream<OutDay, Reader>& st, std::span<const std::byte> b, std::uint64_t idx, md::OutKind kind,
+-           std::uint32_t session) {
++  void put(Stream<OutDay, Reader>& st, std::span<const std::byte> b) {
+     ++st.pos;
+     if (st.diverged != 0) return;
+     if (st.pos <= st.existing) {
+@@ -130,18 +126,12 @@
+       }
+       return;
+     }
+-    if (defer_) {
+-      d_->deferred.push_back(RecoveredDay::DeferredOutput{idx, kind, session, std::vector<std::byte>(b.begin(), b.end())});
+-      ++d_->outlog_deferred;
+-      return;
+-    }
+     if (!st.w->append(b)) failed_ = true;
+     ++d_->outlog_appended;
+   }
+ 
+   Streams<OutDay, Reader>* s_;
+   RecoveredDay* d_;
+-  bool defer_;
+   std::unique_ptr<std::byte[]> scratch_;
+   bool failed_ = false;
+ };
+@@ -312,7 +302,7 @@
+ std::expected<RecoveredDay, std::string> basic_replay_day(Io& io, Dir& dir, const journal::RecoveryResult& rr,
+                                                           engine::Engine& eng, OutDay& out, const RecoveryLayout& L,
+                                                           std::span<const seq::ConfigBlob> expected_config,
+-                                                          const std::string& snapshot_dir, bool defer_unlogged = false) {
++                                                          const std::string& snapshot_dir) {
+   using namespace recovery_detail;
+   using Reader = typename Io::Reader;
+   const std::uint64_t last = rr.chain.last_index;
+@@ -326,7 +316,7 @@
+     if (!streams) return std::unexpected(streams.error());
+     std::map<std::pair<std::uint32_t, std::uint16_t>, bool> live;
+     std::vector<std::pair<journal::ConfigTable, std::vector<std::byte>>> tables;
+-    RegenSink<OutDay, Reader> regen(*streams, day, defer_unlogged);
++    RegenSink<OutDay, Reader> regen(*streams, day);
+     (void)eng.restore({});  // an empty, reset engine
+     const std::optional<SnapStart> snap = load_snapshot(io, snapshot_dir, last, eng, out, L);
+     std::uint64_t apply_from = 1;
 diff --git a/apps/exchanged/repl_stage.h b/apps/exchanged/repl_stage.h
 --- a/apps/exchanged/repl_stage.h
 +++ b/apps/exchanged/repl_stage.h
@@ -87,6 +228,64 @@ diff --git a/apps/exchanged/shared.h b/apps/exchanged/shared.h
    };
    alignas(kFalseSharingBytes) std::atomic<bool> allowed{false};
    alignas(kFalseSharingBytes) std::atomic<std::uint64_t> disallow_gen{0};
+diff --git a/apps/exchanged/start_impl.h b/apps/exchanged/start_impl.h
+--- a/apps/exchanged/start_impl.h
++++ b/apps/exchanged/start_impl.h
+@@ -242,8 +242,7 @@
+   } else {
+     for (const std::uint64_t i : io.remove_snapshots_above(p.snapshots_dir, t))
+       io.note("exchanged: rejoin: snapshot at " + std::to_string(i) + " above the truncation point removed");
+-    // What the output log does not hold yet waits for the release watermark (DST-013).
+-    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots, true);
++    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots);
+     if (!day) {
+       io.warn("exchanged: rejoin: " + day.error());
+       return out;
+@@ -251,8 +250,8 @@
+     p.recovered = std::move(*day);
+   }
+   io.note("exchanged: rejoin: engine reloaded to " + std::to_string(t) + "; output log: " +
+-          std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_deferred) +
+-          " to release, " + std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
++          std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_appended) +
++          " regenerated, " + std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
+   nodelog::replayed(t, p.recovered.outlog_verified, p.recovered.outlog_appended);
+   out.ok = true;
+   out.timers = p.recovered.timers;
+@@ -275,8 +274,7 @@
+ // the journal now ends (the truncation point, plus after RESUME the new epoch's
+ // EpochStart in L2). The solo primary of record (RESUME) lost its own instances: the
+ // replication stage hands their InstanceDowns to the sequencer's first list (ADR-032).
+-// A day that already ended only tells egress, in order, after the reloaded outputs it
+-// has not had yet (RecoveredDay::deferred, which the engine stage hands on). `open_writer(rr)` is Node::open_writer
++// A day that already ended only tells egress, in order. `open_writer(rr)` is Node::open_writer
+ // (-> std::expected<void, std::string>). Returns the role the handshake ended in.
+ template <class Parts, class ReplT, class ClockT, class OpenWriter>
+ std::expected<repl::Role, std::string> finish_rejoin(Parts& p, ReplT& repl, ClockT& clock, OpenWriter&& open_writer) {
+@@ -298,9 +296,8 @@
+     for (const auto& [session, instance] : p.recovered.live) repl.queue_instance_down(session, instance);
+   }
+   if (p.recovered.ended) {
+-    // After the reloaded outputs still to release: the engine stage hands both to egress.
+     p.sh.day_end_index.store(p.recovered.day_end_index);
+-    p.recovered.deferred.push_back(RecoveredDay::DeferredOutput{p.recovered.day_end_index, md::OutKind::DayEnd, 0, {}});
++    (void)p.sh.egress.try_push(p.recovered.day_end_index, md::OutKind::DayEnd, 0, {});
+   }
+   return role;
+ }
+diff --git a/sim/exchange/exchange_node.cpp b/sim/exchange/exchange_node.cpp
+--- a/sim/exchange/exchange_node.cpp
++++ b/sim/exchange/exchange_node.cpp
+@@ -344,9 +344,6 @@
+   ec.hash_interval = paired ? 65'536 : 0;
+   engine_stage_ = std::make_unique<SimEngineStage>(*sh_, *engine_, ec, recovered_index_, clock_);
+   if (recovered_index_ != 0) engine_stage_->set_totals(recovered_.itch_total, recovered_.soup_total);
+-  // Node::build_stages: a rejoin's reloaded outputs still to release (DST-013).
+-  engine_stage_->stage_deferred(recovered_.deferred);
+-  recovered_.deferred = {};
+   io_stage_ = std::make_unique<SimIoStage>(*sh_, *dir_, *prep_, *writer_, *outlog_, p_.spares, !paired, clock_);
+   seq_ring_->set_meter(&driver_->meter());
+   if (paired) {
 diff --git a/src/repl/replica.h b/src/repl/replica.h
 --- a/src/repl/replica.h
 +++ b/src/repl/replica.h

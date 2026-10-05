@@ -73,6 +73,22 @@ class BasicEngineStage {
   }
 
   [[nodiscard]] std::uint64_t applied() const noexcept { return applied_; }
+
+  // A rejoin's reloaded outputs that egress has not had yet (RecoveredDay::deferred:
+  // records <= the recovered index, in emission order, possibly the DayEnd marker last).
+  // They go to the egress ring before any new record, through the overflow staging, so
+  // the release-gated egress stages hand them on only once released (DST-013). Until
+  // they are all in the ring, `applied` is published as the record before the first.
+  // Call before the stages run.
+  template <class Range>
+  void stage_deferred(const Range& outs) {
+    for (const auto& o : outs) {
+      ov_entries_.push_back(Staged{o.index, o.session, o.kind, static_cast<std::uint32_t>(ov_bytes_.size()),
+                                   static_cast<std::uint32_t>(o.bytes.size())});
+      ov_bytes_.insert(ov_bytes_.end(), o.bytes.begin(), o.bytes.end());
+    }
+    if (!ov_entries_.empty()) sh_->egress_state.applied.store(ov_entries_.front().index - 1);
+  }
   [[nodiscard]] const EngineStats& stats() const noexcept { return stats_; }
   [[nodiscard]] const md::WorkStats& work() const noexcept { return work_.stats(); }
   [[nodiscard]] const engine::Engine& engine() const noexcept { return *eng_; }

@@ -380,6 +380,8 @@ bugs:
       at the fix only the new epoch's EpochStart.
       The found patch also reverts DST-010's and DST-011's fixes (later, src/repl/replica.h):
       with them this seed fails O-STREAM at event 481988 instead.
+      It also reverts DST-013's fix (the rejoin reload, apps/exchanged): with it this seed
+      does not fail.
   - id: DST-009
     title: "the JOIN window froze a solo primary's release while its joiner, which may apply only up to that release, needed L2 room to drain: no JOIN and no release for the rest of the day"
     component: repl
@@ -427,6 +429,8 @@ bugs:
       The found patch also reverts DST-010's and DST-011's fixes (later, src/repl/replica.h):
       with them this seed no longer fails. It keeps the repl harness's l2_cap (test
       infrastructure that later tests use; exsim does not use it).
+      It also reverts DST-013's fix (the rejoin reload, apps/exchanged): with it this seed
+      fails O-LIVE at event 18272995 instead.
   - id: DST-010
     title: "a node that became the backup after a JOIN did not acknowledge the JOIN epoch's EpochStart until something followed it: after the close the primary's T_ack ran out, it went solo and deposed the new backup, at every rejoin for the rest of the day"
     component: repl
@@ -483,6 +487,8 @@ bugs:
       found patch also reverts DST-011's fix (found in the same campaign): it changes this
       seed's trajectory (O-LIVE at event 2591355 instead of 2586621), and the found tree is
       the tree the seed was found at.
+      It also reverts DST-013's fix (the rejoin reload, apps/exchanged): with it this seed
+      fails O-LIVE at event 2577384 instead.
   - id: DST-011
     title: "a recovering joiner released nothing until it became the backup, so its engine stopped once its egress ring was full and its L2 then refused the catch-up: a catch-up longer than the two rings never reached zero lag and no JOIN followed"
     component: repl
@@ -590,3 +596,58 @@ bugs:
       (MemJournalDevice -EIO), and requires recovery to accept the journal with records 1..t
       intact and a second truncation to end it at t: at the found tree recovery refuses at
       the first failure point, at the fix every failure point recovers.
+      The found patch also reverts DST-013's fix (the rejoin reload, apps/exchanged, found
+      later): with it this seed fails O-RECOVER at event 211561 instead.
+  - id: DST-013
+    title: "a rejoin's reload regenerated the output log through the journal's end, including records its solo primary had not released: the joiner's gateways replayed their outputs, executions among them, and the primary later lost the records"
+    component: exchanged
+    targets: [T05, T24, T26]
+    category: production
+    found_utc: "2026-10-05T17:17:24Z"
+    campaign_id: 20261005T170525Z-f97ced4a-d4dc3d3dc7dce089
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-013.patch
+    seed: "0xd4dc3d3dc7dce201"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha_split"]
+    swarm_digest: "0x8e29bf065787897a"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:11630896:0x77fd32fd4725b7f4"
+    root_cause: >-
+      The output log holds released messages only: the io stage appends what egress
+      releases (ADR-005), and the gateways' SoupBinTCP replay stores and the re-request
+      server are built from it. A joiner copies records from its solo primary beyond the
+      primary's release: solo release follows the primary's durable index (10 §4), and in
+      the seed a disk stall held it at 650 while the joiner copied up to 758. The joiner
+      restarted and rejoined without a truncation, and the reload (start_impl.h reload_to,
+      basic_replay_day) replayed its journal through 758 and appended every regenerated
+      output past the end of the output log as found. Its gateways then replayed those
+      outputs, executions among them, to clients that logged in as mirror sessions. The
+      primary crashed and resumed (RESUME) at 657, the joiner truncated to it, and clients
+      held messages and fills the final journal does not have; they asked for SoupBinTCP
+      sequence numbers neither node would reach, were refused ("requested sequence is
+      ahead"), and never got End of Session (O-LIVE). Fix: the reload keeps the outputs
+      past the end of the output log (RecoveredDay::deferred) instead of writing them, and
+      the engine stage hands them, then a recovered DayEnd marker, to egress before any new
+      record (stage_deferred); the release-gated egress stages pass them on only once
+      released, so the output log, the stores and the lines keep the Output Rule.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-013_rejoin_unreleased_outputs
+    counted: true
+    count_reason: >-
+      Production code of exchanged (apps/exchanged: recovery_impl.h, start_impl.h,
+      engine_stage.h, node.cpp; the simulator's node mirrors node.cpp). Safety defect under
+      the failures the model allows (the joiner's restart, then the solo primary's host
+      crash with a disk stall): outputs, executions among them, reach clients from records
+      that never become part of the day (an Output Rule violation, lost fills), and the
+      sessions cannot complete. Found by exsim's exchange_ha_split world through O-LIVE, in
+      ci-sim's 1,000-seed campaign for the commit that added the world (seed base from the
+      commit, reproduced locally); diagnosed from the refused logins (requested sequence
+      ahead of the server's), the clients' first copies of messages 100-107 from the
+      joiner's gateway right after its rejoin, and the joiner's release (650) against its
+      reloaded tail (758). Reproduces from seed at the found tree with the recorded signature
+      on macos-arm64. One root cause, one fix. The seed-independent regression test journals
+      a day with the production sequencer, runs the rejoin's reload_to against an output
+      log that holds nothing, and checks that the reload wrote no ITCH or OUCH message into
+      it: at the found tree it wrote 2 ITCH and 6 OUCH messages, at the fix none.
