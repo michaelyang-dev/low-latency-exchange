@@ -473,7 +473,7 @@ std::expected<void, std::string> Node::rejoin() {
                                       repl_config(cfg_, inc, begun->config_digest), *metrics_, split_);
   RejoinHooks hooks;
   hooks.truncate = [this](std::uint64_t t) { return truncate_journal_to(t); };
-  hooks.reload = [this](std::uint64_t t, bool resume) { return reload_to(t, resume); };
+  hooks.reload = [this](std::uint64_t t) { return reload_to(t); };
   hooks.before_restart = [this](const char* what, std::uint64_t t) {
     const RestartRecord rec =
         next_restart_record(read_restart_record(restart_guard_path()), what, t, start_recovered_index_);
@@ -518,11 +518,11 @@ bool Node::truncate_journal_to(std::uint64_t t) {
   return exch::truncate_journal_to(io, parts, t);
 }
 
-ReloadResult Node::reload_to(std::uint64_t t, bool resume) {
+ReloadResult Node::reload_to(std::uint64_t t) {
   PosixRejoinIo io;
   NodeRejoinParts parts = rejoin_parts(*dir_, *prep_, *rlog_, *sh_, *engine_, *outlog_, recovered_, recovered_index_,
                                        cfg_, day_->config());
-  return exch::reload_to(io, parts, t, resume);
+  return exch::reload_to(io, parts, t);
 }
 
 void Node::build_stages() {
@@ -531,9 +531,6 @@ void Node::build_stages() {
   ec.hash_interval = paired ? 65'536 : 0;
   engine_stage_ = std::make_unique<EngineStage>(*sh_, *engine_, ec, recovered_index_, *clock_);
   if (recovered_index_ != 0) engine_stage_->set_totals(recovered_.itch_total, recovered_.soup_total);
-  // A rejoin's reloaded outputs still to release, and a recovered DayEnd (DST-013).
-  engine_stage_->stage_deferred(recovered_.deferred);
-  recovered_.deferred = {};
   io_stage_ = std::make_unique<IoStage>(*sh_, *dir_, *prep_, *writer_, *outlog_, cfg_.spares, !paired, *clock_);
   // Work time (T32): records the sequencer reserves from here on start the driver's
   // meter (the day-start records are behind us); lle_top converts ticks with tsc_hz.
