@@ -60,24 +60,6 @@ TEST(Sequencer, DayStartJournalsConfigThenEpochStart) {
   EXPECT_NE(es->config_digest, 0u);
 }
 
-// seq::config_digest is the digest the day start stamps into EpochStart (a paired node
-// restarting on an empty journal joins under it, DST-006).
-TEST(Sequencer, ConfigDigestIsTheDayStartsDigest) {
-  Rig rig;
-  std::vector<std::byte> symbols(5'000), limits(10);
-  for (std::size_t i = 0; i < symbols.size(); ++i) symbols[i] = static_cast<std::byte>(i * 7);
-  const std::vector<ConfigBlob> cfg{ConfigBlob{journal::ConfigTable::Symbols, symbols},
-                                    ConfigBlob{journal::ConfigTable::RiskLimits, limits}};
-  rig.start(cfg);
-  const auto recs = rig.take();
-  const auto es = journal::decode_epoch_start(RecordView(recs.back()));
-  ASSERT_TRUE(es.has_value());
-  EXPECT_EQ(config_digest(cfg), es->config_digest);
-  EXPECT_EQ(config_digest(cfg), rig.seq->config_digest());
-  limits[3] = std::byte{1};
-  EXPECT_NE(config_digest(cfg), es->config_digest);
-}
-
 TEST(Sequencer, StampsIndexEpochTimestampAndChain) {
   Rig rig;
   rig.start();

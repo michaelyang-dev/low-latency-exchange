@@ -304,9 +304,8 @@ std::expected<void, std::string> Node::open_journal() {
     rr = std::move(*r);
     recovered_index_ = rr.chain.last_index;
   }
-  // A paired node restarting mid-day rejoins (10 §5), even on an empty journal once the day
-  // started here (start_impl.h restart_must_rejoin): the writer opens after the handshake,
-  // which may truncate the journal first (rejoin()).
+  // A paired node restarting mid-day rejoins (10 §5): the writer opens after the
+  // handshake, which may truncate the journal first (rejoin()).
   std::error_code inc_ec;
   rejoin_ = restart_must_rejoin(cfg_.mode == NodeMode::Paired, recovered_index_,
                                 std::filesystem::exists(cfg_.journal_dir() + "/incarnation", inc_ec));
