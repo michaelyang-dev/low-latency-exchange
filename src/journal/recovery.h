@@ -205,6 +205,42 @@ bool zero_range(Device& dev, std::uint64_t from, std::uint64_t to, std::uint64_t
   return true;
 }
 
+// Rewrites [from, to) with what reads return now, with dsync (DST-002). After a
+// process is killed between pwrite and fdatasync, or after an fdatasync failed and
+// the kernel marked the pages clean (R6 D4.1, "fsyncgate"), reads keep returning
+// bytes that may never reach the disk; an fsync does not write such pages, a
+// rewrite does. Recovery rewrites everything it bases its result on.
+// The range is widened to whole blocks (O_DIRECT devices) within the file.
+template <JournalDeviceLike Device>
+bool repersist(Device& dev, std::uint64_t from, std::uint64_t to) {
+  constexpr std::size_t kChunk = std::size_t{1} << 20;
+  from = align_down_block(from);
+  to = std::min(align_up_block(to), dev.size());
+  if (from >= to) return true;
+  AlignedBuf buf = aligned_zeroed(kChunk);
+  if (buf == nullptr) return false;
+  while (from < to) {
+    const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(kChunk, to - from));
+    const std::span<std::byte> b(buf.get(), n);
+    if (!read_exact(dev, from, b)) return false;
+    if (write_sync(dev, from, std::span<const std::byte>(b), true) != static_cast<std::int32_t>(n)) return false;
+    from += n;
+  }
+  return true;
+}
+
+// Re-persists the header block of every segment file: the scan's verdicts (assigned,
+// spare, ignored after an invalidated header) must hold after a power loss, or a
+// segment whose recycling had failed could come back with stale records.
+template <SegmentDirLike Dir>
+bool repersist_headers(Dir& dir) {
+  for (std::size_t i = 0; i < dir.count(); ++i) {
+    auto& dev = dir.device(i);
+    if (!repersist(dev, 0, std::min<std::uint64_t>(dev.size(), kSegmentHeaderBytes))) return false;
+  }
+  return true;
+}
+
 // Writes a Pad of `len` bytes at `at` (read-modify-write of the blocks it touches).
 template <JournalDeviceLike Device>
 bool write_pad(Device& dev, std::uint64_t at, std::uint32_t len, const ChainState& chain, const Sealer& sealer) {
@@ -259,6 +295,7 @@ RecoveryResult recover(Dir& dir, const RecoveryOptions& opts = {}) {
   }
 
   if (hs.assigned.empty()) {
+    if (opts.repair && !detail::repersist_headers(dir)) return io_error("re-persisting segment headers");
     r.status = RecoveryStatus::Empty;
     r.detail = "no assigned segment";
     return r;
@@ -347,6 +384,16 @@ RecoveryResult recover(Dir& dir, const RecoveryOptions& opts = {}) {
       if (pad_len != 0 && !detail::write_pad(dev, x, pad_len, chain, *sealer)) return io_error("writing pad");
       if (sync_device(dev) != 0) return io_error("sync after repair");
       r.repaired = true;
+    }
+    if (opts.repair) {
+      // Everything the chain now relies on that may still be in the page cache only:
+      // at most the writer's in-flight window before x (earlier segments were fully
+      // synced before the writer moved on), plus every header block.
+      const std::uint64_t lo = x > kSegmentHeaderBytes + opts.inflight_window
+                                   ? align_down_block(x - opts.inflight_window)
+                                   : std::uint64_t{kSegmentHeaderBytes};
+      if (!detail::repersist(dev, lo, std::min(x, limit))) return io_error("re-persisting the tail");
+      if (!detail::repersist_headers(dir)) return io_error("re-persisting segment headers");
     }
   }
 
