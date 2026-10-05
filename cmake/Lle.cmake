@@ -9,6 +9,16 @@ else()
   set(LLE_SIM_SLOW_TEST_TIMEOUT 900)
 endif()
 
+# ctest properties for the tests that run several real processes against timers or UDP
+# rates (paired exchanged nodes, loopback feeds): a sanitizer build runs them alone, so a
+# node's start or a client's receive loop is not slowed by the other tests past T_ack or
+# a socket buffer.
+if(LLE_SANITIZE)
+  set(LLE_LOAD_SENSITIVE_PROPERTIES RUN_SERIAL TRUE)
+else()
+  set(LLE_LOAD_SENSITIVE_PROPERTIES)
+endif()
+
 # True in OUT if path REL (relative to the source root) passes the LLE_ONLY
 # filter: a list of path prefixes (e.g. "src/common;src/proto/itch50"). A
 # directory is kept if it lies under a prefix or is an ancestor of one.
@@ -68,8 +78,10 @@ function(lle_library name)
 endfunction()
 
 # lle_test(<name> SOURCES ... DEPS ...) -> GoogleTest executable registered with CTest.
+# lle_test(<name> SOURCES ... DEPS ... [PROPERTIES <ctest property> <value> ...]): a GoogleTest
+# executable whose tests are discovered into ctest, labelled unit, with any extra PROPERTIES.
 function(lle_test name)
-  cmake_parse_arguments(A "" "" "SOURCES;DEPS" ${ARGN})
+  cmake_parse_arguments(A "" "" "SOURCES;DEPS;PROPERTIES" ${ARGN})
   if("memory" IN_LIST LLE_SANITIZE OR "thread" IN_LIST LLE_SANITIZE)
     # Allocation-counting tests replace the global operator new, which the MSan and TSan
     # runtimes also define. Convention: such tests live in *alloc_test.cpp files.
@@ -90,7 +102,7 @@ function(lle_test name)
   # -Wmismatched-new-delete reports at every inlined delete. Test code only.
   target_compile_options(${name} PRIVATE $<$<CXX_COMPILER_ID:GNU>:-Wno-dangling-else -Wno-mismatched-new-delete>)
   include(GoogleTest)
-  gtest_discover_tests(${name} DISCOVERY_TIMEOUT 60 PROPERTIES LABELS unit)
+  gtest_discover_tests(${name} DISCOVERY_TIMEOUT 60 PROPERTIES LABELS unit ${A_PROPERTIES})
 endfunction()
 
 # lle_app(<name> SOURCES ... DEPS ...)

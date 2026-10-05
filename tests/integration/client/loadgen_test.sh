@@ -9,8 +9,8 @@ rm -rf "$W"; mkdir -p "$W"
 "$LG" serve --listen :$P --sessions 8 --symbols 2000 --max-runtime 60s > "$W/serve.json" 2> "$W/serve.err" &
 PIDS+=($!)
 wait_listening "$W/serve.err" 60
-"$LG" --server :$P --sessions 4 --rate 20000 --duration 2s --seed 99 --out "$W" --run-name run-01 > /dev/null 2> "$W/run.err" \
-  || fail "loadgen failed: $(cat "$W/run.err")"
+"$LG" --server :$P --sessions 4 --rate 20000 --duration 2s --seed 99 --out "$W" --run-name run-01 > "$W/run.out" 2> "$W/run.err" \
+  || fail "loadgen failed (exit $?): $(tail -5 "$W/run.err") | $(tail -c 600 "$W/run.out")"
 J="$W/run-01.json"
 [ -s "$W/run-01.hgrm" ] || fail "no histogram"
 grep -q '"responses_valid": true' "$J" || fail "responses not valid"
