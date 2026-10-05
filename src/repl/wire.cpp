@@ -14,7 +14,6 @@ namespace {
 constexpr std::uint8_t kFlagCatchup = 1;
 constexpr std::uint8_t kFlagHash = 2;
 constexpr std::uint8_t kFlagRefused = 1;
-constexpr std::uint8_t kFlagAdmitted = 1;  // HEARTBEAT
 
 constexpr std::size_t kAckBody = 40;
 constexpr std::size_t kNackBody = 24;
@@ -52,8 +51,6 @@ std::uint8_t flags_of(const Message& m) noexcept {
           return x.catchup ? kFlagCatchup : 0;
         } else if constexpr (std::is_same_v<T, EpochEnd>) {
           return x.refused ? kFlagRefused : 0;
-        } else if constexpr (std::is_same_v<T, Heartbeat>) {
-          return x.admitted ? kFlagAdmitted : 0;
         } else {
           return 0;
         }
@@ -267,11 +264,10 @@ Result get_body(MsgType t, NodeId from, std::uint8_t flags, const std::byte* b, 
       return Nack{from, (flags & kFlagCatchup) != 0, load_le64(b), load_le64(b + 8), load_le64(b + 16)};
     }
     case MsgType::kHeartbeat: {
-      if (const auto e = fixed(kHeartbeatBody, kFlagAdmitted)) return std::unexpected(*e);
+      if (const auto e = fixed(kHeartbeatBody, 0)) return std::unexpected(*e);
       if (!zero(b + 91, 5)) return std::unexpected(DecodeError::kPadding);
       Heartbeat m;
       m.from = from;
-      m.admitted = (flags & kFlagAdmitted) != 0;
       m.epoch = load_le64(b + 0);
       m.last = load_le64(b + 8);
       m.commit = load_le64(b + 16);

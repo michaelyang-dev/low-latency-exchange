@@ -367,8 +367,6 @@ class Replica {
     Nanos last_progress = 0;
   };
 
-  static constexpr std::uint64_t kNoPartner = ~std::uint64_t{0};
-
   struct Joiner {
     bool active = false;
     std::uint64_t inc = 0;
@@ -476,11 +474,6 @@ class Replica {
 
   void alarm(Alarm a, std::uint64_t detail) { h_.alarm(a, detail); }
 
-  void note_peer_inc(std::uint64_t inc) noexcept {
-    if (!peer_inc_seen_ || inc > peer_inc_max_) peer_inc_max_ = inc;
-    peer_inc_seen_ = true;
-  }
-
   bool read_record(std::uint64_t index, std::span<const std::byte>& out) {
     const std::uint32_t n = h_.log_read(index, std::span<std::byte>(scratch_.get(), journal::kMaxRecordBytes));
     if (n == 0) return false;
@@ -513,10 +506,6 @@ class Replica {
       on_join_admission(g, now);  // W's copy of a JOIN grant, addressed to the joiner
       return;
     }
-    if (g.request == witness::MsgType::kJoin && g.to_node == self_) {
-      on_join_granted(g.epoch, g.members, g.from_epoch, g.incarnation, now);
-      return;
-    }
     if (g.to_node != self_ || !req_.active || g.request != req_.type || g.from_epoch != req_.from_epoch) {
       ++stats_.ignored_grants;
       return;
@@ -547,69 +536,16 @@ class Replica {
         reloaded_ = true;
         enter_solo(g, now);
         break;
+      case witness::MsgType::kJoin:
+        if (role_ != Role::kSoloPrimary || !join_.active || !join_.join_sent) return;
+        enter_paired_after_join(g, now);
+        break;
       default:
         break;
     }
   }
 
-  // W granted one of the JOINs we relayed in this epoch. Its GRANT does not say which,
-  // so it is accepted while the JOIN is pending and also after we gave it up: W is in
-  // epoch + 1 either way, and only learning that epoch is safe (resuming solo service
-  // in the old one could release records a promoted joiner would not have). The partner
-  // is the joiner of our only JOIN of the epoch. After a second JOIN in one epoch it is
-  // unknown until the backup proves that W's own copy of the grant admitted it (an
-  // admitted HEARTBEAT); without that proof we hear no ACK and go solo.
-  void on_join_granted(std::uint64_t epoch, witness::Members members, std::uint64_t from_epoch, std::uint64_t inc,
-                       Nanos now) {
-    if (inc != cfg_.incarnation || role_ != Role::kSoloPrimary || relays_.count == 0 || relays_.epoch != epoch_ ||
-        from_epoch != epoch_ || epoch != epoch_ + 1 || members != 0b11) {
-      ++stats_.ignored_grants;
-      return;
-    }
-    ++stats_.grants;
-    if (!relays_.pending) SIM_PROBE("repl.join_grant_applied_after_giving_up");
-    if (req_.active && req_.type == witness::MsgType::kJoin) req_.active = false;
-    const std::uint64_t partner = relays_.count == 1 && relays_.pending ? relays_.last_inc : kNoPartner;
-    enter_paired_after_join(epoch, members, partner, relays_.last_index, now);
-  }
-
-  // A REJECT of a JOIN we relayed in this epoch (10 §5).
-  void on_join_rejected(const witness::Reject& r, Nanos now) {
-    if (r.incarnation != cfg_.incarnation || role_ != Role::kSoloPrimary || relays_.count == 0 ||
-        relays_.epoch != epoch_ || r.from_epoch != epoch_) {
-      return;  // not about a JOIN of ours in this epoch
-    }
-    ++stats_.rejects;
-    if (r.epoch == epoch_ && r.primary == self_ && r.members == witness::member_bit(self_)) {
-      // W refused a JOIN of ours and has granted none. In this configuration the only
-      // reason is a joiner incarnation W knows to be superseded (dead). With one JOIN in
-      // the epoch the refusal is its own: give it up and resume solo service. After a
-      // second JOIN it may be a late answer to the first, so the latest stays pending
-      // (retransmitted, paused) unless its joiner is known dead too: then any grant still
-      // to come pairs W with a dead incarnation, which can never take over.
-      if (!relays_.pending) return;
-      if (relays_.count == 1 || (peer_inc_seen_ && peer_inc_max_ > relays_.last_inc)) {
-        relays_.pending = false;
-        if (req_.active && req_.type == witness::MsgType::kJoin) req_.active = false;
-        abandon_joiner();
-        trace(TraceKind::kJoinAbandoned, relays_.last_index);
-      }
-      return;
-    }
-    if (r.epoch == epoch_ + 1 && r.primary == self_ && r.members == 0b11) {
-      // W moved to epoch + 1 by granting one of our JOINs (as its live solo primary of
-      // record, nothing else could) and this is its answer to a later, stale request.
-      on_join_granted(r.epoch, r.members, r.from_epoch, r.incarnation, now);
-      return;
-    }
-    depose();  // W moved on without us
-  }
-
   void on_reject(const witness::Reject& r, Nanos now) {
-    if (r.to_node == self_ && r.request == witness::MsgType::kJoin) {
-      on_join_rejected(r, now);
-      return;
-    }
     if (r.to_node != self_ || !req_.active || r.request != req_.type || r.from_epoch != req_.from_epoch ||
         r.incarnation != cfg_.incarnation) {
       return;
@@ -625,6 +561,16 @@ class Replica {
         break;
       case witness::MsgType::kSolo:
         depose();
+        break;
+      case witness::MsgType::kJoin:
+        if (r.epoch == epoch_ && r.primary == self_ && r.members == witness::member_bit(self_)) {
+          // A rejected JOIN can never be granted later (its checks only get stricter as W's
+          // epoch grows), so the solo primary abandons it and resumes service.
+          req_.active = false;
+          abandon_joiner();
+        } else {
+          depose();
+        }
         break;
       case witness::MsgType::kResume:
         on_resume_rejected(r, now);
@@ -693,26 +639,24 @@ class Replica {
     losing_ = false;
     join_ = {};
     join_window_ = false;
-    relays_ = {};
     fwd_next_.clear();
     last_peer_heard_ = now;
     set_role(Role::kSoloPrimary);
     try_finish_grant();
   }
 
-  void enter_paired_after_join(std::uint64_t epoch, witness::Members members, std::uint64_t partner,
-                               std::uint64_t acked, Nanos now) {
+  void enter_paired_after_join(const witness::Grant& g, Nanos now) {
     ++stats_.joins;
-    epoch_ = epoch;
-    members_ = members;
+    epoch_ = g.epoch;
+    members_ = g.members;
     primary_ = self_;
-    grant_type_ = witness::MsgType::kJoin;
-    peer_inc_ = partner;
-    ack_ = acked;
+    grant_type_ = g.request;
+    peer_inc_ = join_.inc;
+    ack_ = join_.join_last;
     es_pending_ = true;
     losing_ = false;
-    abandon_joiner();  // a catch-up session of another joiner, if any, ends with the epoch
-    relays_ = {};
+    join_ = {};
+    join_window_ = false;
     fwd_next_.clear();
     last_peer_heard_ = now;
     last_ack_progress_ = now;
@@ -802,7 +746,6 @@ class Replica {
   }
 
   void handle(const wire::Ack& k, Nanos now) {
-    note_peer_inc(k.inc);
     if (k.catchup) {
       if (role_ != Role::kSoloPrimary || !join_.active || k.inc != join_.inc || k.epoch != epoch_) return;
       join_.last_heard = now;
@@ -870,20 +813,10 @@ class Replica {
       build_alarmed_ = true;
       if (role_ == Role::kBackup || role_ == Role::kCandidate || role_ == Role::kRecovering) unpromotable_ = true;
     }
-    note_peer_inc(hb.inc);
     const bool peer_primary = hb.role == static_cast<std::uint8_t>(Role::kPrimary) ||
                               hb.role == static_cast<std::uint8_t>(Role::kSoloPrimary);
     switch (role_) {
       case Role::kPrimary:
-        if (peer_inc_ == kNoPartner && hb.admitted && hb.epoch == epoch_ &&
-            hb.role == static_cast<std::uint8_t>(Role::kBackup) && !losing_) {
-          // We could not tell which of our JOINs W granted; W's own copy of the grant
-          // admitted this backup incarnation, so it is the one W recorded.
-          SIM_PROBE("repl.primary_pairs_on_admission_proof");
-          peer_inc_ = hb.inc;
-          stream_.reset(ack_, epoch_, peer_inc_, false, now);
-          last_ack_progress_ = now;
-        }
         if (hb.epoch == epoch_ && hb.inc == peer_inc_) {
           last_peer_heard_ = now;
           if (hb.hash.index != 0) peer_hash(hb.hash);
@@ -942,7 +875,6 @@ class Replica {
 
   void handle(const wire::EpochEndQuery& q, Nanos now) {
     (void)now;
-    note_peer_inc(q.inc);
     wire::EpochEnd r;
     r.from = self_;
     r.query_epoch = q.epoch;
@@ -1068,7 +1000,6 @@ class Replica {
   }
 
   void handle(const wire::CatchupReq& c, Nanos now) {
-    note_peer_inc(c.inc);
     if (role_ != Role::kSoloPrimary || es_pending_) return;
     if (c.build_id != cfg_.build_id) {
       alarm(Alarm::kBuildMismatch, c.build_id);
@@ -1405,7 +1336,7 @@ class Replica {
     // Announce what is released, not just committed: the backup's mirror sessions and
     // its applier then never run ahead of the primary's own Output Rule.
     update_release();
-    if (peer_inc_ != kNoPartner) did |= pump_stream(now, release_);
+    did |= pump_stream(now, release_);
     if (now >= next_hb_) {
       send_heartbeat(peer_inc_);
       next_hb_ = now + cfg_.heartbeat_ns;
@@ -1436,28 +1367,13 @@ class Replica {
     }
     const bool snap_ready = !join_.snap.active || join_.snap.done;
     if (!join_window_ && snap_ready && tail.last_index - join_.acked <= cfg_.join_lag_records) {
-      // 10 §5 step 5: pause sequencing and drain the joiner to zero lag. Release goes on
-      // until it reaches the tail: a joiner applies only what we have released, so its
-      // L2 must otherwise hold everything between our release and our tail, and a disk
-      // stall that holds our durable index back while we sequence can make that more
-      // than its L2 holds. Frozen there, it never reached zero lag (DST-009).
+      // 10 §5 step 5: pause sequencing and release, drain the joiner to zero lag.
       join_window_ = true;
       did = true;
     }
-    // The JOIN leaves only when the joiner holds our whole log and everything in it is
-    // released: from the JOIN on we neither sequence nor release (HotStandby's atomic
-    // Rejoin, with the primary paused), and nothing is left that we would have to.
-    if (join_window_ && !join_.join_sent && release_ < tail.last_index && h_.durable_index() < tail.last_index) {
-      h_.request_flush();  // the tail must be durable to be released before the JOIN
-    }
-    if (join_window_ && !join_.join_sent && join_.acked == tail.last_index && release_ == tail.last_index) {
+    if (join_window_ && !join_.join_sent && join_.acked == tail.last_index) {
       join_.join_sent = true;
       join_.join_last = tail.last_index;
-      if (relays_.epoch != epoch_) relays_ = Relays{epoch_, 0, 0, 0, false};
-      ++relays_.count;
-      relays_.last_inc = join_.inc;
-      relays_.last_index = tail.last_index;
-      relays_.pending = true;
       trace(TraceKind::kRequestJoin, epoch_, tail.last_index, join_.inc);
       request(witness::Join{epoch_, self_, peer_, cfg_.incarnation, join_.inc, tail.last_index}, witness::MsgType::kJoin,
               epoch_, now);
@@ -1523,7 +1439,7 @@ class Replica {
         return false;
       case Phase::kQueryEpochEnd:
         if (now >= next_rejoin_at_) {
-          resend_epoch_end_query(now);
+          send_epoch_end_query(now);
           return true;
         }
         return false;
@@ -1553,17 +1469,8 @@ class Replica {
     send_epoch_end_query(now);
   }
 
-  // A new EPOCH_END question (a new handshake, or the next step of one after a
-  // truncation) gets a new query id; its retransmissions keep it, so an answer to any
-  // copy is accepted however long the round trip, and an answer to an earlier question
-  // never is. Ids start at incarnation << 32, so they never repeat across incarnations.
   void send_epoch_end_query(Nanos now) {
     ++query_id_;
-    resend_epoch_end_query(now);
-  }
-
-  void resend_epoch_end_query(Nanos now) {
-    // The question does not change between copies: the log is not touched until the answer.
     send(wire::EpochEndQuery{self_, h_.log_tail().epoch, cfg_.incarnation, cfg_.build_id, query_id_});
     next_rejoin_at_ = now + cfg_.rejoin_retry_ns;
   }
@@ -1583,12 +1490,6 @@ class Replica {
   // that arrives after we re-handshook with a newer epoch of the primary (it went solo
   // while the copy was in flight) is stale and ignored.
   void on_join_admission(const witness::Grant& g, Nanos now) {
-    if (role_ == Role::kBackup && g.incarnation == cfg_.incarnation && g.epoch == epoch_ && g.primary == primary_ &&
-        witness::is_member(g.members, self_)) {
-      // Admitted already (relay or REJECT); W's copy now proves it recorded us.
-      w_admitted_epoch_ = g.epoch;
-      return;
-    }
     if (g.incarnation != cfg_.incarnation || role_ != Role::kRecovering || !reloaded_ || !joinable() ||
         !witness::is_member(g.members, self_) || g.primary != peer_ || g.from_epoch != catchup_epoch_ ||
         g.epoch != catchup_epoch_ + 1) {
@@ -1597,7 +1498,7 @@ class Replica {
     }
     ++stats_.grants;
     SIM_PROBE("repl.joiner_adopts_join_grant");
-    if (become_backup_after_join(g.epoch, now)) w_admitted_epoch_ = g.epoch;
+    become_backup_after_join(g.epoch, now);
   }
 
   // The joiner becomes the backup of `epoch`. HotStandby's Rejoin gives both logs the
@@ -1622,12 +1523,6 @@ class Replica {
     snap_rx_ = {};
     set_role(Role::kBackup);
     trace(TraceKind::kRejoined, epoch);
-    // The primary counts our ACKs of the new epoch from the catch-up position, and its
-    // T_ack runs from the grant. Acknowledge the EpochStart we hold now: when nothing
-    // follows it (after the close), its APPEND reaches us as a duplicate inside the ACK
-    // rate limit, and the retransmission can come after T_ack (DST-010).
-    send_ack(false);
-    last_ack_sent_ = now;
     return true;
   }
 
@@ -1653,7 +1548,6 @@ class Replica {
     hb.role = static_cast<std::uint8_t>(role_);
     hb.members = members_;
     hb.primary = primary_;
-    hb.admitted = role_ == Role::kBackup && w_admitted_epoch_ != 0 && w_admitted_epoch_ == epoch_;
     send(hb);
   }
 
@@ -1774,22 +1668,12 @@ class Replica {
       case Role::kSoloPrimary: {
         const std::uint64_t durable = h_.durable_index();
         // Solo mode releases only L3-durable records, and nothing before its own
-        // EpochStart is durable (10 §4 step 4; mutant SoloReleaseFromL2). Release goes on
-        // while a joiner drains (sequencing is paused, so it can only catch up with the
-        // tail) and stops from the JOIN on (DST-009).
-        const bool join_pending = relays_.pending && relays_.epoch == epoch_;
-        if (!es_pending_ && !join_pending && durable >= release_gate_) w = std::min(tail, durable);
+        // EpochStart is durable (10 §4 step 4; mutant SoloReleaseFromL2).
+        if (!es_pending_ && !join_window_ && durable >= release_gate_) w = std::min(tail, durable);
         break;
       }
       case Role::kBackup:
         w = std::min(tail, commit_ann_);
-        break;
-      case Role::kRecovering:
-        // A catching-up joiner applies what the primary has released, and its node holds
-        // every output in its egress ring until release covers it (it transmits nothing:
-        // no line, mirror gateways). Held at 0, a catch-up longer than the egress ring and
-        // L2 together stopped the applier, then L2, then the catch-up (DST-011).
-        if (reloaded_ && !(snap_rx_.active && !snap_rx_.installed)) w = std::min(tail, commit_ann_);
         break;
       default:
         break;
@@ -1811,7 +1695,7 @@ class Replica {
   NodeId primary_ = 0;
 
   // Primary.
-  std::uint64_t peer_inc_ = 0;  // backup incarnation we are paired with (kNoPartner: none yet)
+  std::uint64_t peer_inc_ = 0;  // backup incarnation we are paired with
   std::uint64_t ack_ = 0;
   bool losing_ = false;
   Nanos last_ack_progress_ = 0;
@@ -1862,23 +1746,6 @@ class Replica {
 
   // Solo primary: the joiner it serves.
   Joiner join_;
-  // The JOINs this solo primary relayed in its current epoch (10 §5). W grants at most
-  // one JOIN per epoch, but neither its GRANT nor its REJECT names the joiner or its
-  // incarnation, so once a second JOIN is relayed in one epoch an answer cannot be
-  // matched to a JOIN.
-  struct Relays {
-    std::uint64_t epoch = 0;       // our epoch when relayed: the JOINs' from_epoch
-    std::uint32_t count = 0;       // JOINs relayed in that epoch
-    std::uint64_t last_inc = 0;    // the latest one's joiner incarnation
-    std::uint64_t last_index = 0;  // and its last_index
-    bool pending = false;          // the latest is unanswered: sequencing and release stay paused
-  } relays_;
-  // The newest incarnation the peer has shown (ACK, HEARTBEAT, EPOCH_END_QUERY,
-  // CATCHUP_REQ): every older incarnation of it is dead.
-  bool peer_inc_seen_ = false;
-  std::uint64_t peer_inc_max_ = 0;
-  // Joiner: the epoch that W's own copy of a JOIN grant admitted this process to.
-  std::uint64_t w_admitted_epoch_ = 0;
   bool join_window_ = false;
 
   // Common.

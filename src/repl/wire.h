@@ -39,7 +39,7 @@
 //     24 u64 snap_index  32 u64 snap_offset   (catch-up snapshot progress; 0 otherwise)
 //   NACK (24)                                                 flags: 1 catch-up
 //      0 u64 epoch  8 u64 expected_index  16 u64 inc
-//   HEARTBEAT (96)                                            flags: 1 admitted by W's copy
+//   HEARTBEAT (96)
 //      0 u64 epoch  8 u64 last  16 u64 commit  24 u64 applied  32 u64 released
 //     40 u64 durable  48 u64 inc  56 u64 build_id  64 u64 hash_index  72 u64 state_hash
 //     80 u64 partner_inc (a primary: the backup incarnation it is paired with)
@@ -174,9 +174,6 @@ struct Heartbeat {
   std::uint8_t role = 0;
   witness::Members members = 0;
   NodeId primary = 0;
-  // A backup that W's own copy of the JOIN grant admitted (addressed to the incarnation W
-  // recorded): proof for a primary that cannot tell which of its JOINs W granted.
-  bool admitted = false;
   friend bool operator==(const Heartbeat&, const Heartbeat&) = default;
 };
 

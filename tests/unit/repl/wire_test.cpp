@@ -122,7 +122,6 @@ TEST(ReplWire, RoundTripEveryType) {
   hb.durable = 6;
   hb.inc = 5;
   hb.build_id = 4;
-  hb.admitted = true;
   hb.hash = StateHash{3, 2};
   hb.partner_inc = 1;
   hb.role = 2;
