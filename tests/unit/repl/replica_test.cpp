@@ -416,20 +416,33 @@ TEST(Repl, JoinPausesSequencingAndRelease) {
   // Keep the primary busy while B catches up; record every step's view.
   c.restart(kB);
   bool saw_pause = false;
+  bool saw_join = false;
   bool joined = false;
+  // When the JOIN leaves, the primary has released its whole log (DST-009), so from the
+  // JOIN on it neither sequences nor releases.
+  c.to_w_filter = [&](NodeId from, const Bytes& b) {
+    const auto m = witness::decode(b);
+    if (from == kA && m && std::holds_alternative<witness::Join>(*m)) {
+      saw_join = true;
+      EXPECT_EQ(std::get<witness::Join>(*m).last_index, c.host(kA).log.size());
+      EXPECT_EQ(c.rep(kA).release_watermark(), c.host(kA).log.size());
+    }
+    return true;
+  };
   for (int i = 0; i < 2000 && !joined; ++i) {
     c.sequence(kA, 1);
-    const std::uint64_t rel = c.rep(kA).release_watermark();
     c.step();
-    if (c.rep(kA).join_window()) {
+    if (c.rep(kA).role() == Role::kSoloPrimary && c.rep(kA).join_window()) {
+      // Draining: sequencing is paused; release may still catch up with the paused tail.
       saw_pause = true;
       EXPECT_FALSE(c.rep(kA).sequencing_allowed());
-      EXPECT_EQ(c.rep(kA).release_watermark(), rel) << "release moved during the JOIN window";
+      EXPECT_LE(c.rep(kA).release_watermark(), c.host(kA).log.size());
     }
     joined = c.rep(kA).role() == Role::kPrimary;
   }
   ASSERT_TRUE(joined);
   EXPECT_TRUE(saw_pause);
+  EXPECT_TRUE(saw_join);
   ASSERT_TRUE(c.run_until([&] { return c.rep(kB).role() == Role::kBackup; }, 10 * kMs));
   c.run(3 * kMs);
   EXPECT_EQ(c.host(kA).log, c.host(kB).log);
@@ -745,6 +758,51 @@ TEST(Repl, RejoinCompletesWhenTheRoundTripExceedsTheRetransmitInterval) {
   EXPECT_EQ(c.rep(kA).role(), Role::kPrimary);
   EXPECT_EQ(c.host(kA).log, c.host(kB).log);
   EXPECT_EQ(c.rep(kA).backup_ack(), c.host(kA).log.size());
+}
+
+// DST-009. A joiner applies only what its primary has released, so the records between
+// the primary's release and its tail must fit in the joiner's L2 (its cursor follows the
+// applier). A disk stall holds the solo primary's durable index, and so its release,
+// back while it sequences on; the joiner gets within the JOIN lag but its L2 fills up.
+// The primary pauses sequencing to drain the joiner and keeps releasing as its disk
+// catches up, so the joiner can apply, reach zero lag and be joined. When the window
+// also froze the release, neither side could move again.
+TEST(Repl, JoinWindowDrainsAJoinerWhoseL2HoldsLessThanTheUnreleasedTail) {
+  Cluster c;
+  c.sequence(kA, 3);
+  c.run(2 * kMs);
+  c.crash(kB);
+  ASSERT_TRUE(c.run_until([&] { return c.rep(kA).role() == Role::kSoloPrimary && c.rep(kA).sequencing_allowed(); },
+                          60 * kMs));
+  // A's disk stalls: nothing more becomes durable, so nothing more is released.
+  FakeHost& a = c.host(kA);
+  a.durable = a.log.size();
+  a.flush_on_request = false;
+  c.run(1 * kMs);
+  const std::uint64_t released = c.rep(kA).release_watermark();
+  ASSERT_EQ(released, a.log.size());
+  c.sequence(kA, 60);
+  const std::uint64_t tail = a.log.size();
+  // B's L2 holds 55 records past what it applied: enough to get within the JOIN lag (8)
+  // of the tail, not enough to reach it while A's release stays where it is.
+  c.host(kB).l2_cap = 55;
+  ASSERT_LT(released + c.host(kB).l2_cap, tail);
+  ASSERT_GE(released + c.host(kB).l2_cap + c.n[kA].cfg.join_lag_records, tail);
+  c.restart(kB);
+  ASSERT_TRUE(c.run_until([&] { return c.rep(kA).join_window(); }, 200 * kMs)) << "B never got within the JOIN lag";
+  c.run(20 * kMs);
+  EXPECT_EQ(c.rep(kB).role(), Role::kRecovering);
+  EXPECT_LT(c.host(kB).log.size(), tail) << "B's L2 is full";
+  // The stall ends.
+  a.durable = a.log.size();
+  a.flush_on_request = true;
+  ASSERT_TRUE(c.run_until([&] { return c.rep(kB).role() == Role::kBackup; }, 300 * kMs))
+      << "the JOIN window froze A's release: B cannot apply, so it never reaches zero lag";
+  EXPECT_EQ(c.rep(kA).role(), Role::kPrimary);
+  c.sequence(kA, 5);
+  c.run(20 * kMs);
+  EXPECT_EQ(c.host(kA).log, c.host(kB).log);
+  EXPECT_EQ(c.rep(kA).release_watermark(), a.log.size());
 }
 
 // DST-010. After the close the JOIN epoch's EpochStart is the primary's last record. The

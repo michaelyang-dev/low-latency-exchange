@@ -95,26 +95,30 @@ std::expected<Streams<OutDay, typename Io::Reader>, std::string> open_streams(Io
   return s;
 }
 
+// Verifies the regenerated output against the output log as found and appends what
+// follows its end, or, with `defer` (a rejoin's reload), keeps what follows its end in
+// RecoveredDay::deferred for egress to release (DST-013).
 template <class OutDay, class Reader>
 class RegenSink {
  public:
-  RegenSink(Streams<OutDay, Reader>& s, RecoveredDay& d)
-      : s_(&s), d_(&d), scratch_(std::make_unique<std::byte[]>(outlog::kMaxMessageBytes)) {}
-  void itch(std::uint64_t, std::span<const std::byte> b) {
+  RegenSink(Streams<OutDay, Reader>& s, RecoveredDay& d, bool defer = false)
+      : s_(&s), d_(&d), defer_(defer), scratch_(std::make_unique<std::byte[]>(outlog::kMaxMessageBytes)) {}
+  void itch(std::uint64_t idx, std::span<const std::byte> b) {
     ++d_->itch_total;
-    put(s_->itch, b);
+    put(s_->itch, b, idx, md::OutKind::Itch, 0);
   }
-  void ouch(std::uint64_t, std::uint32_t session, std::span<const std::byte> b) {
+  void ouch(std::uint64_t idx, std::uint32_t session, std::span<const std::byte> b) {
     ++d_->soup_total;
     const auto it = std::lower_bound(s_->ids.begin(), s_->ids.end(), session);
     if (it == s_->ids.end() || *it != session) return;
-    put(s_->soup[static_cast<std::size_t>(it - s_->ids.begin())], b);
+    put(s_->soup[static_cast<std::size_t>(it - s_->ids.begin())], b, idx, md::OutKind::Ouch, session);
   }
   void audit(std::uint64_t, const engine::AuditEvent&) {}
   [[nodiscard]] bool failed() const noexcept { return failed_; }
 
  private:
-  void put(Stream<OutDay, Reader>& st, std::span<const std::byte> b) {
+  void put(Stream<OutDay, Reader>& st, std::span<const std::byte> b, std::uint64_t idx, md::OutKind kind,
+           std::uint32_t session) {
     ++st.pos;
     if (st.diverged != 0) return;
     if (st.pos <= st.existing) {
@@ -126,12 +130,18 @@ class RegenSink {
       }
       return;
     }
+    if (defer_) {
+      d_->deferred.push_back(RecoveredDay::DeferredOutput{idx, kind, session, std::vector<std::byte>(b.begin(), b.end())});
+      ++d_->outlog_deferred;
+      return;
+    }
     if (!st.w->append(b)) failed_ = true;
     ++d_->outlog_appended;
   }
 
   Streams<OutDay, Reader>* s_;
   RecoveredDay* d_;
+  bool defer_;
   std::unique_ptr<std::byte[]> scratch_;
   bool failed_ = false;
 };
@@ -302,7 +312,7 @@ template <class Io, class Dir, class OutDay>
 std::expected<RecoveredDay, std::string> basic_replay_day(Io& io, Dir& dir, const journal::RecoveryResult& rr,
                                                           engine::Engine& eng, OutDay& out, const RecoveryLayout& L,
                                                           std::span<const seq::ConfigBlob> expected_config,
-                                                          const std::string& snapshot_dir) {
+                                                          const std::string& snapshot_dir, bool defer_unlogged = false) {
   using namespace recovery_detail;
   using Reader = typename Io::Reader;
   const std::uint64_t last = rr.chain.last_index;
@@ -316,7 +326,7 @@ std::expected<RecoveredDay, std::string> basic_replay_day(Io& io, Dir& dir, cons
     if (!streams) return std::unexpected(streams.error());
     std::map<std::pair<std::uint32_t, std::uint16_t>, bool> live;
     std::vector<std::pair<journal::ConfigTable, std::vector<std::byte>>> tables;
-    RegenSink<OutDay, Reader> regen(*streams, day);
+    RegenSink<OutDay, Reader> regen(*streams, day, defer_unlogged);
     (void)eng.restore({});  // an empty, reset engine
     const std::optional<SnapStart> snap = load_snapshot(io, snapshot_dir, last, eng, out, L);
     std::uint64_t apply_from = 1;
