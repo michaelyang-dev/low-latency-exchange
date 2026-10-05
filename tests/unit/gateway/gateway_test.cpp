@@ -95,6 +95,17 @@ Bytes msg(std::uint8_t tag, std::size_t n = 20) {
   return b;
 }
 
+// A SoupBinTCP Unsequenced Data packet carrying `m` (raw bytes for a connection whose
+// client session has not seen its Login Accepted yet).
+Bytes upacket(const Bytes& m) {
+  Bytes p;
+  p.push_back(static_cast<std::byte>((m.size() + 1) >> 8));
+  p.push_back(static_cast<std::byte>((m.size() + 1) & 0xFF));
+  p.push_back(std::byte{'U'});
+  p.insert(p.end(), m.begin(), m.end());
+  return p;
+}
+
 template <std::size_t OuchCap = 64>
 struct Fixture {
   explicit Fixture(std::uint8_t index = 0, std::string outlog_root = {}, std::size_t ring_msgs = 64) : tbl(table()) {
@@ -126,18 +137,32 @@ struct Fixture {
   void out(std::uint64_t index, std::uint32_t session, std::span<const std::byte> m) {
     ASSERT_TRUE(egress.try_push(index, md::OutKind::Ouch, session, m));
   }
-  std::vector<seq::SessionEventMsg> drain_events() {
-    std::vector<seq::SessionEventMsg> v;
-    seq::SessionEventMsg e;
-    while (events.try_pop(e)) v.push_back(e);
-    return v;
-  }
-  std::vector<seq::InboundMsg> drain_ouch() {
-    std::vector<seq::InboundMsg> v;
+  // The SCQ carries the OUCH messages and, tagged, the session events, in the order the
+  // gateway produced them (DST-004). drain_all() returns that order; drain_events() and
+  // drain_ouch() take one kind and leave the other for the next call.
+  std::vector<seq::InboundMsg> drain_all() {
+    std::vector<seq::InboundMsg> v(popped.begin(), popped.end());
+    popped.clear();
     seq::InboundMsg m;
     while (ouch.try_pop(m)) v.push_back(m);
     return v;
   }
+  std::vector<seq::SessionEventMsg> drain_events() {
+    std::vector<seq::SessionEventMsg> v;
+    for (const seq::InboundMsg& m : drain_all()) {
+      if (seq::is_session_event(m)) v.push_back(seq::session_event_of(m));
+      else popped.push_back(m);
+    }
+    return v;
+  }
+  std::vector<seq::InboundMsg> drain_ouch() {
+    std::vector<seq::InboundMsg> v;
+    std::vector<seq::InboundMsg> events_left;
+    for (const seq::InboundMsg& m : drain_all()) (seq::is_session_event(m) ? events_left : v).push_back(m);
+    popped.assign(events_left.begin(), events_left.end());
+    return v;
+  }
+  std::vector<seq::InboundMsg> popped;
 
   SessionTable tbl;
   typename Env<OuchCap>::OuchQueue ouch;
@@ -431,6 +456,105 @@ TEST(Gateway, LogoutAndDisconnectAreJournaledAndCodTriggerCounted) {
   EXPECT_EQ(f.gw->stats().cod_triggers, 1u);  // BRAVO has cancel-on-disconnect
 }
 
+// DST-004: a connection's Disconnect is queued after every order it sent before it, so
+// cancel-on-disconnect, journaled at the Disconnect, covers them all (the sequencer took
+// 64 OUCH per poll and then the session events when they were separate queues).
+TEST(Gateway, DisconnectIsQueuedAfterEveryOrderItsConnectionSent) {
+  Fixture<256> f;
+  Client c(f.port(), "BRAVO", "bravo-pw");  // cancel-on-disconnect
+  c.connect(f.clock.mono);
+  f.poll();
+  c.read(f.clock.mono);
+  ASSERT_TRUE(c.logged_in);
+  (void)f.drain_all();
+  Bytes burst;
+  for (int i = 0; i < 100; ++i) {
+    const Bytes p = upacket(msg(static_cast<std::uint8_t>(i)));
+    burst.insert(burst.end(), p.begin(), p.end());
+  }
+  f.port().data(c.conn, burst);
+  f.port().peer_close(c.conn);
+  f.poll();
+  const auto q = f.drain_all();
+  ASSERT_EQ(q.size(), 101u);
+  for (std::size_t i = 0; i < 100; ++i) EXPECT_FALSE(seq::is_session_event(q[i])) << i;
+  ASSERT_TRUE(seq::is_session_event(q[100]));
+  EXPECT_EQ(seq::session_event_of(q[100]).event, journal::SessionEventKind::Disconnect);
+  EXPECT_EQ(seq::session_event_of(q[100]).session_id, 2u);
+}
+
+// The mirror image: the session's next connection logs in and sends orders in the same
+// poll as the drop. The queue holds the old connection's orders, its Disconnect, the new
+// Login, then the new orders: the Disconnect cannot cancel what follows the Login.
+TEST(Gateway, AReconnectsLoginIsQueuedAfterTheDropAndBeforeItsOrders) {
+  Fixture<256> f;
+  Client c1(f.port(), "BRAVO", "bravo-pw");
+  c1.connect(f.clock.mono);
+  f.poll();
+  c1.read(f.clock.mono);
+  ASSERT_TRUE(c1.logged_in);
+  (void)f.drain_all();
+  for (int i = 0; i < 10; ++i) c1.send(msg(static_cast<std::uint8_t>(i)), f.clock.mono);
+  f.port().peer_close(c1.conn);
+  Client c2(f.port(), "BRAVO", "bravo-pw", 0);
+  c2.connect(f.clock.mono);  // its Login Request, then its orders in the same read
+  Bytes orders;
+  for (int i = 10; i < 20; ++i) {
+    const Bytes p = upacket(msg(static_cast<std::uint8_t>(i)));
+    orders.insert(orders.end(), p.begin(), p.end());
+  }
+  f.port().data(c2.conn, orders);
+  f.poll(6);
+  const auto q = f.drain_all();
+  ASSERT_EQ(q.size(), 22u);
+  for (std::size_t i = 0; i < 10; ++i) EXPECT_FALSE(seq::is_session_event(q[i])) << i;
+  ASSERT_TRUE(seq::is_session_event(q[10]));
+  EXPECT_EQ(seq::session_event_of(q[10]).event, journal::SessionEventKind::Disconnect);
+  ASSERT_TRUE(seq::is_session_event(q[11]));
+  EXPECT_EQ(seq::session_event_of(q[11]).event, journal::SessionEventKind::Login);
+  for (std::size_t i = 12; i < 22; ++i) {
+    EXPECT_FALSE(seq::is_session_event(q[i])) << i;
+    EXPECT_EQ(std::to_integer<std::uint8_t>(q[i].bytes[1]), i - 2) << "the new connection's orders, in order";
+  }
+}
+
+// An event the full queue refused waits in the gateway's backlog, and the connection's
+// later orders wait behind it: the queue's order stays the gateway's.
+TEST(Gateway, AnEventRefusedByAFullQueueHoldsBackTheOrdersAfterIt) {
+  Fixture<4> f;  // an SCQ of four slots
+  Client a(f.port(), "ALPHA", "alpha-pw");
+  a.connect(f.clock.mono);
+  f.poll();
+  a.read(f.clock.mono);
+  ASSERT_TRUE(a.logged_in);
+  (void)f.drain_all();
+  for (int i = 0; i < 4; ++i) a.send(msg(static_cast<std::uint8_t>(i)), f.clock.mono);
+  f.poll();  // the queue is full
+  Client b(f.port(), "BRAVO", "bravo-pw");
+  b.connect(f.clock.mono);
+  Bytes orders = upacket(msg(0x40));
+  const Bytes second = upacket(msg(0x41));
+  orders.insert(orders.end(), second.begin(), second.end());
+  f.port().data(b.conn, orders);
+  f.poll();
+  b.read(f.clock.mono);
+  ASSERT_TRUE(b.logged_in);
+  EXPECT_EQ(f.drain_all().size(), 4u) << "ALPHA's four orders filled the queue; BRAVO's Login waits in the backlog";
+  std::vector<seq::InboundMsg> q;
+  for (int round = 0; round < 10; ++round) {
+    for (const auto& m : f.drain_all()) q.push_back(m);
+    f.poll();
+  }
+  for (const auto& m : f.drain_all()) q.push_back(m);
+  ASSERT_EQ(q.size(), 3u);
+  ASSERT_TRUE(seq::is_session_event(q[0]));
+  EXPECT_EQ(seq::session_event_of(q[0]).session_id, 2u);
+  EXPECT_EQ(seq::session_event_of(q[0]).event, journal::SessionEventKind::Login);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(q[1].bytes[1]), 0x40);
+  EXPECT_EQ(std::to_integer<std::uint8_t>(q[2].bytes[1]), 0x41);
+  EXPECT_EQ(f.gw->stats().events_dropped, 0u);
+}
+
 TEST(Gateway, FullSequencerQueueStagesInputInOrderAndPausesThePort) {
   Fixture<4> f;  // an SCQ of four slots
   Client c(f.port(), "ALPHA", "alpha-pw");
@@ -438,6 +562,7 @@ TEST(Gateway, FullSequencerQueueStagesInputInOrderAndPausesThePort) {
   f.poll();
   c.read(f.clock.mono);
   ASSERT_TRUE(c.logged_in);
+  (void)f.drain_all();  // the Login (tagged, in the same queue)
   for (std::uint8_t i = 0; i < 40; ++i) c.send(msg(i), f.clock.mono);
   f.poll(4);
   EXPECT_GT(f.gw->stats().mpsc_full, 0u);
@@ -462,6 +587,7 @@ TEST(Gateway, BacklogBeyondThePauseThresholdStopsReadingThePort) {
   f.poll();
   c.read(f.clock.mono);
   ASSERT_TRUE(c.logged_in);
+  (void)f.drain_all();  // the Login (tagged, in the same queue)
   // Fill: two queued, the rest staged until the backlog crosses the threshold.
   for (int i = 0; i < 400; ++i) c.send(msg(1, 100), f.clock.mono);
   for (int i = 0; i < 20; ++i) f.poll(1);

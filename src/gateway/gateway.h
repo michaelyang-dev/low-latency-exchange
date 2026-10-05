@@ -13,9 +13,13 @@
 //     queue is full the connection's remaining input is staged and, once staging runs
 //     low, the port is not read at all, so the kernel's receive buffers fill and TCP
 //     flow control pushes back. Nothing is dropped.
-//   - session events (login / mirror-attach, logout, disconnect) go to the sequencer's
-//     session-event queue; the engine runs cancel-on-disconnect from the journaled
-//     events (05 §4 step 8).
+//   - session events (login / mirror-attach, logout, disconnect) go into the same SCQ as
+//     the OUCH messages, tagged (seq::session_event_inbound), in the order the
+//     connection produced them: the engine runs cancel-on-disconnect from the journaled
+//     events (05 §4 step 8), so a Disconnect must follow every order its connection sent
+//     before it, and a reconnect's Login precede that connection's orders (DST-004). An
+//     event the full queue refused waits in a backlog, and this gateway's later OUCH
+//     waits behind it. (The SessionQueue constructor argument is not used.)
 //   - egress: OUCH outputs are taken from the egress ring (md/egress.h) only once their
 //     journal index is <= the release watermark (Output Rule, ADR-005). A released
 //     message is appended to the session's ReplayStore and sent if the session is
@@ -137,9 +141,9 @@ class Gateway {
   // `next_seq`: (session id, next SoupBinTCP sequence) after recovery, sorted by
   // session id; sessions not listed start at 1.
   Gateway(const GatewayConfig& cfg, const SessionTable& table,
-          std::span<const std::pair<std::uint32_t, SeqNo>> next_seq, OuchQueue& ouch, SessionQueue& events,
+          std::span<const std::pair<std::uint32_t, SeqNo>> next_seq, OuchQueue& ouch, SessionQueue& /*events*/,
           Clock& clock, GatewayShared shared)
-      : cfg_(cfg), table_(&table), ouch_q_(&ouch), event_q_(&events), clock_(&clock), sh_(shared), work_(&clock) {
+      : cfg_(cfg), table_(&table), ouch_q_(&ouch), clock_(&clock), sh_(shared), work_(&clock) {
     LLE_ASSERT(sh_.egress != nullptr && sh_.state != nullptr, "gateway: egress not wired");
     LLE_ASSERT(cfg_.index < md::kGateways, "gateway index");
     for (const SessionSpec& s : table.all()) {
@@ -456,7 +460,9 @@ class Gateway {
   void deliver_inbound(Conn& c, std::span<const std::byte> payload) {
     if (c.session < 0) return;  // ServerSession delivers data only after login
     const SessionSpec& spec = *sessions_[static_cast<std::size_t>(c.session)].spec;
-    if (c.blocked || c.pending_n != 0) {
+    // Behind a session event still waiting for the queue, as behind a blocked push:
+    // the queue holds this gateway's input in its order (DST-004).
+    if (c.blocked || c.pending_n != 0 || !events_.empty()) {
       stage_msg(c, spec, payload);
       return;
     }
@@ -613,6 +619,7 @@ class Gateway {
   }
 
   bool retry_blocked(Nanos now) {
+    if (!events_.empty()) return false;  // the session events go first (DST-004)
     bool did = false;
     for (std::uint32_t i = 0; i < cfg_.tcp.max_conns; ++i) {
       Conn& c = conns_[i];
@@ -646,8 +653,10 @@ class Gateway {
     return did;
   }
 
+  // Session events travel in the OUCH queue, behind every OUCH this gateway pushed
+  // before them (seq::session_event_inbound, DST-004).
   void push_event(const seq::SessionEventMsg& ev) {
-    if (events_.empty() && event_q_->try_push(ev)) return;
+    if (events_.empty() && ouch_q_->try_push(seq::session_event_inbound(ev))) return;
     if (!events_.push(ev)) {
       ++stats_.events_dropped;
       NLOG_ERROR("gw{} session event backlog full: event for session {} lost", cfg_.index, ev.session_id);
@@ -655,7 +664,7 @@ class Gateway {
   }
   bool retry_events() {
     bool did = false;
-    while (!events_.empty() && event_q_->try_push(events_.front())) {
+    while (!events_.empty() && ouch_q_->try_push(seq::session_event_inbound(events_.front()))) {
       work_.start();
       work_.add();
       events_.pop();
@@ -742,7 +751,6 @@ class Gateway {
   GatewayConfig cfg_;
   const SessionTable* table_;
   OuchQueue* ouch_q_;
-  SessionQueue* event_q_;
   Clock* clock_;
   GatewayShared sh_;
   Net net_;

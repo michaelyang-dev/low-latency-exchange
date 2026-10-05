@@ -182,6 +182,75 @@ TEST(Sequencer, SessionAndAdminRecordsCarryTheirFields) {
   EXPECT_EQ(std::memcmp(ad->args.data(), "HALT!", 5), 0);
 }
 
+// DST-004: session events travel in the OUCH queue, tagged, and are journaled in that
+// queue's order, across poll and batch boundaries: a Disconnect after every OUCH its
+// producer pushed before it (cancel-on-disconnect covers them), the next Login before
+// the orders that follow it. Events from the separate queue still work (after the
+// OUCH queue's batch, as before).
+TEST(Sequencer, TaggedSessionEventsKeepTheirQueueOrder) {
+  SequencerConfig cfg;
+  cfg.ouch_batch = 16;  // the queue's 62 entries take four polls
+  Rig rig(std::size_t{1} << 20, {}, cfg);
+  rig.start();
+  (void)rig.take();
+  struct Want {
+    RecordType type;
+    std::uint32_t session;
+    std::uint16_t instance;
+  };
+  std::vector<Want> want;
+  for (std::uint8_t i = 0; i < 50; ++i) {
+    ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(5, i)));
+    want.push_back({RecordType::OuchInbound, 5, 1});
+  }
+  ASSERT_TRUE(rig.ouch->try_push(session_event_inbound(SessionEventMsg{5, 1, journal::SessionEventKind::Disconnect, 0})));
+  want.push_back({RecordType::SessionEvent, 5, 1});
+  ASSERT_TRUE(rig.ouch->try_push(session_event_inbound(SessionEventMsg{5, 1, journal::SessionEventKind::Login, 51})));
+  want.push_back({RecordType::SessionEvent, 5, 1});
+  for (std::uint8_t i = 0; i < 10; ++i) {
+    ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(5, static_cast<std::uint8_t>(100 + i))));
+    want.push_back({RecordType::OuchInbound, 5, 1});
+  }
+  ASSERT_TRUE(rig.sessions->try_push(SessionEventMsg{9, 3, journal::SessionEventKind::Logout, 0}));
+  for (int i = 0; i < 8 && rig.seq->poll(); ++i) {
+  }
+  const auto recs = rig.take();
+  ASSERT_EQ(recs.size(), want.size() + 1);
+  std::size_t k = 0;
+  for (std::size_t i = 0; i < recs.size(); ++i) {
+    const RecordView v(recs[i]);
+    if (v.type() == RecordType::SessionEvent && journal::decode_session_event(v)->session_id == 9) {
+      EXPECT_EQ(i, 16u) << "the separate queue's event: after the first poll's OUCH batch";
+      continue;
+    }
+    ASSERT_LT(k, want.size());
+    EXPECT_EQ(v.type(), want[k].type) << "record " << i;
+    if (v.type() == RecordType::SessionEvent) {
+      const auto se = journal::decode_session_event(v);
+      ASSERT_TRUE(se.has_value());
+      EXPECT_EQ(se->session_id, want[k].session);
+      EXPECT_EQ(se->instance, want[k].instance);
+      EXPECT_EQ(se->event, k == 50 ? journal::SessionEventKind::Disconnect : journal::SessionEventKind::Login);
+      EXPECT_EQ(se->requested_seq, k == 50 ? 0u : 51u);
+    } else {
+      EXPECT_EQ(journal::decode_ouch_inbound(v)->session_id, want[k].session);
+    }
+    ++k;
+  }
+  EXPECT_EQ(k, want.size());
+  EXPECT_EQ(rig.seq->stats().session_events, 3u);
+  EXPECT_EQ(rig.seq->stats().ouch, 60u);
+  // The tag round-trips.
+  const InboundMsg t = session_event_inbound(SessionEventMsg{7, 2, journal::SessionEventKind::InstanceDown, 0xABCDEF});
+  EXPECT_TRUE(is_session_event(t));
+  EXPECT_FALSE(is_session_event(Rig::ouch_msg(7, 0)));
+  const SessionEventMsg back = session_event_of(t);
+  EXPECT_EQ(back.session_id, 7u);
+  EXPECT_EQ(back.instance, 2u);
+  EXPECT_EQ(back.event, journal::SessionEventKind::InstanceDown);
+  EXPECT_EQ(back.requested_seq, 0xABCDEFu);
+}
+
 TEST(Sequencer, TimersAreInjectedWhenTheClockPassesThem) {
   const Nanos t0 = 1'790'000'000'000'000'000;
   std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::SystemEvent, 1},
@@ -386,6 +455,61 @@ TEST(Sequencer, FirstEventsWaitOutBackpressureAndSurviveResume) {
   EXPECT_EQ(RecordView(recs[3]).type(), RecordType::Timer);
   EXPECT_EQ(RecordView(recs[4]).type(), RecordType::OuchInbound);
   EXPECT_EQ(rig.seq->first_pending(), 0u);
+}
+
+// A promotion's re-injected input (the backup's pending FORWARDs) goes ahead of the OUCH
+// queue, where a gateway may have queued newer input of the same session meanwhile; after
+// the session events that go first and after due timers, like all input. A full ring
+// holds it back without reordering.
+TEST(Sequencer, ReinjectedInputGoesAheadOfTheQueueAfterDueTimers) {
+  const Nanos t0 = 1'790'000'000'000'000'000;
+  std::vector<ScheduleEntry> sched{{t0 + 1000, journal::TimerKind::Cross, 1}};
+  Rig rig(256 * 1024, sched);
+  rig.clock.real = t0;
+  rig.start();
+  (void)rig.take(0);
+  (void)rig.take(1);
+  ASSERT_TRUE(rig.ouch->try_push(Rig::ouch_msg(4, 0xC0)));  // queued first, but newer
+  rig.seq->reserve_ahead(3);
+  rig.seq->reserve_first(1);
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(4, 0xA0)));
+  ASSERT_TRUE(rig.seq->inject_ahead(session_event_inbound(SessionEventMsg{4, 1, journal::SessionEventKind::Disconnect, 0})));
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(4, 0xB0)));
+  ASSERT_TRUE(rig.seq->inject_first(SessionEventMsg{9, 0, journal::SessionEventKind::InstanceDown, 0}));
+  EXPECT_EQ(rig.seq->ahead_pending(), 3u);
+  rig.clock.real = t0 + 5000;  // the cross is due
+  EXPECT_TRUE(rig.seq->poll());
+  const auto recs = rig.take(0);
+  using enum RecordType;
+  ASSERT_EQ(types(recs), (std::vector<RecordType>{SessionEvent, Timer, OuchInbound, SessionEvent, OuchInbound, OuchInbound}));
+  EXPECT_EQ(journal::decode_session_event(RecordView(recs[0]))->event, journal::SessionEventKind::InstanceDown);
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[2]))->msg[0], std::byte{0xA0});
+  EXPECT_EQ(journal::decode_session_event(RecordView(recs[3]))->event, journal::SessionEventKind::Disconnect);
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[4]))->msg[0], std::byte{0xB0});
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(recs[5]))->msg[0], std::byte{0xC0});
+  EXPECT_EQ(rig.seq->stats().ahead, 3u);
+  EXPECT_EQ(rig.seq->ahead_pending(), 0u);
+  EXPECT_GE(rig.seq->ahead_capacity(), 3u);
+  // A full ring: the list waits, staged, and keeps its place ahead of the queue.
+  std::uint32_t pushed = 0;
+  for (int round = 0; round < 100 && rig.seq->stats().backpressure == 0; ++round) {
+    while (rig.ouch->try_push(Rig::ouch_msg(pushed % 3, 1))) ++pushed;
+    (void)rig.seq->poll();
+    (void)rig.take(0);
+  }
+  ASSERT_GT(rig.seq->stats().backpressure, 0u);
+  std::vector<std::vector<std::byte>> drained;
+  (void)rig.take(0);
+  // Whatever the queue still holds was queued before; the re-injected one goes before it.
+  ASSERT_TRUE(rig.seq->inject_ahead(Rig::ouch_msg(7, 0xD0)));
+  (void)rig.take(1);
+  EXPECT_TRUE(rig.seq->poll());
+  const auto after = rig.take(0);
+  ASSERT_GE(after.size(), 2u);
+  // The order staged when the ring filled is emitted first (it was taken before the
+  // re-injection), then the re-injected one, then the rest of the queue.
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[0]))->msg[0], std::byte{1});
+  EXPECT_EQ(journal::decode_ouch_inbound(RecordView(after[1]))->msg[0], std::byte{0xD0});
 }
 
 // DST-008: a node that takes over, joins or resumes after the close resumes the sequencer

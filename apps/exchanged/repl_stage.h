@@ -534,16 +534,16 @@ class BasicReplStage {
   // behind it they would carry lower UserRefNums than orders already taken and be
   // ignored as resends (Sequencer::inject_ahead).
   bool inject(const repl::wire::Forward& f) {
-    if (f.kind == repl::wire::ForwardKind::kSessionEvent) {
-      return sh_->events.try_push(seq::SessionEventMsg{f.session_id, f.instance,
-                                                       static_cast<journal::SessionEventKind>(f.event),
-                                                       f.requested_seq});
-    }
     seq::InboundMsg m;
-    gw::make_inbound(m, f.session_id, f.account, f.instance, f.bytes, 0);
-    // The backup's gateway flagged it (an over-long packet, truncated there): the record
-    // carries exactly the flags a direct submission would have (wire::Forward::record_flags).
-    m.flags = static_cast<std::uint16_t>(m.flags | f.record_flags);
+    if (f.kind == repl::wire::ForwardKind::kSessionEvent) {
+      m = seq::session_event_inbound(seq::SessionEventMsg{f.session_id, f.instance,
+                                                          static_cast<journal::SessionEventKind>(f.event), f.requested_seq});
+    } else {
+      gw::make_inbound(m, f.session_id, f.account, f.instance, f.bytes, 0);
+      // The backup's gateway flagged it (an over-long packet, truncated there): the record
+      // carries exactly the flags a direct submission would have (wire::Forward::record_flags).
+      m.flags = static_cast<std::uint16_t>(m.flags | f.record_flags);
+    }
     if (reinjecting()) return queue_ahead(m);
     return sh_->ouch.try_push(m);
   }
@@ -621,7 +621,8 @@ class BasicReplStage {
   // first one's): through the input queue, in order, behind any due Timer.
   bool push_instance_down() {
     bool did = false;
-    while (down_next_ < pending_down_.size() && sh_->events.try_push(pending_down_[down_next_])) {
+    while (down_next_ < pending_down_.size() &&
+           sh_->ouch.try_push(seq::session_event_inbound(pending_down_[down_next_]))) {
       work_.start();
       work_.add();
       ++down_next_;
@@ -649,7 +650,8 @@ class BasicReplStage {
       if (!staged_) {
         if (sh_->ouch.try_pop(staged_msg_)) {
           staged_ = true;
-          staged_event_ = false;
+          staged_event_ = seq::is_session_event(staged_msg_);
+          if (staged_event_) staged_ev_ = seq::session_event_of(staged_msg_);
         } else if (sh_->events.try_pop(staged_ev_)) {
           staged_ = true;
           staged_event_ = true;
@@ -689,8 +691,8 @@ class BasicReplStage {
   // behind whatever the core re-injects (its pending FORWARDs, in order).
   bool reinject_staged() {
     if (!staged_ || replica_->pending_forwards() != 0) return false;
-    const bool ok = staged_event_ ? sh_->events.try_push(staged_ev_)
-                                  : (reinjecting() ? queue_ahead(staged_msg_) : sh_->ouch.try_push(staged_msg_));
+    const seq::InboundMsg m = staged_event_ ? seq::session_event_inbound(staged_ev_) : staged_msg_;
+    const bool ok = reinjecting() ? queue_ahead(m) : sh_->ouch.try_push(m);
     if (ok) {
       work_.start();
       work_.add();
