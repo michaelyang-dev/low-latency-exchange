@@ -16,7 +16,7 @@ lle_test(sim_test
 # 09 §9 PR determinism check: 128 seeds, each run twice, identical hashes.
 add_test(NAME sim_determinism_128x2
   COMMAND exsim --seed=1000 --seeds=128 --check-determinism --quiet --exclude-world=exchange,exchange_ha)
-set_tests_properties(sim_determinism_128x2 PROPERTIES LABELS "unit;sim" TIMEOUT 900)
+set_tests_properties(sim_determinism_128x2 PROPERTIES LABELS "unit;sim" TIMEOUT ${LLE_SIM_SLOW_TEST_TIMEOUT})
 # The exchange world has its own determinism test (sim/CMakeLists.txt): fewer seeds.
 
 # Ledger and campaign tooling self-tests (python, no third-party modules
@@ -27,7 +27,7 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME sim_ledger_tools_selftest
     COMMAND ${Python3_EXECUTABLE} "${_lle_repo}/tools/ledger/selftest.py" --exsim $<TARGET_FILE:exsim>
     WORKING_DIRECTORY "${_lle_repo}")
-  set_tests_properties(sim_ledger_tools_selftest PROPERTIES LABELS "unit;tools" TIMEOUT 600)
+  set_tests_properties(sim_ledger_tools_selftest PROPERTIES LABELS "unit;tools" TIMEOUT ${LLE_SIM_SLOW_TEST_TIMEOUT})
   # Uncommitted fixes: every counted bug's found_patch must still apply (verify_bugs.py).
   add_test(NAME sim_ledger_found_patches_apply
     COMMAND ${Python3_EXECUTABLE} "${_lle_repo}/tools/ledger/check_found_patches.py"

@@ -98,10 +98,10 @@ lle_app(exsim SOURCES main.cpp DEPS lle_sim_worlds)
 if(LLE_BUILD_TESTS AND TARGET lle_sim_exchange)
   add_test(NAME sim_determinism_exchange_16x2
     COMMAND exsim --world=exchange --seed=1000 --seeds=16 --check-determinism --quiet)
-  set_tests_properties(sim_determinism_exchange_16x2 PROPERTIES LABELS "unit;sim" TIMEOUT 900)
+  set_tests_properties(sim_determinism_exchange_16x2 PROPERTIES LABELS "unit;sim" TIMEOUT ${LLE_SIM_SLOW_TEST_TIMEOUT})
   if(LLE_SIM_EXCHANGE_HA)
     add_test(NAME sim_determinism_exchange_ha_8x2
       COMMAND exsim --world=exchange_ha --seed=1000 --seeds=8 --check-determinism --quiet)
-    set_tests_properties(sim_determinism_exchange_ha_8x2 PROPERTIES LABELS "unit;sim" TIMEOUT 900)
+    set_tests_properties(sim_determinism_exchange_ha_8x2 PROPERTIES LABELS "unit;sim" TIMEOUT ${LLE_SIM_SLOW_TEST_TIMEOUT})
   endif()
 endif()

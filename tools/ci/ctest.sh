@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Runs ctest with the given arguments. When tests fail, each one is also reported as a
-# GitHub Actions error annotation, so the names can be read without the job log.
+# Runs ctest with the given arguments. When tests fail, they are also reported as GitHub
+# Actions error annotations (every name, and the end of each failed test's output), so
+# they can be read without the job log (ctest_annotate.py).
 set -u
 ctest "$@"
 rc=$?
@@ -11,9 +12,6 @@ if [ "$rc" -ne 0 ]; then
     [ "$prev" = "--test-dir" ] && dir="$a"
     prev="$a"
   done
-  failed="$dir/Testing/Temporary/LastTestsFailed.log"
-  if [ -f "$failed" ]; then
-    while IFS= read -r line; do echo "::error::ctest failed: ${line#*:}"; done < "$failed"
-  fi
+  python3 "$(dirname "$0")/ctest_annotate.py" "$dir" || true
 fi
 exit "$rc"

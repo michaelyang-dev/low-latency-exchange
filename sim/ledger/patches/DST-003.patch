@@ -293,7 +293,20 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
    }
  
    // The joiner becomes the backup of `epoch`. HotStandby's Rejoin gives both logs the
-@@ -1641,7 +1542,6 @@
+@@ -1616,12 +1517,6 @@
+     snap_rx_ = {};
+     set_role(Role::kBackup);
+     trace(TraceKind::kRejoined, epoch);
+-    // The primary counts our ACKs of the new epoch from the catch-up position, and its
+-    // T_ack runs from the grant. Acknowledge the EpochStart we hold now: when nothing
+-    // follows it (after the close), its APPEND reaches us as a duplicate inside the ACK
+-    // rate limit, and the retransmission can come after T_ack (DST-010).
+-    send_ack(false);
+-    last_ack_sent_ = now;
+     return true;
+   }
+ 
+@@ -1647,7 +1542,6 @@
      hb.role = static_cast<std::uint8_t>(role_);
      hb.members = members_;
      hb.primary = primary_;
@@ -301,7 +314,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
      send(hb);
    }
  
-@@ -1762,11 +1662,8 @@
+@@ -1768,22 +1662,12 @@
        case Role::kSoloPrimary: {
          const std::uint64_t durable = h_.durable_index();
          // Solo mode releases only L3-durable records, and nothing before its own
@@ -315,7 +328,18 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
          break;
        }
        case Role::kBackup:
-@@ -1792,7 +1689,7 @@
+         w = std::min(tail, commit_ann_);
+-        break;
+-      case Role::kRecovering:
+-        // A catching-up joiner applies what the primary has released, and its node holds
+-        // every output in its egress ring until release covers it (it transmits nothing:
+-        // no line, mirror gateways). Held at 0, a catch-up longer than the egress ring and
+-        // L2 together stopped the applier, then L2, then the catch-up (DST-011).
+-        if (reloaded_ && !(snap_rx_.active && !snap_rx_.installed)) w = std::min(tail, commit_ann_);
+         break;
+       default:
+         break;
+@@ -1805,7 +1689,7 @@
    NodeId primary_ = 0;
  
    // Primary.
@@ -324,7 +348,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
    std::uint64_t ack_ = 0;
    bool losing_ = false;
    Nanos last_ack_progress_ = 0;
-@@ -1842,23 +1739,6 @@
+@@ -1855,23 +1739,6 @@
  
    // Solo primary: the joiner it serves.
    Joiner join_;

@@ -1727,6 +1727,20 @@ class Trial {
 
 }  // namespace detail
 
-inline TrialResult run_trial(const std::string& cls, const TrialOptions& o) { return detail::Trial(cls, o).run(); }
+// free_port's ports are free when picked, and a test running in parallel can take one
+// before a node binds it. A trial whose node could not start for that reason never ran:
+// it is repeated, in a fresh directory, with new ports (at most twice).
+inline TrialResult run_trial(const std::string& cls, const TrialOptions& o) {
+  for (int attempt = 0;; ++attempt) {
+    TrialOptions a = o;
+    if (attempt > 0) a.dir = o.dir / ("retry" + std::to_string(attempt));
+    TrialResult r = detail::Trial(cls, a).run();
+    const bool port_taken =
+        !r.pass && std::any_of(r.violations.begin(), r.violations.end(), [](const std::string& v) {
+          return v.rfind("a node did not start", 0) == 0 && v.find("Address already in use") != std::string::npos;
+        });
+    if (!port_taken || attempt == 2) return r;
+  }
+}
 
 }  // namespace lle::exch::test::ha

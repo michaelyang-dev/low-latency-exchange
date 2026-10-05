@@ -143,6 +143,8 @@ bugs:
       also reverts the later EPOCH_END query-id fix (not part of DST-003, found by integration
       tests): it changes this seed's trajectory, and the found tree is the tree the seed was
       found at.
+      The found patch also reverts DST-010's and DST-011's fixes (later, src/repl/replica.h):
+      with them this seed fails O-LIVE at event 14123409 instead.
   - id: DST-004
     title: "cancel-on-disconnect leaves a dropped connection's orders open: its Disconnect is journaled before OUCH it sent earlier (and a reconnect's orders before the old Disconnect, which cancels them)"
     component: sequencer
@@ -332,6 +334,8 @@ bugs:
       regression test drives HaOrderEntry: an unsolicited cancel of an order with a pending
       Cancel, and a 'C'/'U' after 'P', release the earlier Enter Order at the found tree and
       leave it pending at the fix.
+      The found patch also reverts DST-010's and DST-011's fixes (later, src/repl/replica.h):
+      with them this seed fails O-EXACTLY-ONCE at event 792053 with another message.
   - id: DST-008
     title: "a takeover, JOIN or RESUME after the day's DayEnd restarted the sequencer: InstanceDowns, input and another DayEnd were journaled after DayEnd"
     component: exchanged
@@ -374,6 +378,8 @@ bugs:
       simulator with no clients and no faults: the day ends, the primary dies, the backup
       takes over; at the found tree its journal holds a SessionEvent and DayEnds after DayEnd,
       at the fix only the new epoch's EpochStart.
+      The found patch also reverts DST-010's and DST-011's fixes (later, src/repl/replica.h):
+      with them this seed fails O-STREAM at event 481988 instead.
   - id: DST-009
     title: "the JOIN window froze a solo primary's release while its joiner, which may apply only up to that release, needed L2 room to drain: no JOIN and no release for the rest of the day"
     component: repl
@@ -418,6 +424,9 @@ bugs:
       the solo primary and a joiner whose L2 holds 55 records past what it applied; at the
       found tree the window freezes release and the joiner never becomes backup, at the fix
       it drains and the pair forms.
+      The found patch also reverts DST-010's and DST-011's fixes (later, src/repl/replica.h):
+      with them this seed no longer fails. It keeps the repl harness's l2_cap (test
+      infrastructure that later tests use; exsim does not use it).
   - id: DST-010
     title: "a node that became the backup after a JOIN did not acknowledge the JOIN epoch's EpochStart until something followed it: after the close the primary's T_ack ran out, it went solo and deposed the new backup, at every rejoin for the rest of the day"
     component: repl
@@ -470,7 +479,10 @@ bugs:
       rto 3.9 ms, T_ack 4 ms, 200 us link latency and nothing sequenced after the JOIN: at
       the found tree the primary's ACK stays one short of the EpochStart, it goes solo and
       the backup is deposed; at the fix the pair holds. A unit test
-      (Repl.NewBackupAcknowledgesTheJoinEpochStartAtOnce) sweeps rto and latency.
+      (Repl.NewBackupAcknowledgesTheJoinEpochStartAtOnce) sweeps rto and latency. The
+      found patch also reverts DST-011's fix (found in the same campaign): it changes this
+      seed's trajectory (O-LIVE at event 2591355 instead of 2586621), and the found tree is
+      the tree the seed was found at.
   - id: DST-011
     title: "a recovering joiner released nothing until it became the backup, so its engine stopped once its egress ring was full and its L2 then refused the catch-up: a catch-up longer than the two rings never reached zero lag and no JOIN followed"
     component: repl

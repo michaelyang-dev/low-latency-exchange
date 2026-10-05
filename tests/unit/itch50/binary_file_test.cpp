@@ -59,7 +59,7 @@ void expect_records(Reader& r, const std::vector<std::vector<std::byte>>& expect
     const Record rec = r.next();
     ASSERT_EQ(rec.status, expected[i].empty() ? RecordStatus::EndOfSession : RecordStatus::Message) << i;
     ASSERT_EQ(rec.data.size(), expected[i].size()) << i;
-    ASSERT_EQ(std::memcmp(rec.data.data(), expected[i].data(), expected[i].size()), 0) << i;
+    if (!expected[i].empty()) ASSERT_EQ(std::memcmp(rec.data.data(), expected[i].data(), expected[i].size()), 0) << i;
   }
   EXPECT_EQ(r.next().status, RecordStatus::EndOfFile);
   EXPECT_EQ(r.next().status, RecordStatus::EndOfFile);

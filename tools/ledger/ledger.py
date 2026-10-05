@@ -155,9 +155,64 @@ def _strip_comment(line: str) -> str:
     return line.rstrip()
 
 
+_BLOCK_HEAD = re.compile(r"^(?P<head>\s*(?:- )?[A-Za-z_][A-Za-z0-9_-]*:)\s*(?P<style>[>|])(?P<chomp>[+-]?)$")
+
+
+def _block_scalars(text: str) -> tuple[list[str], dict[str, str]]:
+    """Replaces each folded (>) or literal (|) block scalar by a token line.
+
+    The body is taken from the raw lines, before comments are stripped: a '#' in it
+    is text. Clip and strip chomping; '+' keeps the final line break like clip.
+    """
+    raw = text.splitlines()
+    out: list[str] = []
+    blocks: dict[str, str] = {}
+    i = 0
+    while i < len(raw):
+        m = _BLOCK_HEAD.match(_strip_comment(raw[i]))
+        if not m:
+            out.append(raw[i])
+            i += 1
+            continue
+        line = raw[i]
+        key_indent = len(line) - len(line.lstrip(" ")) + (2 if line.lstrip(" ").startswith("- ") else 0)
+        i += 1
+        body: list[str] = []
+        while i < len(raw) and (not raw[i].strip() or len(raw[i]) - len(raw[i].lstrip(" ")) > key_indent):
+            body.append(raw[i])
+            i += 1
+        while body and not body[-1].strip():
+            body.pop()
+        ind = min((len(b) - len(b.lstrip(" ")) for b in body if b.strip()), default=0)
+        texts = [b[ind:].rstrip() if b.strip() else "" for b in body]
+        if m["style"] == "|":
+            value = "\n".join(texts)
+        else:
+            parts: list[str] = []
+            for t in texts:
+                if not t:
+                    parts.append("\n")
+                else:
+                    if parts and parts[-1] != "\n":
+                        parts.append(" ")
+                    parts.append(t)
+            value = "".join(parts)
+        if m["chomp"] != "-" and body:
+            value += "\n"
+        token = f"\x00block{len(blocks)}"
+        blocks[token] = value
+        out.append(f"{m['head']} {token}")
+    return out, blocks
+
+
 def parse_yaml_subset(text: str) -> Any:
+    raw_lines, blocks = _block_scalars(text)
+
+    def _value(tok: str) -> Any:
+        return blocks[tok.strip()] if tok.strip() in blocks else _scalar(tok)
+
     lines = []
-    for raw in text.splitlines():
+    for raw in raw_lines:
         s = _strip_comment(raw)
         if s.strip():
             lines.append((len(s) - len(s.lstrip(" ")), s.strip()))
@@ -180,7 +235,7 @@ def parse_yaml_subset(text: str) -> Any:
                     out_list.append(block(indent + 2))
                 else:
                     pos += 1
-                    out_list.append(_scalar(content))
+                    out_list.append(_value(content))
             return out_list
         out_map: dict[str, Any] = {}
         while pos < len(lines) and lines[pos][0] == indent and not lines[pos][1].startswith("- "):
@@ -188,7 +243,7 @@ def parse_yaml_subset(text: str) -> Any:
             pos += 1
             rest = rest.strip()
             if rest:
-                out_map[key.strip()] = _scalar(rest)
+                out_map[key.strip()] = _value(rest)
             elif pos < len(lines) and lines[pos][0] > indent:
                 out_map[key.strip()] = block(lines[pos][0])
             elif pos < len(lines) and lines[pos][0] == indent and lines[pos][1].startswith("- "):

@@ -45,11 +45,17 @@ def test_ledger() -> None:
     data = ledger.load(EXAMPLE)
     check(ledger.validate(data) == [], f"example validates: {ledger.validate(data)}")
     check(len(ledger.counted(data)) == 1, "one counted bug in example")
+    sample = ("a: >-\n  one two\n  three # not a comment\n\n  four\nb: |\n  x\n  y\nc: 1\n"
+              "d:\n  - e: >\n      folded\n      text\n    f: 2\n")
+    check(ledger.parse_yaml_subset(sample) == {"a": "one two three # not a comment\nfour", "b": "x\ny\n", "c": 1,
+                                               "d": [{"e": "folded text\n", "f": 2}]},
+          f"fallback parser reads block scalars: {ledger.parse_yaml_subset(sample)}")
     try:
         import yaml  # type: ignore
 
-        check(ledger.parse_yaml_subset(EXAMPLE.read_text()) == yaml.safe_load(EXAMPLE.read_text()),
-              "fallback parser agrees with PyYAML")
+        for f in (EXAMPLE, ledger.DEFAULT_LEDGER):
+            check(ledger.parse_yaml_subset(f.read_text()) == yaml.safe_load(f.read_text()),
+                  f"fallback parser agrees with PyYAML on {f.name}")
     except ImportError:
         pass
     real = ledger.load(ledger.DEFAULT_LEDGER)

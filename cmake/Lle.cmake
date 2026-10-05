@@ -1,5 +1,14 @@
 # Helper functions shared by every module.
 
+# ctest TIMEOUT of the tests that run exsim at length (determinism double-runs, the ledger
+# self-test): a Debug sanitizer build runs them many times slower (GCC's ASan on arm64:
+# about 16 minutes for 128 determinism seeds).
+if(LLE_SANITIZE)
+  set(LLE_SIM_SLOW_TEST_TIMEOUT 3600)
+else()
+  set(LLE_SIM_SLOW_TEST_TIMEOUT 900)
+endif()
+
 # True in OUT if path REL (relative to the source root) passes the LLE_ONLY
 # filter: a list of path prefixes (e.g. "src/common;src/proto/itch50"). A
 # directory is kept if it lies under a prefix or is an ancestor of one.

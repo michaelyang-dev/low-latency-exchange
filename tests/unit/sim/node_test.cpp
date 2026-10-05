@@ -44,8 +44,8 @@ Node& make(World& w, Tally& t, NodeOptions o = {}) {
 }
 
 TEST(Node, BootCreatesProcessAndRegistersStages) {
+  Tally t;  // outlives w: the processes w destroys count into it
   World w(1, base_fault_config());
-  Tally t;
   Node& n = make(w, t);
   n.boot();
   EXPECT_TRUE(n.alive());
@@ -56,8 +56,8 @@ TEST(Node, BootCreatesProcessAndRegistersStages) {
 }
 
 TEST(Node, CrashDropsMemoryAndRestartRunsRecovery) {
+  Tally t;  // outlives w: the processes w destroys count into it
   World w(2, base_fault_config());
-  Tally t;
   Node& n = make(w, t);
   n.boot();
   test::run_for(w, kMs);
@@ -83,8 +83,8 @@ TEST(Node, CrashDropsMemoryAndRestartRunsRecovery) {
 }
 
 TEST(Node, PauseFreezesPollingForItsDuration) {
+  Tally t;  // outlives w: the processes w destroys count into it
   World w(3, base_fault_config());
-  Tally t;
   Node& n = make(w, t);
   n.boot();
   test::run_for(w, kMs);
@@ -102,8 +102,8 @@ TEST(Node, PauseFreezesPollingForItsDuration) {
 }
 
 TEST(Node, ProcessAbortIsDeferredAndSupervisorRestarts) {
+  Tally t;  // outlives w: the processes w destroys count into it
   World w(4, base_fault_config());
-  Tally t;
   Node& n = make(w, t);
   t.crash_me = &n;
   n.boot();
@@ -119,9 +119,8 @@ TEST(Node, ProcessAbortIsDeferredAndSupervisorRestarts) {
 }
 
 TEST(Node, HealRestartsCrashedAndResumesPausedNodes) {
+  Tally ta, tb;  // outlive w: the processes w destroys count into them
   World w(5, base_fault_config());
-  Tally ta;
-  Tally tb;
   Node& a = make(w, ta);
   Node& b = make(w, tb);
   a.boot();
@@ -136,8 +135,8 @@ TEST(Node, HealRestartsCrashedAndResumesPausedNodes) {
 }
 
 TEST(Node, WorkloadStreamsDifferPerIncarnation) {
+  Tally t;  // outlives w: the processes w destroys count into it
   World w(6, base_fault_config());
-  Tally t;
   Node& n = make(w, t);
   n.boot();
   const std::uint64_t first = n.rng(0).next_u64();

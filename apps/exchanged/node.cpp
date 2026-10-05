@@ -632,12 +632,15 @@ void Node::start_admin() {
   auto st = std::make_shared<AdminState>();
   for (const Operator& op : cfg_.operators) st->verifier.add_operator(op.id, op.key);
   st->port = std::make_unique<admin::AdminPort<AdminQueue>>(st->verifier, sh_->admin);
+  // The listener belongs to the state and calls back only from step() on the admin
+  // thread, which holds the state: a plain pointer, not a cycle that is never freed.
+  AdminState* s = st.get();
   auto l = admin::TcpListener::open(
       cfg_.admin_bind, static_cast<std::uint16_t>(cfg_.admin_port),
-      [st](std::size_t c, std::span<const std::byte> in, std::vector<std::byte>& out) {
-        return st->port->on_bytes(st->conns[c], in, out);
+      [s](std::size_t c, std::span<const std::byte> in, std::vector<std::byte>& out) {
+        return s->port->on_bytes(s->conns[c], in, out);
       },
-      [st](std::size_t c) { st->conns.erase(c); });
+      [s](std::size_t c) { s->conns.erase(c); });
   if (!l) {
     std::fprintf(stderr, "exchanged: admin port: %s\n", l.error().c_str());
     return;
@@ -655,10 +658,11 @@ void Node::start_admin() {
 
 void Node::start_control() {
   auto st = std::make_shared<ControlState>();
+  ControlState* s = st.get();  // as in start_admin: the listener's callbacks must not own it
   auto l = admin::TcpListener::open(
       cfg_.control_bind, static_cast<std::uint16_t>(cfg_.control_port),
-      [this, st](std::size_t c, std::span<const std::byte> in, std::vector<std::byte>& out) {
-        std::string& buf = st->lines[c];
+      [this, s](std::size_t c, std::span<const std::byte> in, std::vector<std::byte>& out) {
+        std::string& buf = s->lines[c];
         buf.append(reinterpret_cast<const char*>(in.data()), in.size());
         for (std::size_t nl = buf.find('\n'); nl != std::string::npos; nl = buf.find('\n')) {
           const std::string reply = control(buf.substr(0, nl)) + "\n";
@@ -668,7 +672,7 @@ void Node::start_control() {
         }
         return true;
       },
-      [st](std::size_t c) { st->lines.erase(c); });
+      [s](std::size_t c) { s->lines.erase(c); });
   if (!l) {
     std::fprintf(stderr, "exchanged: control port: %s\n", l.error().c_str());
     return;
