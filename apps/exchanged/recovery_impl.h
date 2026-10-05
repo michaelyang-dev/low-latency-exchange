@@ -347,11 +347,6 @@ std::expected<RecoveredDay, std::string> basic_replay_day(Io& io, Dir& dir, cons
     if (sink.gap || st.last_index != last)
       return std::unexpected("journal replay stopped at " + std::to_string(st.last_index) + " of " + std::to_string(last));
     if (regen.failed()) return std::unexpected(std::string("output log: append failed during regeneration"));
-    // An incomplete day start first: its Config records are a prefix of the tables, so
-    // the ADR-028 comparison below would report a configuration file that differs.
-    if (!day.started)
-      return std::unexpected(std::string("the journal holds an incomplete day start (no EpochStart): nothing was "
-                                         "released; move the journal directory aside and start the day again"));
     // ADR-028: the journal is the day's configuration.
     bool same = tables.size() == expected_config.size();
     for (std::size_t i = 0; same && i < tables.size(); ++i) {
@@ -363,6 +358,9 @@ std::expected<RecoveredDay, std::string> basic_replay_day(Io& io, Dir& dir, cons
           std::string("the journaled configuration differs from the configuration file (ADR-028): restore the file "
                       "the day was started with"));
     }
+    if (!day.started)
+      return std::unexpected(std::string("the journal holds an incomplete day start (no EpochStart): nothing was "
+                                         "released; move the journal directory aside and start the day again"));
     for (const auto& [k, up] : live)
       if (up) day.live.push_back(k);
     if (pass == 0) {
