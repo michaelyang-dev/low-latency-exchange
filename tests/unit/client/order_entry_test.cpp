@@ -47,6 +47,40 @@ std::vector<std::byte> cancel(UserRefNum u) {
   return b;
 }
 
+// Outbound messages injected straight into HaOrderEntry::on_response.
+template <class M>
+std::vector<std::byte> out(const M& m) {
+  std::vector<std::byte> b(M::kMaxLen);
+  b.resize(ouch50::encode(b, m));
+  return b;
+}
+std::vector<std::byte> canceled(UserRefNum u, ouch50::CancelReason why) {
+  ouch50::out::OrderCanceled m;
+  m.user_ref_num = u;
+  m.reason = why;
+  return out(m);
+}
+std::vector<std::byte> cancel_pending(UserRefNum u) {
+  ouch50::out::CancelPending m;
+  m.user_ref_num = u;
+  return out(m);
+}
+std::vector<std::byte> cancel_reject(UserRefNum u) {
+  ouch50::out::CancelReject m;
+  m.user_ref_num = u;
+  return out(m);
+}
+std::vector<std::byte> aiq_canceled(UserRefNum u) {
+  ouch50::out::AiqCanceled m;
+  m.user_ref_num = u;
+  return out(m);
+}
+std::vector<std::byte> rejected(UserRefNum u) {
+  ouch50::out::Rejected m;
+  m.user_ref_num = u;
+  return out(m);
+}
+
 // The exchange side: both nodes' gateways feed one engine; outputs go to the
 // shared stream that both instances replay.
 struct Exchange {
@@ -269,6 +303,101 @@ TEST(OrderEntry, PendingRingBoundsAndOversizeMessages) {
   EXPECT_EQ(oe.stats().pending_full, 1u);
   std::vector<std::byte> big(HaOrderEntry::kMaxMsg + 1, std::byte{'O'});
   EXPECT_FALSE(oe.send(big, 0));
+}
+
+// DST-007 (exchange_ha seed 0x18): an unsolicited cancel-on-disconnect 'Z' of an
+// order with a pending Cancel released every message before that Cancel, here the
+// Enters queued behind it in the node; the node failed with them unprocessed and the
+// takeover re-sent from after them. An unsolicited cancel proves nothing about them.
+TEST(OrderEntry, UnsolicitedCancelOfAnOrderWithAPendingCancelReleasesNothing) {
+  Rig r;
+  r.connect(0);
+  r.connect(1);
+  ASSERT_TRUE(r.oe->send(enter(1), r.now));
+  r.pump();
+  ASSERT_EQ(r.oe->pending(), 0u);
+  // Enters 2..6 then a Cancel of order 1 reach the primary; nothing is answered yet.
+  r.ex.silent = true;
+  for (UserRefNum u = 2; u <= 6; ++u) ASSERT_TRUE(r.oe->send(enter(u), r.now));
+  ASSERT_TRUE(r.oe->send(cancel(1), r.now));
+  r.pump();
+  ASSERT_EQ(r.oe->pending(), 6u);
+  for (const auto why : {ouch50::CancelReason::System, ouch50::CancelReason::Closed,
+                         ouch50::CancelReason::ImmediateOrCancel, ouch50::CancelReason::HaltedAfterOpen,
+                         ouch50::CancelReason::SelfMatchPrevention, ouch50::CancelReason::Supervisory}) {
+    r.oe->on_response(canceled(1, why));
+    EXPECT_EQ(r.oe->pending(), 6u) << "reason " << static_cast<char>(why);
+  }
+  r.oe->on_response(aiq_canceled(1));
+  EXPECT_EQ(r.oe->pending(), 6u);
+  EXPECT_EQ(r.oe->stats().acked, 1u);  // only Enter 1's Accepted
+  // The primary dies: all six go out again on the backup, in order.
+  r.ex.silent = false;
+  r.kill(0);
+  EXPECT_EQ(r.oe->active(), 1);
+  EXPECT_EQ(r.oe->stats().resent, 6u);
+  ASSERT_EQ(r.ex.applied.size(), 6u);
+  for (std::size_t k = 0; k < 6; ++k) EXPECT_EQ(r.ex.applied[k], k + 1);
+  EXPECT_EQ(r.ex.resends_ignored, 5u);  // the Enters the primary had applied, ignored as resends
+}
+
+// DST-007, the solicited form: a Cancel answered by Cancel Pending, then a second
+// Cancel of the same order behind two Enters; the order's final Canceled (User
+// Requested) completes the first Cancel. It answers one Cancel, not the Enters before
+// the second one, which a takeover must still re-send.
+TEST(OrderEntry, CanceledAfterCancelPendingAnswersOneCancelOnly) {
+  Rig r;
+  r.connect(0);
+  r.connect(1);
+  ASSERT_TRUE(r.oe->send(enter(1), r.now));
+  r.pump();
+  r.ex.silent = true;
+  ASSERT_TRUE(r.oe->send(cancel(1), r.now));
+  r.pump();
+  r.oe->on_response(cancel_pending(1));
+  EXPECT_EQ(r.oe->pending(), 0u);  // the Cancel answered at the head: released
+  ASSERT_TRUE(r.oe->send(enter(2), r.now));
+  ASSERT_TRUE(r.oe->send(enter(3), r.now));
+  ASSERT_TRUE(r.oe->send(cancel(1), r.now));
+  r.pump();
+  r.oe->on_response(canceled(1, ouch50::CancelReason::UserRequested));
+  EXPECT_EQ(r.oe->pending(), 3u);  // Enters 2 and 3 still pending, the second Cancel answered
+  r.ex.silent = false;
+  r.kill(0);
+  EXPECT_EQ(r.oe->stats().resent, 2u);  // the Enters; the answered Cancel is not sent again
+  ASSERT_EQ(r.ex.applied.size(), 3u);
+  EXPECT_EQ(r.ex.applied[1], 2u);
+  EXPECT_EQ(r.ex.applied[2], 3u);
+  EXPECT_EQ(r.ex.resends_ignored, 2u);  // the engine already had both: exactly once by UserRefNum
+}
+
+TEST(OrderEntry, CancelAnswersAckTheirOwnEntryAndConsumingResponsesStayCumulative) {
+  OrderEntryConfig c;
+  c.pending_capacity = 16;
+  HaOrderEntry oe(c);
+  ASSERT_TRUE(oe.send(cancel(7), 0));   // pos 0
+  ASSERT_TRUE(oe.send(cancel(8), 0));   // pos 1
+  ASSERT_TRUE(oe.send(enter(20), 0));   // pos 2
+  ASSERT_TRUE(oe.send(cancel(9), 0));   // pos 3
+  ASSERT_TRUE(oe.send(enter(21), 0));   // pos 4
+  // Cancel Reject of order 8 answers the second Cancel only; the head stays.
+  oe.on_response(cancel_reject(8));
+  EXPECT_EQ(oe.pending(), 5u);
+  // Cancel Pending of order 7 answers the head: it advances over both answered Cancels.
+  oe.on_response(cancel_pending(7));
+  EXPECT_EQ(oe.pending(), 3u);
+  // Rejected names Enter 20's UserRefNum: it and everything before it are released.
+  oe.on_response(rejected(20));
+  EXPECT_EQ(oe.pending(), 2u);
+  // An unsolicited cancel of order 9 does not touch its pending Cancel.
+  oe.on_response(canceled(9, ouch50::CancelReason::System));
+  EXPECT_EQ(oe.pending(), 2u);
+  // Accepted of Enter 21 releases the Cancel of 9 before it.
+  ouch50::out::OrderAccepted a;
+  a.user_ref_num = 21;
+  oe.on_response(out(a));
+  EXPECT_EQ(oe.pending(), 0u);
+  EXPECT_EQ(oe.stats().acked, 5u);  // each entry counted once
 }
 
 }  // namespace

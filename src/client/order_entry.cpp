@@ -107,6 +107,7 @@ bool HaOrderEntry::send(std::span<const std::byte> ouch, Nanos now) {
   e.len = static_cast<std::uint16_t>(ouch.size());
   std::memcpy(e.bytes.data(), ouch.data(), ouch.size());
   e.consumed = ouch50::peek_new_user_ref_num(ouch).value_or(0);
+  e.acked = false;
   e.refers = 0;
   if ((e.type == 'X' || e.type == 'M') && ouch.size() >= 5) e.refers = load_be32(ouch.data() + 1);
   if (e.type == 'U' && ouch.size() >= 5) e.refers = load_be32(ouch.data() + 1);
@@ -122,6 +123,10 @@ void HaOrderEntry::pump(Nanos now) {
   if (!k.session || k.state != InstState::Active) return;
   while (unsent_ < tail_) {
     const Entry& e = at(unsent_);
+    if (e.acked) {  // a Cancel or Modify already answered: not sent again
+      ++unsent_;
+      continue;
+    }
     const soup::Actions& a = k.session->send_unsequenced(std::span<const std::byte>(e.bytes.data(), e.len), now);
     if (!a.accepted) {
       ++st_.tx_blocked;
@@ -144,22 +149,43 @@ void HaOrderEntry::on_response(std::span<const std::byte> m) noexcept {
   // the new one at 13 (and the original at 9).
   const UserRefNum u9 = load_be32(m.data() + 9);
   const UserRefNum u13 = (t == 'U' && m.size() >= 17) ? load_be32(m.data() + 13) : 0;
-  const bool cancel_like = t == 'C' || t == 'I' || t == 'P' || t == 'M' || t == 'D';
+  // Only solicited answers to a Cancel or Modify: Order Canceled with reason User
+  // Requested, Cancel Pending, Cancel Reject, Order Modified. Unsolicited cancels
+  // (cancel on disconnect 'Z', IOC, close 'E', halt, self-match, AIQ Canceled 'D') say
+  // nothing about the messages before a pending Cancel of the same order (DST-007).
+  constexpr std::size_t kReason = ouch50::layout::out::OrderCanceled::kReasonOff;
+  const bool user_cancel = t == 'C' && m.size() > kReason && static_cast<char>(m[kReason]) == 'U';
+  const bool cancel_answer = user_cancel || t == 'I' || t == 'P' || t == 'M';
   for (std::uint64_t p = head_; p < tail_; ++p) {
-    const Entry& e = at(p);
-    bool match = false;
-    if (e.consumed != 0) match = e.consumed == (t == 'U' ? u13 : u9);
-    if (!match && (e.type == 'X' || e.type == 'M') && cancel_like) match = e.refers == u9;
-    // A Replace whose original was cancelled because the request failed validation.
-    if (!match && e.type == 'U' && t == 'C') match = e.refers == u9;
-    if (match) {
-      const std::uint64_t released = p + 1 - head_;
-      st_.acked += released;
+    Entry& e = at(p);
+    if (e.acked) continue;
+    // A response naming the UserRefNum this message consumed proves it was processed,
+    // and with it every earlier message (one session's messages apply in order).
+    if (e.consumed != 0 && e.consumed == (t == 'U' ? u13 : u9)) {
+      for (std::uint64_t q = head_; q <= p; ++q) st_.acked += at(q).acked ? 0u : 1u;
       head_ = p + 1;
-      if (unsent_ < head_) unsent_ = head_;
+      advance_head();
+      return;
+    }
+    // A solicited cancel answer names an order, not a message: it answers this Cancel
+    // or Modify only, never the messages before it (it may even complete an earlier
+    // Cancel of the same order, answered by Cancel Pending before; this one is then
+    // moot, the order being gone).
+    bool answered = (e.type == 'X' || e.type == 'M') && cancel_answer && e.refers == u9;
+    // A Replace whose original was cancelled because the request failed validation.
+    if (!answered && e.type == 'U' && user_cancel && e.refers == u9) answered = true;
+    if (answered) {
+      e.acked = true;
+      ++st_.acked;
+      advance_head();
       return;
     }
   }
+}
+
+void HaOrderEntry::advance_head() noexcept {
+  while (head_ < tail_ && at(head_).acked) ++head_;
+  if (unsent_ < head_) unsent_ = head_;
 }
 
 std::span<const std::byte> HaOrderEntry::tx(std::size_t i) const noexcept {
