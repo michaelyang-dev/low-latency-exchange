@@ -63,8 +63,7 @@ bugs:
     category: production
     found_utc: "2026-10-01T15:20:00Z"
     campaign_id: dev-sweep-2026-10-01-journal-500
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-002.patch
+    sha_found: ae5b1c57e80f6ee553af2992fb49039578c4cce6
     seed: "0x0000000000000009"
     exsim_args: ["--world=journal", "--mode=swarm"]
     swarm_digest: "0xf48ff3aefebf7b52"
@@ -83,7 +82,7 @@ bugs:
       (SegmentChainBreak / DataAfterSealedSegment). Fix: recovery rewrites with dsync
       everything it relies on: the writer's in-flight window before the tail of the
       last segment and the header block of every segment file.
-    fix_sha: uncommitted
+    fix_sha: 717c59cbf85830abe75725d1a05d3ec6f958f7be
     regression_test: tests/sim_regressions/DST-002_journal_recovery_repersist
     min_trace: sim/ledger/min_traces/DST-002.txt
     counted: true
@@ -100,8 +99,7 @@ bugs:
     category: production
     found_utc: "2026-10-02T12:25:28Z"
     campaign_id: 20261002T122528Z-09eee2bc-46494e414c410000
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-003.patch
+    sha_found: c7b92fd8fa203c6a90d07d894a824411ae475e5e
     seed: "0x46494e414c412c72"
     exsim_args: ["--mode=swarm", "--world=ha"]
     swarm_digest: "0xe891b0a585d33365"
@@ -130,7 +128,7 @@ bugs:
       epoch's only JOIN; after a second JOIN it is the backup whose HEARTBEAT proves that
       W's own copy of the grant admitted it (new HEARTBEAT flag); without that proof the
       primary hears no ACK and goes solo.
-    fix_sha: uncommitted
+    fix_sha: 2230f1b598da300fde7e2bd108b4b5c50da0c585
     regression_test: tests/sim_regressions/DST-003_repl_join_pending
     counted: true
     count_reason: >-
@@ -152,8 +150,7 @@ bugs:
     category: production
     found_utc: "2026-10-03T09:29:00Z"
     campaign_id: dst-004-found-exchange-2000
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-004.patch
+    sha_found: 8e3e13b35309208211e5788d7805085d4b1367dc
     seed: "0x00000000000006b7"
     exsim_args: ["--mode=swarm", "--world=exchange"]
     swarm_digest: "0x4d571b83a320536b"
@@ -177,7 +174,7 @@ bugs:
       InboundMsg entries (seq::session_event_inbound), from the gateways, the replication
       stage (inject, instance_down, forward) and start-up (InstanceDown); a gateway holds
       later OUCH behind an event the full queue refused.
-    fix_sha: uncommitted
+    fix_sha: 6314fecfd896ad10d4821f9fae9dda93aacf50b8
     regression_test: tests/sim_regressions/DST-004_cod_session_order
     counted: true
     count_reason: >-
@@ -201,8 +198,7 @@ bugs:
     category: production
     found_utc: "2026-10-03T17:40:00Z"
     campaign_id: dst-005-found-exchange-2000
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-005.patch
+    sha_found: 409fbf2cf7e6a491c7a77601252623a20dbf1f60
     seed: "0x000000000000025d"
     exsim_args: ["--mode=swarm", "--world=exchange"]
     swarm_digest: "0x2844833718778543"
@@ -221,7 +217,7 @@ bugs:
       configuration differs from the configuration file (ADR-028): restore the file the day
       was started with". Fix: the incomplete-day-start verdict is checked first; a complete
       day start with a genuinely different configuration still gets the ADR-028 verdict.
-    fix_sha: uncommitted
+    fix_sha: ef4f9362b021387cd421028b13cfeedf761c12a8
     regression_test: tests/sim_regressions/DST-005_incomplete_day_start_verdict
     counted: true
     count_reason: >-
@@ -246,8 +242,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T00:36:00Z"
     campaign_id: dst-006-found-exchange_ha-2000
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-006.patch
+    sha_found: 1f72a41be446cc0b14238723d444e97cd8866ece
     seed: "0x000000000000003c"
     exsim_args: ["--mode=swarm", "--world=exchange_ha"]
     swarm_digest: "0x53e5cec38df162c4"
@@ -270,7 +265,7 @@ bugs:
       journal when the incarnation file says the day started here), begin_rejoin joins an
       empty journal under the configuration's digest (seq::config_digest) and the
       handshake reloads to 0; the runbook moves only the *.seg files (exchange-node.md §8).
-    fix_sha: uncommitted
+    fix_sha: 3cecfd731a06b8df3fd0119afe691e815cba92fb
     regression_test: tests/sim_regressions/DST-006_empty_journal_paired_restart
     counted: true
     count_reason: >-
@@ -295,8 +290,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T00:50:00Z"
     campaign_id: dst-007-found-exchange_ha-2000
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-007.patch
+    sha_found: 55c1441efd46447b176924f7ddcb37c7f8dd290c
     seed: "0x0000000000000001"
     exsim_args: ["--mode=swarm", "--world=exchange_ha"]
     swarm_digest: "0x07e282d3b5c04024"
@@ -318,7 +312,7 @@ bugs:
       User Requested, Cancel Pending, Cancel Reject and Order Modified answer a pending Cancel
       or Modify, and each acknowledges only its own entry; the cumulative rule stays for
       responses that name a consumed UserRefNum.
-    fix_sha: uncommitted
+    fix_sha: 5dc04963bba0aacb570bd5f9392c6b424b6a1e08
     regression_test: tests/sim_regressions/DST-007_ha_client_unsolicited_cancel
     counted: true
     count_reason: >-
@@ -343,8 +337,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T01:11:00Z"
     campaign_id: dst-008-found-exchange_ha-2000
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-008.patch
+    sha_found: 94087024376f7a8a48c28031dee60e3b70e18304
     seed: "0x0000000000000126"
     exsim_args: ["--mode=swarm", "--world=exchange_ha"]
     swarm_digest: "0xcbf6feddc12dcb77"
@@ -362,7 +355,7 @@ bugs:
       the stream. Fix: the resync checks the log (the last record but EpochStarts is DayEnd)
       and keeps the sequencer stopped (Sequencer::day_already_ended), dropping the pending
       InstanceDowns and re-injected input; split mode carries the flag in the resync slot.
-    fix_sha: uncommitted
+    fix_sha: a87e7c9b9320181ad5000db10a49c4f4f0c22e90
     regression_test: tests/sim_regressions/DST-008_takeover_after_day_end
     counted: true
     count_reason: >-
@@ -389,8 +382,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T01:25:00Z"
     campaign_id: dst-009-found-exchange_ha-2000
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-009.patch
+    sha_found: a59814f2e1280131d28da8480a7452c69d8350dd
     seed: "0x00000000000001f8"
     exsim_args: ["--mode=swarm", "--world=exchange_ha"]
     swarm_digest: "0x5c130a7aeaaee384"
@@ -410,7 +402,7 @@ bugs:
       sequencing only; release keeps following durability; the JOIN is relayed once the
       joiner is at zero lag and release equals the tail, and release is gated only while
       that JOIN is pending.
-    fix_sha: uncommitted
+    fix_sha: e07034b28d5b84c85514d7282c7b21777802b405
     regression_test: tests/sim_regressions/DST-009_join_window_l2_deadlock
     counted: true
     count_reason: >-
@@ -438,8 +430,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T06:56:49Z"
     campaign_id: 20261005T060704Z-bfa04806-3556fd14355970c5
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-010.patch
+    sha_found: 101c14c984090ad823dae9148f6d9614c9788167
     seed: "0x3556fd143559a0b6"
     exsim_args: ["--mode=swarm", "--world=exchange_ha"]
     swarm_digest: "0x4362a9cc7d335aa6"
@@ -464,7 +455,7 @@ bugs:
       again: 383 JOIN and SOLO rounds, no pair for the rest of the day (O-LIVE). Fix
       (Replica::become_backup_after_join): the new backup acknowledges its log tail, the
       EpochStart, at once on the paired stream.
-    fix_sha: uncommitted
+    fix_sha: b56e5adbede35dc67eb259d43a41b40eae356ef1
     regression_test: tests/sim_regressions/DST-010_join_epoch_start_unacked
     counted: true
     count_reason: >-
@@ -496,8 +487,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T06:56:49Z"
     campaign_id: 20261005T060704Z-bfa04806-3556fd14355970c5
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-011.patch
+    sha_found: b9f2e8bd266a6ca5e594807e0b67b5faa9fefd6f
     seed: "0x3556fd1435597bf7"
     exsim_args: ["--mode=swarm", "--world=exchange_ha"]
     swarm_digest: "0x61f51bd9242a8a82"
@@ -523,7 +513,7 @@ bugs:
       release), as a backup does. Its node transmits nothing in that role (no line, mirror
       gateways), so the release lets the output log and the egress stages follow without
       releasing anything the primary has not.
-    fix_sha: uncommitted
+    fix_sha: c7969595aac915a6b89c405bf0b930a7b0f5ac12
     regression_test: tests/sim_regressions/DST-011_joiner_release_held
     counted: true
     count_reason: >-
@@ -552,8 +542,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T11:49:48Z"
     campaign_id: 20261005T104613Z-0d95174f-347d4c19f625b579
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-012.patch
+    sha_found: e066ba455009e7501ff4fee285d03ba43bf10453
     seed: "0x347d4c19f625f8cc"
     exsim_args: ["--mode=swarm", "--world=exchange_ha"]
     swarm_digest: "0x25fae7d452179a03"
@@ -578,7 +567,7 @@ bugs:
       Stopped at any point, the segment holds the records after t up to some offset and
       zeros after it, with at most one torn chunk in between, which recovery treats as a
       torn tail; the journal is valid and ends after t, and the rejoin truncates again.
-    fix_sha: uncommitted
+    fix_sha: bb601fc0bea70cff67494ece28f1b11685df9034
     regression_test: tests/sim_regressions/DST-012_truncation_zeroing_order
     counted: true
     count_reason: >-
@@ -605,8 +594,7 @@ bugs:
     category: production
     found_utc: "2026-10-05T17:17:24Z"
     campaign_id: 20261005T170525Z-f97ced4a-d4dc3d3dc7dce089
-    sha_found: uncommitted
-    found_patch: sim/ledger/patches/DST-013.patch
+    sha_found: 8d61b80bd4fddfdb67a578fcda5e59e223999647
     seed: "0xd4dc3d3dc7dce201"
     exsim_args: ["--mode=swarm", "--world=exchange_ha_split"]
     swarm_digest: "0x8e29bf065787897a"
@@ -638,7 +626,7 @@ bugs:
       the solo primary of record's: its journal is the day's history, solo release
       follows its durable index, and the outputs are written at once
       (Replica::reload_is_resume; tests/integration/exchange F7-resume).
-    fix_sha: uncommitted
+    fix_sha: 073d700e1f562efe7da5329c030d333e617d183c
     regression_test: tests/sim_regressions/DST-013_rejoin_unreleased_outputs
     counted: true
     count_reason: >-
