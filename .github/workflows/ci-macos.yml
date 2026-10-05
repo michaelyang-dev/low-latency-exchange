@@ -25,4 +25,4 @@ jobs:
           cmake --build build/${{ matrix.preset }} -j 2>&1 | tee build.log || {
             grep -E "error:|FAILED:" build.log | head -40 | while IFS= read -r l; do echo "::error::${l}"; done
             exit 1; }
-      - run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -j 3
+      - run: tools/ci/ctest.sh --test-dir build/${{ matrix.preset }} --output-on-failure -j 3

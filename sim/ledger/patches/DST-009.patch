@@ -25,7 +25,7 @@ diff --git a/src/repl/replica.h b/src/repl/replica.h
        join_.join_sent = true;
        join_.join_last = tail.last_index;
        if (relays_.epoch != epoch_) relays_ = Relays{epoch_, 0, 0, 0, false};
-@@ -1762,11 +1752,8 @@
+@@ -1768,11 +1758,8 @@
        case Role::kSoloPrimary: {
          const std::uint64_t durable = h_.durable_index();
          // Solo mode releases only L3-durable records, and nothing before its own
@@ -151,4 +151,4 @@ diff --git a/tests/unit/repl/replica_test.cpp b/tests/unit/repl/replica_test.cpp
 -  EXPECT_EQ(c.rep(kA).release_watermark(), a.log.size());
  }
  
- // The primary went silent before ever relaying a JOIN: the witness's REJECT of the
+ // DST-010. After the close the JOIN epoch's EpochStart is the primary's last record. The

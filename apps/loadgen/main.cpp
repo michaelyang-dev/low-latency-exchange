@@ -590,7 +590,8 @@ int search(int argc, char** argv, const char* self) {
         std::fprintf(stderr, "loadgen search: --before-run failed for %s\n", name);
       const std::string cmd = base_cmd + " --rate " + std::to_string(rate) + " --out " + shell_quote(out) + " --run-name " +
                               name + " > /dev/null";
-      (void)std::system(cmd.c_str());
+      // A failed run leaves no result file; the read below reports it.
+      if (std::system(cmd.c_str()) == -1) std::fprintf(stderr, "loadgen search: cannot start the run for %s\n", name);
       if (!after.empty() && std::system(fill(after).c_str()) != 0)
         std::fprintf(stderr, "loadgen search: --after-run failed for %s\n", name);
       const auto m = client::read_flat_json(results + "/" + name + ".json");

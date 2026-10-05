@@ -123,14 +123,23 @@ void retire(std::uint32_t slot, ThreadBuffer* b) noexcept {
 #if defined(LLE_SIM)
 namespace {
 std::atomic<std::uint64_t> g_sim_tsc{0};
+std::atomic<bool> g_sim_clock{false};  // set once a simulator drives the clock
 }
-std::uint64_t sim_tsc() noexcept { return g_sim_tsc.load(std::memory_order_relaxed); }
+// A process of a simulator build that no simulator drives (a test, an exchanged the
+// integration tests start) stamps records with the CPU counter, which its calibration
+// samples describe; a constant 0 would put every record at the counter's epoch.
+std::uint64_t sim_tsc() noexcept {
+  return g_sim_clock.load(std::memory_order_relaxed) ? g_sim_tsc.load(std::memory_order_relaxed) : env::read_tsc();
+}
 #endif
 
 }  // namespace detail
 
 #if defined(LLE_SIM)
-void set_sim_tsc(std::uint64_t tsc) noexcept { detail::g_sim_tsc.store(tsc, std::memory_order_relaxed); }
+void set_sim_tsc(std::uint64_t tsc) noexcept {
+  detail::g_sim_tsc.store(tsc, std::memory_order_relaxed);
+  detail::g_sim_clock.store(true, std::memory_order_relaxed);
+}
 #endif
 
 std::expected<std::uint32_t, RegisterError> register_thread(const ThreadOptions& opts) noexcept {

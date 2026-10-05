@@ -6,4 +6,6 @@ target_include_directories(engine_test PRIVATE ${CMAKE_SOURCE_DIR}/fuzz/engine) 
 
 # Separate binary: replaces the global allocation functions to count calls.
 lle_test(engine_alloc_test SOURCES engine_alloc_test.cpp DEPS lle_engine)
-target_include_directories(engine_alloc_test PRIVATE ${CMAKE_SOURCE_DIR}/fuzz/engine)
+if(TARGET engine_alloc_test)  # not built under MSan/TSan
+  target_include_directories(engine_alloc_test PRIVATE ${CMAKE_SOURCE_DIR}/fuzz/engine)
+endif()

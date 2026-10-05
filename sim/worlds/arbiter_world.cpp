@@ -250,7 +250,7 @@ struct Harness {
     const auto locs = static_cast<Locate>(2 + r.below(5));
     std::vector<PxE4> mid(locs + 1u, 0);
     for (Locate l = 1; l <= locs; ++l) {
-      std::array<char, 9> name{};
+      std::array<char, 16> name{};  // "SYM" + up to 10 digits + NUL; Symbol8 keeps the first 8
       std::snprintf(name.data(), name.size(), "SYM%u", static_cast<unsigned>(l));
       put(FeedState::directory_msg(l, Symbol8(name.data())));
       mid[l] = static_cast<PxE4>(100 + r.below(400)) * kPxScale;

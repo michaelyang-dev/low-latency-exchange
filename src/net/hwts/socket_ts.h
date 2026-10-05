@@ -68,8 +68,9 @@ class ErrQueueReader {
   [[nodiscard]] int last_errno() const noexcept { return last_errno_; }
 
  private:
-  alignas(16) std::byte control_[512]{};
-  std::byte data_[256]{};
+  // Used by the Linux error-queue reader only (socket_ts.cpp); macOS has no TX stamps.
+  [[maybe_unused]] alignas(16) std::byte control_[512]{};
+  [[maybe_unused]] std::byte data_[256]{};
   std::uint64_t others_ = 0;
   std::uint64_t errors_ = 0;
   int last_errno_ = 0;

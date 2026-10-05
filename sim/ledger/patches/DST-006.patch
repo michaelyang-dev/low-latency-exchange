@@ -165,7 +165,7 @@ diff --git a/tests/integration/exchange/exchange_ha_test.cpp b/tests/integration
 -  bravo.drop();
 -  std::size_t removed = 0;
 -  for (const auto& e : std::filesystem::directory_iterator(a.journal_dir()))
--    if (e.path().extension() == ".seg") removed += std::filesystem::remove(e.path()) ? 1 : 0;
+-    if (e.path().extension() == ".seg") removed += std::filesystem::remove(e.path()) ? std::size_t{1} : std::size_t{0};
 -  ASSERT_GT(removed, 0u);
 -  ASSERT_TRUE(std::filesystem::exists(a.journal_dir() + "/incarnation"));
 -  a.launch();

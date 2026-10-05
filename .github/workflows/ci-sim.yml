@@ -33,7 +33,7 @@ jobs:
           CC=clang-21 CXX=clang++-21 cmake --preset sim
           cmake --build build/sim -j
       - name: All tests in the LLE_SIM build (includes sim_determinism_128x2 and the ledger self-test)
-        run: ctest --test-dir build/sim --output-on-failure -LE fuzz -j 4
+        run: tools/ci/ctest.sh --test-dir build/sim --output-on-failure -LE fuzz -j 4
       - name: Swarm campaign
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then

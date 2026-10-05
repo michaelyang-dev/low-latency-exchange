@@ -130,7 +130,7 @@ void run_raw_mode(Input& in) {
   LineArbiterConfig cfg;
   cfg.session = session;
   const std::uint8_t setup = in.u8();
-  cfg.first_seq = (setup & 1) != 0 ? 0 : 1 + in.u8() % 4;
+  cfg.first_seq = (setup & 1) != 0 ? SeqNo{0} : SeqNo{1} + in.u8() % 4u;
   cfg.reorder_capacity = std::size_t{1} << (4 + setup % 6);
   cfg.snapshot_gap_messages = (setup & 0x40) != 0 ? 0 : 1 + in.u8();
   cfg.gap_timeout = in.u8();

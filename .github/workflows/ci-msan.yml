@@ -34,4 +34,4 @@ jobs:
             -DLLE_ONLY="src/common;src/env;src/runtime;src/concurrent;src/lob;src/book;src/engine;src/sequencer;src/journal;src/snapshot;src/outlog;src/witness;src/repl;src/proto;sim;tests/unit;tests/golden;tests/sim_regressions"
           cmake --build build/msan -j
       - name: Test
-        run: ctest --test-dir build/msan --output-on-failure -LE fuzz -j 4 --timeout 900
+        run: tools/ci/ctest.sh --test-dir build/msan --output-on-failure -LE fuzz -j 4 --timeout 900

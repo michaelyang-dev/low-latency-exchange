@@ -418,3 +418,112 @@ bugs:
       the solo primary and a joiner whose L2 holds 55 records past what it applied; at the
       found tree the window freezes release and the joiner never becomes backup, at the fix
       it drains and the pair forms.
+  - id: DST-010
+    title: "a node that became the backup after a JOIN did not acknowledge the JOIN epoch's EpochStart until something followed it: after the close the primary's T_ack ran out, it went solo and deposed the new backup, at every rejoin for the rest of the day"
+    component: repl
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-05T06:56:49Z"
+    campaign_id: 20261005T060704Z-bfa04806-3556fd14355970c5
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-010.patch
+    seed: "0x3556fd143559a0b6"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x4362a9cc7d335aa6"
+    platform: linux-aarch64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:2586621:0x77fd32fd4725b7f4"
+    root_cause: >-
+      A recovering joiner that learns of its JOIN's grant (the primary's HEARTBEAT or first
+      APPEND of the new epoch) appends its own copy of the epoch's EpochStart and becomes
+      the backup (Replica::become_backup_after_join) without acknowledging it. The primary
+      counts ACKs of the new epoch from the joiner's catch-up position, one record short of
+      its tail, and runs T_ack from the grant. Its APPEND of the EpochStart reaches the
+      backup as a duplicate, and receive_records acknowledges a duplicate only when rto/4
+      has passed since the last ACK, which the joiner had just sent on the catch-up stream.
+      While the day runs, the next sequenced record brings the ACK at once. After the close
+      nothing more is sequenced (06 §10), so the ACK waited for the primary's
+      retransmission one rto later; with rto close to T_ack (the exchange_ha world draws rto
+      from [1, 4) ms and T_ack from 4 ms; exchanged's configuration does not relate them)
+      it came after T_ack. The primary stopped, flushed and requested SOLO, the SOLO epoch
+      deposed the new backup, which exited, restarted and rejoined, and the same happened
+      again: 383 JOIN and SOLO rounds, no pair for the rest of the day (O-LIVE). Fix
+      (Replica::become_backup_after_join): the new backup acknowledges its log tail, the
+      EpochStart, at once on the paired stream.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-010_join_epoch_start_unacked
+    counted: true
+    count_reason: >-
+      Production replication core (src/repl/replica.h). Liveness defect under one failure
+      after the close (the backup's restart): the pair never forms again that day, so the
+      primary runs without a hot standby while the restarted node loops through restart,
+      JOIN and deposition. Found by exsim's exchange_ha world through O-LIVE in a 20,000-seed
+      campaign (7 failing seeds, all O-LIVE; this one is the only one with this root cause,
+      the other six are DST-011), diagnosed from the replica's trace: the backup's duplicate
+      inside the ACK rate limit, and the primary's ACK one short of its tail at T_ack.
+      Reproduces from seed at the found tree with the recorded signature on linux-aarch64
+      and macos-arm64, and passes at the fix. One root cause, one fix. Distinct from DST-003
+      (a late REJECT of an earlier JOIN), DST-008 (sequencing after DayEnd, whose fix leaves
+      the EpochStart last) and DST-009 (the JOIN window's release freeze). The
+      seed-independent regression test runs the production Replica in the repl harness with
+      rto 3.9 ms, T_ack 4 ms, 200 us link latency and nothing sequenced after the JOIN: at
+      the found tree the primary's ACK stays one short of the EpochStart, it goes solo and
+      the backup is deposed; at the fix the pair holds. A unit test
+      (Repl.NewBackupAcknowledgesTheJoinEpochStartAtOnce) sweeps rto and latency.
+  - id: DST-011
+    title: "a recovering joiner released nothing until it became the backup, so its engine stopped once its egress ring was full and its L2 then refused the catch-up: a catch-up longer than the two rings never reached zero lag and no JOIN followed"
+    component: repl
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-05T06:56:49Z"
+    campaign_id: 20261005T060704Z-bfa04806-3556fd14355970c5
+    sha_found: uncommitted
+    found_patch: sim/ledger/patches/DST-011.patch
+    seed: "0x3556fd1435597bf7"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x61f51bd9242a8a82"
+    platform: linux-aarch64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:83880537:0x77fd32fd4725b7f4"
+    root_cause: >-
+      A catching-up joiner applies up to its primary's announced release (apply_limit), and
+      its node puts every output of an applied record in the egress ring, where the output
+      log, md and gateway stages take it only once the node's release watermark covers it
+      (ADR-005). The L2 cursor follows the applier. Replica::update_release left a
+      recovering joiner's release where it was, 0 after a restart, until it became the
+      backup. Once the outputs of the records it applied filled the egress ring the engine
+      stage stopped, L2 filled behind it and refused the catch-up stream (no room), and the
+      primary's rewinds could not help: the joiner never reached zero lag, no JOIN was
+      relayed, and the solo primary ran without a partner for the rest of the day (O-LIVE).
+      It takes a catch-up longer than the two rings hold together and no snapshot: in the
+      seed the joiner, down since 22 ms, started catching up at record 29 while the gap
+      was small and the promoted primary ran on to 17,588, and its applier stopped at 806.
+      Fix (Replica::update_release): once its engine is reloaded and no snapshot is being
+      installed, a recovering joiner releases up to min(tail, the primary's announced
+      release), as a backup does. Its node transmits nothing in that role (no line, mirror
+      gateways), so the release lets the output log and the egress stages follow without
+      releasing anything the primary has not.
+    fix_sha: uncommitted
+    regression_test: tests/sim_regressions/DST-011_joiner_release_held
+    counted: true
+    count_reason: >-
+      Production replication core (src/repl/replica.h) with exchanged's egress (the
+      release-gated egress stages of apps/exchanged). Liveness defect under one failure (the
+      backup's crash, then a restart while the promoted primary runs on): the pair never
+      forms again that day, so the primary runs without a hot standby. Found by exsim's
+      exchange_ha world through O-LIVE in a 20,000-seed campaign: 6 of its 7 failing seeds
+      (0x...7bf7, a528, a73f, a8c9, afe4, b619), all passing at the fix; diagnosed from the
+      joiner's refused L2 appends (no room) with its applier at 806 of an apply limit of
+      11,030 and its release at 0. Reproduces from seed at the found tree with the recorded
+      signature on linux-aarch64 and macos-arm64. One root cause, one fix. Distinct from
+      DST-009, whose fix is in the found tree: there the primary's JOIN window froze the
+      primary's release; here the joiner's own release gates its own egress. The
+      seed-independent regression test runs the production Replica in the repl harness, whose
+      FakeHost models both rings (l2_cap, and the new egress_cap: the applier stays within
+      that many records of release): a 305-record catch-up into a joiner with L2 50 and
+      egress 20; at the found tree its applier stops at 20 with release 0 and L2 refuses at
+      70, at the fix it catches up and the pair forms. A unit test
+      (Repl.JoinerReleasesNoMoreThanItsPrimaryWhileCatchingUp) checks at every step that the
+      joiner never releases more than its primary.

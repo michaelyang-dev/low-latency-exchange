@@ -551,8 +551,12 @@ void Harness::check_cod(const Truth& t) {
       // Only a connection of the incarnation that crashed dies in this crash; one logged in
       // before an earlier crash died with that one.
       if (!alive || login_inc < boot_incarnation[b - 1]) continue;
+      // A Login lost in the crash's lost suffix: the recovered journal never had this
+      // connection live, so the restart has no InstanceDown for it. A later InstanceDown
+      // of the session belongs to a later connection.
+      const bool journaled = pushes[order[since]].index != 0;
       std::uint64_t d = 0;
-      for (std::uint64_t i = r + 1; i <= t.recs.size() && d == 0; ++i) {
+      for (std::uint64_t i = r + 1; journaled && i <= t.recs.size() && d == 0; ++i) {
         const Rec& rec = t.recs[i - 1];
         if (rec.type == jr::RecordType::SessionEvent && rec.event == jr::SessionEventKind::InstanceDown &&
             rec.session == c.session)

@@ -592,7 +592,7 @@ TEST(ExchangeHa, PrimaryWithAnEmptyJournalRejoinsInsteadOfStartingTheDayAgain) {
   bravo.drop();
   std::size_t removed = 0;
   for (const auto& e : std::filesystem::directory_iterator(a.journal_dir()))
-    if (e.path().extension() == ".seg") removed += std::filesystem::remove(e.path()) ? 1 : 0;
+    if (e.path().extension() == ".seg") removed += std::filesystem::remove(e.path()) ? std::size_t{1} : std::size_t{0};
   ASSERT_GT(removed, 0u);
   ASSERT_TRUE(std::filesystem::exists(a.journal_dir() + "/incarnation"));
   a.launch();
@@ -714,7 +714,7 @@ TEST_P(DayEndedTakeover, NothingIsJournaledAfterDayEnd) {
     for (std::size_t i = k + 1; i < recs.size(); ++i) {
       EXPECT_EQ(recs[i].type, journal::RecordType::EpochStart)
           << "record " << recs[i].index << " (type " << static_cast<int>(recs[i].type) << ") after DayEnd " << day_end;
-      epoch_starts += recs[i].type == journal::RecordType::EpochStart ? 1 : 0;
+      epoch_starts += recs[i].type == journal::RecordType::EpochStart ? std::size_t{1} : std::size_t{0};
     }
     EXPECT_EQ(epoch_starts, 2u) << "the takeover's and the JOIN's EpochStart";
   }

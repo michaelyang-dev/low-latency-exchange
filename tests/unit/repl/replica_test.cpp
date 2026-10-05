@@ -805,6 +805,78 @@ TEST(Repl, JoinWindowDrainsAJoinerWhoseL2HoldsLessThanTheUnreleasedTail) {
   EXPECT_EQ(c.rep(kA).release_watermark(), a.log.size());
 }
 
+// DST-010. After the close the JOIN epoch's EpochStart is the primary's last record. The
+// new backup holds its own copy of it and acknowledges it as soon as it is the backup, so
+// the pair holds whatever the link latency and the retransmission timeout (below T_ack),
+// with nothing sequenced after the JOIN.
+TEST(Repl, NewBackupAcknowledgesTheJoinEpochStartAtOnce) {
+  for (const Nanos rto : {1 * kMs, 2 * kMs, 3900 * kUs}) {
+    for (const Nanos delay : {Nanos{0}, 100 * kUs, 200 * kUs, 300 * kUs, 500 * kUs}) {
+      Cluster c;
+      for (const NodeId i : {kA, kB}) {
+        c.n[i].cfg.t_ack = 4 * kMs;
+        c.n[i].cfg.rto_ns = rto;
+        c.n[i].rep = std::make_unique<R>(c.n[i].cfg, c.host(i));
+        c.rep(i).start_paired(1, kA, 0, c.now);
+      }
+      c.data_delay = delay;
+      c.sequence(kA, 3);
+      c.run(5 * kMs);
+      c.crash(kB);
+      ASSERT_TRUE(c.run_until(
+          [&] { return c.rep(kA).role() == Role::kSoloPrimary && c.rep(kA).sequencing_allowed(); }, 60 * kMs));
+      c.sequence(kA, 20);
+      c.run(1 * kMs);
+      c.restart(kB);
+      ASSERT_TRUE(c.run_until(
+          [&] { return c.rep(kA).role() == Role::kPrimary && c.rep(kB).role() == Role::kBackup; }, 300 * kMs))
+          << "rto " << rto << " delay " << delay;
+      c.run(50 * kMs);
+      EXPECT_EQ(c.rep(kA).role(), Role::kPrimary) << "rto " << rto << " delay " << delay;
+      EXPECT_EQ(c.rep(kA).backup_ack(), c.host(kA).log.size()) << "rto " << rto << " delay " << delay;
+      EXPECT_TRUE(c.n[kB].up && c.n[kB].rep && c.rep(kB).role() == Role::kBackup) << "rto " << rto << " delay " << delay;
+    }
+  }
+}
+
+// DST-011. A catching-up joiner releases what its primary has released, never more: its
+// node's egress ring and L2 then drain as it applies, so a catch-up longer than both
+// still reaches zero lag. Checked at every step of the catch-up.
+TEST(Repl, JoinerReleasesNoMoreThanItsPrimaryWhileCatchingUp) {
+  Cluster c;
+  c.sequence(kA, 3);
+  c.run(2 * kMs);
+  c.crash(kB);
+  ASSERT_TRUE(c.run_until([&] { return c.rep(kA).role() == Role::kSoloPrimary && c.rep(kA).sequencing_allowed(); },
+                          60 * kMs));
+  c.sequence(kA, 200);
+  c.run(1 * kMs);
+  FakeHost& a = c.host(kA);
+  FakeHost& b = c.host(kB);
+  b.l2_cap = 40;
+  b.egress_cap = 10;
+  a.flush_on_request = false;
+  c.restart(kB);
+  std::uint64_t max_release = 0;
+  bool paired = false;
+  for (int i = 0; i < 5000 && !paired; ++i) {
+    // A keeps sequencing; its journal lags a little behind, so its release does too,
+    // and catches up while the JOIN window pauses sequencing.
+    if (i % 4 == 0) (void)c.sequence(kA, 1);
+    if (!c.rep(kA).sequencing_allowed()) a.durable = a.log.size();
+    else if (i % 8 == 0) a.durable = a.log.size() > 3 ? a.log.size() - 3 : 0;
+    c.step();
+    if (c.rep(kB).role() == Role::kRecovering) {
+      ASSERT_LE(c.rep(kB).release_watermark(), c.rep(kA).release_watermark()) << "step " << i;
+      ASSERT_LE(c.rep(kB).release_watermark(), b.log.size()) << "step " << i;
+      max_release = std::max(max_release, c.rep(kB).release_watermark());
+    }
+    paired = c.rep(kB).role() == Role::kBackup;
+  }
+  EXPECT_TRUE(paired) << "B applied " << b.applied << " of " << a.log.size();
+  EXPECT_GT(max_release, b.l2_cap + b.egress_cap) << "B's release followed A's during the catch-up";
+}
+
 // The primary went silent before ever relaying a JOIN: the witness's REJECT of the
 // joiner's probe shows the old configuration, so the joiner does not speculate; it
 // keeps catching up and rejoins once the primary is back.

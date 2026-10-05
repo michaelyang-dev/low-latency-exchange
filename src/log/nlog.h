@@ -77,8 +77,9 @@ class ThreadScope {
 };
 
 #if defined(LLE_SIM)
-// Simulator builds: NLOG_INFO & co. stamp records with this virtual clock instead
-// of the CPU counter (the simulator advances it), keeping logs deterministic.
+// Simulator builds: once a simulator sets this virtual clock, NLOG_INFO & co. stamp
+// records with it instead of the CPU counter, keeping its logs deterministic. Until
+// then they use the CPU counter, as in other builds.
 void set_sim_tsc(std::uint64_t tsc) noexcept;
 #endif
 

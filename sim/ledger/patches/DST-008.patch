@@ -207,7 +207,7 @@ diff --git a/tests/integration/exchange/exchange_ha_test.cpp b/tests/integration
 -    for (std::size_t i = k + 1; i < recs.size(); ++i) {
 -      EXPECT_EQ(recs[i].type, journal::RecordType::EpochStart)
 -          << "record " << recs[i].index << " (type " << static_cast<int>(recs[i].type) << ") after DayEnd " << day_end;
--      epoch_starts += recs[i].type == journal::RecordType::EpochStart ? 1 : 0;
+-      epoch_starts += recs[i].type == journal::RecordType::EpochStart ? std::size_t{1} : std::size_t{0};
 -    }
 -    EXPECT_EQ(epoch_starts, 2u) << "the takeover's and the JOIN's EpochStart";
 -  }

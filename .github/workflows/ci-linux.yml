@@ -44,7 +44,7 @@ jobs:
       - name: Build
         run: cmake --build build/${{ matrix.preset }} -j
       - name: Test
-        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -j 4
+        run: tools/ci/ctest.sh --test-dir build/${{ matrix.preset }} --output-on-failure -j 4
       - name: Dependency audit (T01)
         run: tools/ci/check_deps.sh
 
@@ -60,9 +60,9 @@ jobs:
       - run: CC=clang-21 CXX=clang++-21 cmake --preset dev -DLLE_ONLY="src/common;src/env;src/runtime;src/concurrent;src/net;tests/unit/net_sock;tests/unit/net_busypoll;tests/unit/net_uring;tests/unit/net_hwts;tests/unit/net_utcp;tests/unit/net_xsk;tests/integration/net;tests/integration/utcp;bench/net;bench/net_xsk"
       - run: cmake --build build/dev -j
       - name: Unit tests as root (busy-poll knobs need CAP_NET_ADMIN)
-        run: sudo ctest --test-dir build/dev --output-on-failure -L unit -j 4
+        run: sudo tools/ci/ctest.sh --test-dir build/dev --output-on-failure -L unit -j 4
       - name: "veth/netns integration (label vm): every socket backend, utcp interop with kernel TCP, AF_XDP copy mode"
-        run: sudo ctest --test-dir build/dev --output-on-failure -L vm
+        run: sudo tools/ci/ctest.sh --test-dir build/dev --output-on-failure -L vm
 
   docs:
     # Every relative Markdown link resolves, and docs/results/EVIDENCE.md is what the
@@ -97,8 +97,8 @@ jobs:
       - run: cmake --build build/interop -j --target nassau_interop_test
       - name: nassau interop, epoll and io_uring backends
         run: |
-          LLE_E2E_BACKEND=epoll ctest --test-dir build/interop -L interop --output-on-failure
-          LLE_E2E_BACKEND=uring ctest --test-dir build/interop -L interop --output-on-failure
+          LLE_E2E_BACKEND=epoll tools/ci/ctest.sh --test-dir build/interop -L interop --output-on-failure
+          LLE_E2E_BACKEND=uring tools/ci/ctest.sh --test-dir build/interop -L interop --output-on-failure
 
   tsan:
     needs: probe
@@ -108,7 +108,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev clang-21
       - run: CC=clang-21 CXX=clang++-21 cmake --preset tsan
       - run: cmake --build build/tsan -j
-      - run: ctest --test-dir build/tsan --output-on-failure -L unit -j 4
+      - run: tools/ci/ctest.sh --test-dir build/tsan --output-on-failure -L unit -j 4
 
   sim-purity:
     needs: probe

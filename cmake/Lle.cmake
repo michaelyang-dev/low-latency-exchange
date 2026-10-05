@@ -61,13 +61,13 @@ endfunction()
 # lle_test(<name> SOURCES ... DEPS ...) -> GoogleTest executable registered with CTest.
 function(lle_test name)
   cmake_parse_arguments(A "" "" "SOURCES;DEPS" ${ARGN})
-  if("memory" IN_LIST LLE_SANITIZE)
-    # Allocation-counting tests replace the global operator new, which MSan's
-    # runtime also defines. Convention: such tests live in *alloc_test.cpp files.
+  if("memory" IN_LIST LLE_SANITIZE OR "thread" IN_LIST LLE_SANITIZE)
+    # Allocation-counting tests replace the global operator new, which the MSan and TSan
+    # runtimes also define. Convention: such tests live in *alloc_test.cpp files.
     set(_all ${A_SOURCES})
     list(FILTER A_SOURCES EXCLUDE REGEX "alloc_test\\.cpp$")
     if(NOT _all STREQUAL A_SOURCES)
-      message(STATUS "MSan: ${name}: allocation-counting sources skipped")
+      message(STATUS "MSan/TSan: ${name}: allocation-counting sources skipped")
     endif()
     if(NOT A_SOURCES)
       return()
@@ -76,8 +76,10 @@ function(lle_test name)
   add_executable(${name} ${A_SOURCES})
   target_link_libraries(${name} PRIVATE lle_options ${A_DEPS} GTest::gtest_main)
   # GoogleTest's EXPECT_*/ASSERT_* macros expand to if/else, so GCC flags them
-  # inside an unbraced `if` (-Wdangling-else). Test code only.
-  target_compile_options(${name} PRIVATE $<$<CXX_COMPILER_ID:GNU>:-Wno-dangling-else>)
+  # inside an unbraced `if` (-Wdangling-else). The allocation-counting tests replace the
+  # global operator new/delete with malloc/free on purpose, which GCC's
+  # -Wmismatched-new-delete reports at every inlined delete. Test code only.
+  target_compile_options(${name} PRIVATE $<$<CXX_COMPILER_ID:GNU>:-Wno-dangling-else -Wno-mismatched-new-delete>)
   include(GoogleTest)
   gtest_discover_tests(${name} DISCOVERY_TIMEOUT 60 PROPERTIES LABELS unit)
 endfunction()

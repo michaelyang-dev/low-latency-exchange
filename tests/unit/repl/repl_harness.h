@@ -62,6 +62,10 @@ struct FakeHost {
   std::uint64_t state = 0;
   std::uint64_t hash_interval = 4;
   std::uint64_t corrupt_hash_at = 0;  // nonzero: perturb the state hash from this index
+  // Egress ring capacity in records (0: unlimited). As in exchanged, the outputs of every
+  // applied record wait in the egress ring until the release watermark covers them, so
+  // the applier stays within egress_cap records of release.
+  std::size_t egress_cap = 0;
   std::vector<std::uint64_t> reloads;
   // ---- effects ----
   std::deque<Bytes> to_peer;
@@ -185,6 +189,7 @@ struct FakeHost {
   template <class Rep>
   void apply_to(std::uint64_t limit, Rep* replica) {
     limit = std::min<std::uint64_t>(limit, log.size());
+    if (egress_cap != 0 && replica != nullptr) limit = std::min<std::uint64_t>(limit, replica->release_watermark() + egress_cap);
     while (applied < limit) {
       ++applied;
       const journal::RecordView v{std::span<const std::byte>(log[applied - 1])};
