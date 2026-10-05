@@ -12,8 +12,7 @@
 //    queue slot, only the malformed flag, the logged-in session's id, account and the
 //    node's instance;
 //  - session events come in a legal order per connection (a login before its logout or
-//    disconnect) and only for ALPHA, in the OUCH queue with the orders, and every order
-//    lies between its connection's login and its logout or disconnect (DST-004);
+//    disconnect) and only for ALPHA;
 //  - everything the gateway writes is a well-formed SoupBinTCP server stream of server
 //    packet types, and the sequenced messages delivered to the client are exactly the
 //    released egress entries for ALPHA, in order.
@@ -135,32 +134,25 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     w.clock.mono += static_cast<Nanos>(r.below(2'000'000'000));
     // The sequencer drains at a fuzzed pace.
     const std::uint64_t pops = r.below(6);
-    // One queue carries the OUCH and, tagged, the session events in the gateway's order
-    // (DST-004): every OUCH lies between its connection's login and its logout or
-    // disconnect.
     seq::InboundMsg m;
     for (std::uint64_t k = 0; k < pops && w.ouch.try_pop(m); ++k) {
-      if (seq::is_session_event(m)) {
-        const seq::SessionEventMsg ev = seq::session_event_of(m);
-        LLE_ASSERT(ev.session_id == 1, "session event for a session that never logged in");
-        if (ev.event == journal::SessionEventKind::Login) {
-          LLE_ASSERT(!logged_in, "two logins on one connection");
-          logged_in = true;
-        } else {
-          LLE_ASSERT(logged_in, "logout/disconnect without a login");
-          logged_in = false;
-        }
-        continue;
-      }
-      LLE_ASSERT(logged_in, "an order queued outside its connection's login (DST-004)");
       LLE_ASSERT(m.len <= seq::InboundMsg::kMaxBytes, "inbound longer than the slot");
       LLE_ASSERT((m.flags & ~journal::kFlagMalformedInput) == 0, "unexpected inbound flag");
       LLE_ASSERT(m.session_id == 1 && m.account == 100 && m.instance == 0, "inbound routed to the wrong session");
       LLE_ASSERT((m.flags != 0) == (m.len == seq::InboundMsg::kMaxBytes) || m.flags == 0,
                  "malformed flag without truncation");
     }
-    seq::SessionEventMsg old_path;
-    LLE_ASSERT(!w.events.try_pop(old_path), "a session event in the separate queue (DST-004: none)");
+    seq::SessionEventMsg ev;
+    while (w.events.try_pop(ev)) {
+      LLE_ASSERT(ev.session_id == 1, "session event for a session that never logged in");
+      if (ev.event == journal::SessionEventKind::Login) {
+        LLE_ASSERT(!logged_in, "two logins on one connection");
+        logged_in = true;
+      } else {
+        LLE_ASSERT(logged_in, "logout/disconnect without a login");
+        logged_in = false;
+      }
+    }
     if (!closed && r.chance(1, 64)) {
       w.g->port().peer_close(conn);
       closed = true;

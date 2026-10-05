@@ -72,8 +72,8 @@ struct SplitRepl {
 };
 
 struct Shared {
-  OuchQueue ouch;     // OUCH and, tagged, session events, in each producer's order (DST-004)
-  SessionQueue events;  // unused by the node's producers since DST-004 (the sequencer still drains it)
+  OuchQueue ouch;
+  SessionQueue events;
   AdminQueue admin;
   L2 l2;
   std::atomic<bool> io_hold{false};  // control `io-hold on` (tests): io leaves L2 unjournaled

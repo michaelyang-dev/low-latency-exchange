@@ -10,12 +10,8 @@
 //      (inject_ahead: after a promotion, the backup's own mirror-session input the old
 //      primary never committed, which is older than anything still queued), then the
 //      gateways' SCQ MPSC (the backup's repl stage FORWARDs mirror-session input into the
-//      same queue), and the session events of
-//      the same producers, tagged (session_event_inbound): one ordered channel per
-//      producer, so a connection's Disconnect follows every OUCH it sent before it and
-//      the next connection's Login precedes its orders (cancel-on-disconnect; DST-004);
-//   2. session events from the separate queue (tools and harnesses that push there;
-//      exchanged's producers use the tagged path);
+//      same queue);
+//   2. session events (login, logout, disconnect, mirror-attach, instance-down);
 //   3. admin commands (the authenticated lle-admin channel);
 //   4. the schedule: a Timer record when the clock passes an entry's time.
 // Timers are also checked before every record is stamped, with the same clock reading
@@ -49,7 +45,6 @@
 #include <vector>
 
 #include "common/assert.h"
-#include "common/endian.h"
 #include "common/hash.h"
 #include "common/types.h"
 #include "env/concepts.h"
@@ -86,39 +81,6 @@ struct SessionEventMsg {
   journal::SessionEventKind event = journal::SessionEventKind::Login;
   std::uint64_t requested_seq = 0;
 };
-
-// A session event carried in the OUCH queue. Producers (the gateways, the replication
-// stage, start-up) push a connection's session events into the same SCQ as its OUCH
-// messages, so the journal keeps each producer's order: a Disconnect after every OUCH
-// the connection sent before it, the next connection's Login before its orders
-// (cancel-on-disconnect, 05 §4 step 8; DST-004). Tag: InboundMsg::reserved; payload:
-// u8 event, u64 requested sequence (little-endian).
-inline constexpr std::uint16_t kInboundSessionEvent = 1;
-template <class Msg = InboundMsg>
-[[nodiscard]] inline Msg session_event_inbound(const SessionEventMsg& e) noexcept {
-  static_assert(Msg::kMaxBytes >= 9);
-  Msg m;
-  m.session_id = e.session_id;
-  m.instance = e.instance;
-  m.reserved = kInboundSessionEvent;
-  m.len = 9;
-  m.bytes[0] = static_cast<std::byte>(e.event);
-  store_le64(m.bytes + 1, e.requested_seq);
-  return m;
-}
-template <std::size_t N>
-[[nodiscard]] inline bool is_session_event(const BasicInboundMsg<N>& m) noexcept {
-  return m.reserved == kInboundSessionEvent;
-}
-template <std::size_t N>
-[[nodiscard]] inline SessionEventMsg session_event_of(const BasicInboundMsg<N>& m) noexcept {
-  SessionEventMsg e;
-  e.session_id = m.session_id;
-  e.instance = m.instance;
-  e.event = static_cast<journal::SessionEventKind>(std::to_integer<std::uint8_t>(m.bytes[0]));
-  e.requested_seq = load_le64(m.bytes + 1);
-  return e;
-}
 
 template <std::size_t MaxArgs>
 struct BasicAdminMsg {
@@ -382,16 +344,6 @@ class Sequencer {
     for (std::uint32_t i = 0; i < cfg_.ouch_batch; ++i) {
       if (!have_ouch_ && !next_ouch()) break;
       have_ouch_ = true;
-      if (is_session_event(ouch_)) {  // in order with the producer's OUCH (DST-004)
-        const SessionEventMsg e = session_event_of(ouch_);
-        const journal::SessionEvent p{e.session_id, e.instance, e.event, e.requested_seq};
-        if (!emit(p, 0)) return stalled(did || timers_this_poll_ != 0);
-        have_ouch_ = false;
-        ++stats_.session_events;
-        did = true;
-        if (!flush_mark(did)) return did;
-        continue;
-      }
       const journal::OuchInbound p{ouch_.session_id, ouch_.account, ouch_.instance, ouch_.payload()};
       if (!emit(p, ouch_.flags)) return stalled(did || timers_this_poll_ != 0);
       have_ouch_ = false;

@@ -107,8 +107,8 @@ TEST(GatewayAlloc, InboundEgressAndTimersDoNotAllocateAfterLogin) {
   gw.port().data(conn, login.write);
   for (int i = 0; i < 3; ++i) (void)gw.poll();
   ASSERT_EQ(gw.stats().logins, 1u);
-  seq::InboundMsg ev;  // the Login, tagged, in the OUCH queue (DST-004)
-  while (ouch->try_pop(ev)) {
+  seq::SessionEventMsg ev;
+  while (events->try_pop(ev)) {
   }
 
   // Inbound packets and egress entries prepared up front.
