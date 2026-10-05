@@ -3,7 +3,7 @@
 //   exsim --seed=<u64|0xhex|40-hex sha> [--seeds=N] [--mode=swarm|lite|no-faults]
 //         [--disable=net,disk,crash,clock,buggify,partition,pause]
 //         [--world=pingpong|wal|stream|witness|journal|arbiter|soupbin|utcp|ha|outlog|snapshot|single|
-//          kill_switch_during_cross|exchange|exchange_ha|all] [--exclude-world=w1,w2]
+//          kill_switch_during_cross|exchange|exchange_ha|exchange_ha_split|all] [--exclude-world=w1,w2]
 //         [--ticks-max=N] [--safety-ms=N] [--bound-ms=N] [--trace-out=f] [--record-faults=f] [--replay=f]
 //         [--check-determinism] [--canary] [--require-probes] [--quiet] [--verbose]
 //
@@ -54,7 +54,7 @@ void usage() {
       "usage: exsim --seed=<u64|0xhex|sha> [--seeds=N] [--mode=swarm|lite|no-faults]\n"
       "             [--disable=net,disk,crash,clock,buggify,partition,pause]\n"
       "             [--world=pingpong|wal|stream|witness|journal|arbiter|soupbin|utcp|ha|outlog|snapshot|single|\n"
-      "             kill_switch_during_cross|exchange|exchange_ha|all] [--exclude-world=w1,w2]\n"
+      "             kill_switch_during_cross|exchange|exchange_ha|exchange_ha_split|all] [--exclude-world=w1,w2]\n"
       "             [--ticks-max=N] [--safety-ms=N] [--bound-ms=N]\n"
       "             [--trace-out=f] [--record-faults=f] [--replay=f] [--check-determinism]\n"
       "             [--canary] [--require-probes] [--quiet] [--verbose]\n",

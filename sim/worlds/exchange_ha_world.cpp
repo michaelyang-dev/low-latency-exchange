@@ -1770,7 +1770,8 @@ class AdversaryProc final : public Process {
 
 }  // namespace
 
-Report run_exchange_ha(const Options& o) {
+namespace {
+Report run_exchange_ha_world(const Options& o, bool split) {
   auto hp = std::make_unique<Harness>();
   Harness& h = *hp;
   World w(o.seed, o.faults);
@@ -1902,6 +1903,14 @@ Report run_exchange_ha(const Options& o) {
   base.ha_rto = rto;
   base.rejoin_retry = 5 * kMs;
   base.repl_log_bytes = std::size_t{1} << (16 + wl.below(8));  // small arenas read older records back from L3
+  // exchange_ha_split: the replica on its own stage ([ha] repl_thread), the sequencer on
+  // the seq stage, through a tee from 64 KiB (above the largest record; the sequencer
+  // meets its back-pressure) to production's 16 MiB. Drawn only here, so the exchange_ha
+  // world's workload stream, and every recorded exchange_ha seed, stay as they were.
+  if (split) {
+    base.repl_thread = true;
+    base.tee_bytes = std::size_t{1} << (16 + wl.below(9));
+  }
   for (std::size_t n = 0; n < 2; ++n) {
     NodeParams& p = h.params[n];
     p = base;
@@ -1979,7 +1988,7 @@ Report run_exchange_ha(const Options& o) {
   w.oracles().add_final_check(h.o_stream, [&h] { h.final_checks(); });
 
   return finish(
-      w, WorldKind::ExchangeHa, o,
+      w, split ? WorldKind::ExchangeHaSplit : WorldKind::ExchangeHa, o,
       [&h] {
         ExchangeProc* x[2] = {h.node_proc(0), h.node_proc(1)};
         if (x[0] == nullptr || x[1] == nullptr) return false;
@@ -2076,5 +2085,9 @@ Report run_exchange_ha(const Options& o) {
                " gated=" + std::to_string(h.crashes_gated);
       });
 }
+}  // namespace
+
+Report run_exchange_ha(const Options& o) { return run_exchange_ha_world(o, false); }
+Report run_exchange_ha_split(const Options& o) { return run_exchange_ha_world(o, true); }
 
 }  // namespace lle::sim::worlds::detail

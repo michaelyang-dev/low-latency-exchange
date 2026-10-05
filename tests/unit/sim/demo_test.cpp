@@ -17,11 +17,13 @@ namespace {
 using worlds::WorldKind;
 
 // The worlds of this build, except `ha`: it has its own seeded test
-// (tests/integration/repl) and generates its own fault schedule.
+// (tests/integration/repl) and generates its own fault schedule; and except
+// exchange_ha_split, which runs the exchange_ha world again in split mode and has its own
+// determinism test (sim_determinism_exchange_ha_split_8x2).
 std::vector<WorldKind> test_worlds() {
   std::vector<WorldKind> v;
   for (const WorldKind w : worlds::built_worlds()) {
-    if (w != WorldKind::Ha) v.push_back(w);
+    if (w != WorldKind::Ha && w != WorldKind::ExchangeHaSplit) v.push_back(w);
   }
   return v;
 }

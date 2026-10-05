@@ -103,5 +103,9 @@ if(LLE_BUILD_TESTS AND TARGET lle_sim_exchange)
     add_test(NAME sim_determinism_exchange_ha_8x2
       COMMAND exsim --world=exchange_ha --seed=1000 --seeds=8 --check-determinism --quiet)
     set_tests_properties(sim_determinism_exchange_ha_8x2 PROPERTIES LABELS "unit;sim" TIMEOUT ${LLE_SIM_SLOW_TEST_TIMEOUT})
+    add_test(NAME sim_determinism_exchange_ha_split_8x2
+      COMMAND exsim --world=exchange_ha_split --seed=1000 --seeds=8 --check-determinism --quiet)
+    set_tests_properties(sim_determinism_exchange_ha_split_8x2 PROPERTIES LABELS "unit;sim"
+                         TIMEOUT ${LLE_SIM_SLOW_TEST_TIMEOUT})
   endif()
 endif()

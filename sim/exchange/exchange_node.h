@@ -137,6 +137,7 @@ struct SimReplEnv {
   [[noreturn]] static void exit(int code) { throw ProcessExit{code}; }
 };
 using SimReplStage = lle::exch::BasicReplStage<SimReplEnv>;
+using SimSeqSide = lle::exch::BasicSeqSide<SimReplEnv>;
 using SimRejoinParts = lle::exch::RejoinParts<worlds::SimSegmentDir, SimPreparer, SimRecordLog, SimOutDay>;
 
 // The gateways' input queues are the node's SCQs (shared.h), seen through taps that
@@ -265,6 +266,10 @@ struct NodeParams {
   Nanos rejoin_retry = 5'000'000;
   Nanos ha_rto = 2'000'000;
   std::size_t repl_log_bytes = std::size_t{8} << 20;
+  // [ha] repl_thread: the replica on its own stage ("thread"), the sequencer on the seq
+  // stage (BasicSeqSide), its records reaching the record log through a tee of this size.
+  bool repl_thread = false;
+  std::size_t tee_bytes = std::size_t{16} << 20;
 
   [[nodiscard]] std::string journal_prefix(std::uint32_t date) const;
   [[nodiscard]] std::string outlog_root() const;
@@ -329,6 +334,12 @@ class ExchangeProc final : public Process {
     ExchangeProc* p;
     bool poll() { return p->repl_poll(); }
   };
+  // Split mode (repl_thread): the seq thread runs the sequencer (BasicSeqSide), the
+  // ReplHost is the repl thread.
+  struct SeqSideHost {
+    ExchangeProc* p;
+    bool poll() { return p->seq_side_poll(); }
+  };
   // The rejoin steps' storage (start_impl.h Io) on the node's disk.
   struct RejoinIo : SimRecoveryIo {
     std::uint64_t read_incarnation(const std::string& path);
@@ -348,6 +359,8 @@ class ExchangeProc final : public Process {
   void complete_rejoin();
   void finish_boot();
   bool repl_poll();
+  bool seq_side_poll();
+  [[nodiscard]] bool split() const noexcept { return p_.paired && p_.repl_thread; }
   void exit_process(int code);
   [[nodiscard]] lle::exch::ReplStageConfig repl_config(std::uint64_t incarnation, std::uint64_t digest) const;
 
@@ -386,6 +399,8 @@ class ExchangeProc final : public Process {
   Supervisor supervisor_{this};
   Follower follower_stage_{this};
   ReplHost repl_host_{this};
+  SeqSideHost seq_side_host_{this};
+  std::unique_ptr<SimSeqSide> seq_side_;
   lle::exch::RecoveredDay recovered_;
   std::uint64_t recovered_index_ = 0;
   std::uint64_t rejoin_from_ = 0;  // the journal's end when the rejoin began

@@ -37,14 +37,15 @@ namespace lle::sim::worlds {
 // Demo worlds (toy components) and real worlds (production components).
 enum class WorldKind : std::uint8_t {
   PingPong, Wal, Stream, Witness, Journal, Arbiter, Soupbin, Utcp, Ha, Outlog, Snapshot, Single, KillSwitchCross,
-  Exchange, ExchangeHa
+  Exchange, ExchangeHa, ExchangeHaSplit
 };
 inline constexpr WorldKind kAllWorlds[] = {WorldKind::PingPong, WorldKind::Wal,     WorldKind::Stream,
                                            WorldKind::Witness,  WorldKind::Journal, WorldKind::Arbiter,
                                            WorldKind::Soupbin,  WorldKind::Utcp,    WorldKind::Ha,
                                            WorldKind::Outlog,   WorldKind::Snapshot,
                                            WorldKind::Single,   WorldKind::KillSwitchCross,
-                                           WorldKind::Exchange, WorldKind::ExchangeHa};
+                                           WorldKind::Exchange, WorldKind::ExchangeHa,
+                                           WorldKind::ExchangeHaSplit};
 
 [[nodiscard]] std::string_view world_name(WorldKind w) noexcept;
 // Whether this build contains the world's components (sim/CMakeLists.txt builds a
@@ -100,6 +101,7 @@ Report run_single(const Options& o);
 Report run_kill_switch_cross(const Options& o);
 Report run_exchange(const Options& o);
 Report run_exchange_ha(const Options& o);
+Report run_exchange_ha_split(const Options& o);  // exchange_ha with [ha] repl_thread
 // Shared tail: install faults, run phases, collect the report. `shape` lets a
 // world restrict the generated fault schedule to its scenario (never applied
 // to a --replay schedule, which is installed exactly).

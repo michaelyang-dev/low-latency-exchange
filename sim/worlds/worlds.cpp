@@ -40,6 +40,8 @@ std::string_view world_name(WorldKind w) noexcept {
       return "exchange";
     case WorldKind::ExchangeHa:
       return "exchange_ha";
+    case WorldKind::ExchangeHaSplit:
+      return "exchange_ha_split";
   }
   return "?";
 }
@@ -106,6 +108,7 @@ bool world_built(WorldKind w) noexcept {
     case WorldKind::Exchange:
       return LLE_WORLD_EXCHANGE != 0;
     case WorldKind::ExchangeHa:
+    case WorldKind::ExchangeHaSplit:
       return LLE_WORLD_EXCHANGE_HA != 0;
   }
   return false;
@@ -189,6 +192,8 @@ Report run_world(WorldKind w, const Options& o) {
 #if LLE_WORLD_EXCHANGE_HA
     case WorldKind::ExchangeHa:
       return detail::run_exchange_ha(o);
+    case WorldKind::ExchangeHaSplit:
+      return detail::run_exchange_ha_split(o);
 #endif
     default:
       break;

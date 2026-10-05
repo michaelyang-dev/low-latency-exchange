@@ -137,7 +137,12 @@ void ExchangeProc::recover_or_start() {
     rlog_ = std::make_unique<SimRecordLog>(p_.repl_log_bytes, p_.repl_log_bytes / 64, p_.journal_prefix(d_.date),
                                            d_.date, SimL3Opener{&node_}, &hooks_.held);
   }
-  seq_ring_ = std::make_unique<SimSeqRing>(sh_->l2, rlog_.get());
+  // Node::open: in split mode the sequencer's records reach the record log through a tee.
+  if (split()) {
+    sh_->split.tee_mem.reset(new std::uint64_t[p_.tee_bytes / 8]());
+    sh_->split.tee.init(reinterpret_cast<std::byte*>(sh_->split.tee_mem.get()), p_.tee_bytes);
+  }
+  seq_ring_ = std::make_unique<SimSeqRing>(sh_->l2, rlog_.get(), split() ? &sh_->split.tee : nullptr);
   seq::SequencerConfig sc;
   sc.snapshot_every = p_.snapshot_every;
   sc.timer_batch = 64;
@@ -224,7 +229,7 @@ void ExchangeProc::begin_rejoin() {
     return;
   }
   repl_ = std::make_unique<SimReplStage>(*sh_, clock_, *sequencer_, *driver_, *rlog_,
-                                         repl_config(begun->incarnation, begun->config_digest), metrics_, false);
+                                         repl_config(begun->incarnation, begun->config_digest), metrics_, split());
   if (auto r = repl_->start_recovering(begun->config_digest, ex::rejoin_hooks(rejoin_io_, *rejoin_parts_)); !r) {
     fail(r.error());
     return;
@@ -257,6 +262,16 @@ void ExchangeProc::complete_rejoin() {
   }
   if (hooks_.rejoined) hooks_.rejoined(*role, recovered_index_, rejoin_from_);
   finish_boot();
+}
+
+bool ExchangeProc::seq_side_poll() {
+  if (exited_ || stopping_) return false;
+  try {
+    return seq_side_->poll();
+  } catch (const ProcessExit& e) {
+    exit_process(e.code);
+    return true;
+  }
 }
 
 bool ExchangeProc::repl_poll() {
@@ -334,7 +349,7 @@ void ExchangeProc::finish_boot() {
   if (paired) {
     if (!repl_) {
       repl_ = std::make_unique<SimReplStage>(*sh_, clock_, *sequencer_, *driver_, *rlog_,
-                                             repl_config(1, sequencer_->config_digest()), metrics_, false);
+                                             repl_config(1, sequencer_->config_digest()), metrics_, split());
     }
   } else {
     seq_stage_ = std::make_unique<SimSeqStage>(*driver_);
@@ -409,7 +424,8 @@ void ExchangeProc::finish_boot() {
   }
 
   // Node::run: a paired day's replica starts paired once the stages exist; the seq
-  // stage is the ReplStage (no repl_thread), registered first on a rejoin.
+  // stage is the ReplStage (no repl_thread), registered first on a rejoin. In split mode
+  // the ReplStage is the repl thread and BasicSeqSide the seq thread.
   if (repl_ && !repl_->started()) {
     if (auto r = repl_->start(sequencer_->config_digest()); !r) {
       fail(r.error());
@@ -417,7 +433,11 @@ void ExchangeProc::finish_boot() {
     }
   }
   if (paired) {
-    if (!rejoin_) n.add_stage(repl_host_, "x-seq");
+    if (!rejoin_) n.add_stage(repl_host_, split() ? "x-repl" : "x-seq");
+    if (split()) {
+      seq_side_ = std::make_unique<SimSeqSide>(*sh_, *sequencer_, *driver_);
+      n.add_stage(seq_side_host_, "x-seq");
+    }
   } else {
     n.add_stage(*seq_stage_, "x-seq");
   }
