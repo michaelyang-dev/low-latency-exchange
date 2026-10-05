@@ -94,9 +94,7 @@ struct ReloadResult {
 // only before the pipeline starts.
 struct RejoinHooks {
   std::function<bool(std::uint64_t)> truncate;          // journal (L3) and RecordLog to index t
-  // Engine and output log from records 1..t; the flag: a RESUME's (the node's journal is
-  // the history), else a joiner's, whose outputs past the output log wait for release.
-  std::function<ReloadResult(std::uint64_t, bool)> reload;
+  std::function<ReloadResult(std::uint64_t)> reload;    // engine and output log from records 1..t
   // Before an exit 5 (what the node had to do, the index): the restart-loop guard's record
   // (restart_guard.h). Optional.
   std::function<void(const char*, std::uint64_t)> before_restart;
@@ -506,7 +504,7 @@ class BasicReplStage {
       if (t >= sh_->egress_state.applied.load() && t <= log_->tail().last_index) return;
       restart_rejoin("reload the engine to", t);
     }
-    const ReloadResult r = hooks_.reload(t, replica_ && replica_->reload_is_resume());
+    const ReloadResult r = hooks_.reload(t);
     if (!r.ok) {
       std::fprintf(stderr, "exchanged: rejoin: engine reload to %llu failed\n", static_cast<unsigned long long>(t));
       Env::exit(2);

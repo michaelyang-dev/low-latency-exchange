@@ -221,7 +221,7 @@ bool truncate_journal_to(Io& io, Parts& p, std::uint64_t t) {
 // RejoinHooks::reload: the engine and the output log from records 1..t (10 §5 step 3);
 // snapshots above t describe records that are gone.
 template <class Io, class Parts>
-ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t, bool resume = false) {
+ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t) {
   ReloadResult out;
   journal::RecoveryOptions again;
   again.day = p.date;
@@ -242,10 +242,7 @@ ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t, bool resume = false) {
   } else {
     for (const std::uint64_t i : io.remove_snapshots_above(p.snapshots_dir, t))
       io.note("exchanged: rejoin: snapshot at " + std::to_string(i) + " above the truncation point removed");
-    // A joiner's outputs that the output log does not hold yet wait for the release
-    // watermark: its primary may not have released, and may still lose, their records
-    // (DST-013). A RESUME's journal is the day's history: they are written at once.
-    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots, !resume);
+    auto day = basic_replay_day(io, p.dir, rr, p.engine, p.out, p.layout, p.config, p.replay_snapshots);
     if (!day) {
       io.warn("exchanged: rejoin: " + day.error());
       return out;
@@ -254,8 +251,7 @@ ReloadResult reload_to(Io& io, Parts& p, std::uint64_t t, bool resume = false) {
   }
   io.note("exchanged: rejoin: engine reloaded to " + std::to_string(t) + "; output log: " +
           std::to_string(p.recovered.outlog_verified) + " verified, " + std::to_string(p.recovered.outlog_appended) +
-          " regenerated, " + std::to_string(p.recovered.outlog_deferred) + " to release, " +
-          std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
+          " regenerated, " + std::to_string(p.recovered.outlog_rewritten) + " files rewritten");
   nodelog::replayed(t, p.recovered.outlog_verified, p.recovered.outlog_appended);
   out.ok = true;
   out.timers = p.recovered.timers;
@@ -270,7 +266,7 @@ template <class Io, class Parts>
 RejoinHooks rejoin_hooks(Io& io, Parts& p) {
   RejoinHooks h;
   h.truncate = [&io, &p](std::uint64_t t) { return truncate_journal_to(io, p, t); };
-  h.reload = [&io, &p](std::uint64_t t, bool resume) { return reload_to(io, p, t, resume); };
+  h.reload = [&io, &p](std::uint64_t t) { return reload_to(io, p, t); };
   return h;
 }
 
@@ -278,8 +274,7 @@ RejoinHooks rejoin_hooks(Io& io, Parts& p) {
 // the journal now ends (the truncation point, plus after RESUME the new epoch's
 // EpochStart in L2). The solo primary of record (RESUME) lost its own instances: the
 // replication stage hands their InstanceDowns to the sequencer's first list (ADR-032).
-// A day that already ended only tells egress, in order, after the reloaded outputs it
-// has not had yet (RecoveredDay::deferred, which the engine stage hands on). `open_writer(rr)` is Node::open_writer
+// A day that already ended only tells egress, in order. `open_writer(rr)` is Node::open_writer
 // (-> std::expected<void, std::string>). Returns the role the handshake ended in.
 template <class Parts, class ReplT, class ClockT, class OpenWriter>
 std::expected<repl::Role, std::string> finish_rejoin(Parts& p, ReplT& repl, ClockT& clock, OpenWriter&& open_writer) {
@@ -301,9 +296,8 @@ std::expected<repl::Role, std::string> finish_rejoin(Parts& p, ReplT& repl, Cloc
     for (const auto& [session, instance] : p.recovered.live) repl.queue_instance_down(session, instance);
   }
   if (p.recovered.ended) {
-    // After the reloaded outputs still to release: the engine stage hands both to egress.
     p.sh.day_end_index.store(p.recovered.day_end_index);
-    p.recovered.deferred.push_back(RecoveredDay::DeferredOutput{p.recovered.day_end_index, md::OutKind::DayEnd, 0, {}});
+    (void)p.sh.egress.try_push(p.recovered.day_end_index, md::OutKind::DayEnd, 0, {});
   }
   return role;
 }

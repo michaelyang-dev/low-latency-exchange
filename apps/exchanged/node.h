@@ -78,7 +78,7 @@ class Node {
   std::expected<journal::RecoveryResult, std::string> restore_l2(journal::RecoveryResult rr);
   std::expected<void, std::string> rejoin();
   bool truncate_journal_to(std::uint64_t t);
-  ReloadResult reload_to(std::uint64_t t, bool resume);
+  ReloadResult reload_to(std::uint64_t t);
   std::expected<void, std::string> start_net();
   bool wait_net(const std::atomic<bool>& external_stop);
   void build_stages();
