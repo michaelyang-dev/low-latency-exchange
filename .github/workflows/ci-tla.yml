@@ -1,0 +1,65 @@
+name: ci-tla
+on:
+  push:
+    branches: [main]
+    paths: ['verify/tla/**', 'src/repl/**', 'src/witness/**', '.github/workflows/ci-tla.yml']
+  pull_request:
+    paths: ['verify/tla/**', 'src/repl/**', 'src/witness/**', '.github/workflows/ci-tla.yml']
+  schedule:
+    - cron: '17 3 * * *'
+
+jobs:
+  tlc:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Fetch pinned TLC (release v1.7.4 = TLC 2.19; the v1.8.0 asset is a rolling nightly)
+        run: |
+          curl -sSLf -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c
+      - name: Safety model must pass; every mutant must fail
+        # Push and PR runs use reduced bounds; the nightly run checks the full model.
+        run: |
+          cfg=HotStandbyCI.cfg
+          if [ "${{ github.event_name }}" = "schedule" ]; then cfg=HotStandby.cfg; fi
+          verify/tla/run_tlc.sh "$PWD/tla2tools.jar" auto "$cfg"
+      - name: Trace converter fixtures (pass/ must validate, fail/ must be rejected)
+        run: |
+          python3 verify/tla/trace/validate.py --jar "$PWD/tla2tools.jar" verify/tla/trace/fixtures/pass/*.ndjson
+          for f in verify/tla/trace/fixtures/fail/*.ndjson; do
+            if python3 verify/tla/trace/validate.py --jar "$PWD/tla2tools.jar" "$f"; then
+              echo "negative fixture $f was accepted"; exit 1
+            fi
+          done
+
+  trace-validation:
+    # R-08: replication traces from the simulator's ha world, replayed against
+    # HotStandbyTrace.tla with TLC. Nightly, on fresh seeds derived from the run number.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Fetch pinned TLC (release v1.7.4 = TLC 2.19; the v1.8.0 asset is a rolling nightly)
+        run: |
+          curl -sSLf -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c
+      - name: Build exsim_ha (preset sim)
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev clang-21
+          CC=clang-21 CXX=clang++-21 cmake --preset sim
+          cmake --build build/sim -j --target exsim_ha
+      - name: Export and validate traces
+        run: |
+          base=$(( 1000000 + ${{ github.run_number }} * 100 ))
+          ha=$(find build/sim -name exsim_ha -type f -perm -u+x | head -1)
+          mkdir -p traces
+          "$ha" --seed=$base --seeds=60 --clients=2 --orders=6 --tla-trace=traces --quiet
+          "$ha" --seed=$((base + 60)) --seeds=10 --tla-trace=traces --quiet
+          python3 verify/tla/trace/validate.py --jar "$PWD/tla2tools.jar" traces/*.ndjson --workers 4
+

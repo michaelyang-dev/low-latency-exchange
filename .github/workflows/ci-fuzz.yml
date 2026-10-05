@@ -1,0 +1,52 @@
+name: ci-fuzz
+# Coverage-guided fuzzing of every lle_fuzz() harness with libFuzzer, ASan and
+# UBSan (docs/dev/conventions.md "Tests"). Pull requests touching parsers get a
+# short run per target; the nightly run is longer and keeps a corpus cache.
+on:
+  pull_request:
+    paths: ['src/proto/**', 'src/journal/**', 'src/engine/**', 'src/lob/**', 'src/book/**', 'src/log/**',
+            'src/net/utcp/**', 'fuzz/**', '.github/workflows/ci-fuzz.yml']
+  schedule:
+    - cron: '23 1 * * *'
+
+jobs:
+  libfuzzer:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake zlib1g-dev liburing-dev libbpf-dev libxdp-dev clang-21 libclang-rt-21-dev
+      - name: Configure and build (preset fuzz)
+        run: |
+          CC=clang-21 CXX=clang++-21 cmake --preset fuzz
+          cmake --build build/fuzz -j
+      - name: Restore corpora
+        uses: actions/cache@v4
+        with:
+          path: fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz every target
+        run: |
+          secs=60
+          if [ "${{ github.event_name }}" = "schedule" ]; then secs=900; fi
+          status=0
+          while IFS='=' read -r name bin; do
+            [ -n "$name" ] || continue
+            mkdir -p "fuzz-corpus/$name" "fuzz-crashes/$name"
+            echo "== $name ($secs s)"
+            if ! "$bin" -max_total_time="$secs" -timeout=10 -rss_limit_mb=4096 \
+                 -artifact_prefix="fuzz-crashes/$name/" "fuzz-corpus/$name"; then
+              echo "FAIL: $name found a crash"; status=1
+            fi
+          done < build/fuzz/fuzz_targets.txt
+          exit $status
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz-crashes

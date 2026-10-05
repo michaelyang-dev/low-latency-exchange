@@ -1,0 +1,65 @@
+name: ci-sim
+# Deterministic simulation (docs/plan/09). Pull requests: determinism check
+# plus a 1,000-seed swarm campaign whose seed base comes from the commit, so
+# every PR explores new seeds reproducibly. Nightly: 20,000 seeds with the
+# must-hit probe check. Weekly: re-verify every counted bug from its seed.
+# Campaigns run every world of the build (`exsim` defaults to all of them:
+# the demo worlds, witness, journal, arbiter, soupbin, utcp and ha). The ha
+# world's own driver, exsim_ha, adds scenario knobs and the TLA+ trace export
+# (validated by ci-tla).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '7 3 * * *'   # nightly campaign
+    - cron: '37 4 * * 0'  # weekly bug re-verification
+
+concurrency:
+  group: ci-sim-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: true
+
+jobs:
+  campaign:
+    if: github.event.schedule != '37 4 * * 0'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev clang-21 python3-yaml
+      - name: Build (preset sim)
+        run: |
+          CC=clang-21 CXX=clang++-21 cmake --preset sim
+          cmake --build build/sim -j
+      - name: All tests in the LLE_SIM build (includes sim_determinism_128x2 and the ledger self-test)
+        run: ctest --test-dir build/sim --output-on-failure -LE fuzz -j 4
+      - name: Swarm campaign
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python3 tools/sim/campaign.py --exsim build/sim/sim/exsim --seeds 20000 --jobs 4 \
+              --seed-base random --check-determinism --require-probes --ledger-dir sim-ledger-out
+          else
+            python3 tools/sim/campaign.py --exsim build/sim/sim/exsim --seeds 1000 --jobs 4 \
+              --seed-base commit --check-determinism --ledger-dir sim-ledger-out
+          fi
+      # Always kept: campaigns.jsonl is the accounting of simulation work done
+      # (09 §10); failing_seeds.json appears only when a seed failed.
+      - name: Keep campaign records and failing seeds
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-campaign-${{ github.run_id }}
+          path: sim-ledger-out
+          if-no-files-found: ignore
+
+  verify-bugs:
+    if: github.event.schedule == '37 4 * * 0'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # verify_bugs.py checks out dst/DST-NNN/{found,fix} tags
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev clang-21 python3-yaml
+      - name: Re-verify every counted bug (T23a)
+        run: CC=clang-21 CXX=clang++-21 python3 tools/ledger/verify_bugs.py --jobs 4

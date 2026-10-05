@@ -1,0 +1,49 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" }
+    },
+    { "name": "dev", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_CXX_FLAGS_DEBUG": "-O1 -g" } },
+    { "name": "release", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" } },
+    {
+      "name": "bench",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O3 -g -fno-omit-frame-pointer -DNDEBUG",
+        "LLE_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "b0",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG", "LLE_BUILD_TESTS": "OFF" }
+    },
+    { "name": "asan-ubsan", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "LLE_SANITIZE": "address;undefined" } },
+    { "name": "tsan", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "LLE_SANITIZE": "thread" } },
+    { "name": "msan", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "LLE_SANITIZE": "memory" } },
+    { "name": "fuzz", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "LLE_SANITIZE": "fuzzer-no-link;address;undefined", "LLE_LIBFUZZER": "ON" } },
+    { "name": "sim", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "LLE_SIM": "ON" } },
+    { "name": "coverage", "inherits": "base", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_CXX_FLAGS": "-fprofile-instr-generate -fcoverage-mapping" } }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "bench", "configurePreset": "bench" },
+    { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "sim", "configurePreset": "sim" }
+  ],
+  "testPresets": [
+    { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } },
+    { "name": "asan-ubsan", "configurePreset": "asan-ubsan", "output": { "outputOnFailure": true } },
+    { "name": "tsan", "configurePreset": "tsan", "output": { "outputOnFailure": true } },
+    { "name": "sim", "configurePreset": "sim", "output": { "outputOnFailure": true } }
+  ]
+}

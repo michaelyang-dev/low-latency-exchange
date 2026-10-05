@@ -1,0 +1,128 @@
+name: ci-linux
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Probe runner capabilities (docs/plan/02 §4)
+        run: |
+          uname -a
+          grep -c processor /proc/cpuinfo
+          (sudo sysctl kernel.io_uring_disabled 2>/dev/null || echo "io_uring_disabled sysctl absent")
+          (sudo perf stat -e cycles true 2>&1 | tail -3) || echo "no PMU"
+          (sudo sysctl -w vm.nr_hugepages=16 && grep Huge /proc/meminfo) || echo "no hugepages"
+
+  build-test:
+    needs: probe
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
+        compiler: [clang, gcc]
+        preset: [dev, asan-ubsan]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake zlib1g-dev liburing-dev libbpf-dev clang-21 gcc-15 g++-15
+      - name: Select compiler
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then echo "CC=clang-21" >> $GITHUB_ENV; echo "CXX=clang++-21" >> $GITHUB_ENV;
+          else echo "CC=gcc-15" >> $GITHUB_ENV; echo "CXX=g++-15" >> $GITHUB_ENV; fi
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }} -j
+      - name: Test
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -j 4
+      - name: Dependency audit (T01)
+        run: tools/ci/check_deps.sh
+
+  net-vm:
+    # Root-only network tests on the runner VM itself (not a container: Docker's
+    # default seccomp profile blocks io_uring): veth + netns feeds and echoes for
+    # every backend, busy-poll knobs, NAPI netlink (07 §5).
+    needs: probe
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev liburing-dev libbpf-dev clang-21 ethtool iproute2
+      - run: CC=clang-21 CXX=clang++-21 cmake --preset dev -DLLE_ONLY="src/common;src/env;src/runtime;src/concurrent;src/net;tests/unit/net_sock;tests/unit/net_busypoll;tests/unit/net_uring;tests/unit/net_hwts;tests/unit/net_utcp;tests/unit/net_xsk;tests/integration/net;tests/integration/utcp;bench/net;bench/net_xsk"
+      - run: cmake --build build/dev -j
+      - name: Unit tests as root (busy-poll knobs need CAP_NET_ADMIN)
+        run: sudo ctest --test-dir build/dev --output-on-failure -L unit -j 4
+      - name: veth/netns integration (label vm): every socket backend, utcp interop with kernel TCP, AF_XDP copy mode
+        run: sudo ctest --test-dir build/dev --output-on-failure -L vm
+
+  docs:
+    # Every relative Markdown link resolves, and docs/results/EVIDENCE.md is what the
+    # evidence builder generates from the committed evidence (docs/plan/12 §8).
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Markdown links
+        run: |
+          python3 tools/ci/check_doc_links.py --selftest
+          python3 tools/ci/check_doc_links.py
+      - name: EVIDENCE.md is up to date (when the documentation is in the repository)
+        run: if [ -f docs/results/EVIDENCE.md ]; then python3 tools/evidence/build_evidence.py --check; fi
+      - name: No developer-machine paths in tracked files (logs and scripts must be repository-relative)
+        run: "! git grep -n --text -e '/Users/' -e '/home/runner/' -e 'claude-[0-9]' -- . ':!.github/workflows/ci-linux.yml'"
+
+  interop:
+    # nassau (an independent Java SoupBinTCP and MoldUDP64 implementation) against
+    # exchanged, with induced MoldUDP64 loss (plan 03 §5; T08, T09). Pinned jars.
+    needs: probe
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev liburing-dev clang-21
+      - run: tests/integration/nassau/fetch_nassau.sh "$RUNNER_TEMP/nassau"
+      - run: |
+          CC=clang-21 CXX=clang++-21 cmake -S . -B build/interop -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLE_BUILD_FUZZ=OFF -DLLE_BUILD_BENCH=OFF -DLLE_NASSAU_DIR="$RUNNER_TEMP/nassau" \
+            -DLLE_ONLY="src/common;src/env;src/concurrent;src/runtime;src/proto;src/lob;src/book;src/engine;src/sequencer;src/journal;src/snapshot;src/outlog;src/repl;src/witness;src/admin;src/log;src/metrics;src/net;src/gateway;src/md;apps/exchanged;apps/witnessd;apps/journal_replay;apps/itch_validate;apps/journal_diff;apps/snapshotd;apps/nlog_decode;tests/integration/nassau"
+      - run: cmake --build build/interop -j --target nassau_interop_test
+      - name: nassau interop, epoll and io_uring backends
+        run: |
+          LLE_E2E_BACKEND=epoll ctest --test-dir build/interop -L interop --output-on-failure
+          LLE_E2E_BACKEND=uring ctest --test-dir build/interop -L interop --output-on-failure
+
+  tsan:
+    needs: probe
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev clang-21
+      - run: CC=clang-21 CXX=clang++-21 cmake --preset tsan
+      - run: cmake --build build/tsan -j
+      - run: ctest --test-dir build/tsan --output-on-failure -L unit -j 4
+
+  sim-purity:
+    needs: probe
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build cmake zlib1g-dev clang-21
+      - run: CC=clang-21 CXX=clang++-21 cmake --preset sim
+      - run: cmake --build build/sim -j
+      - name: Determinism source lint (self-test, then the tree)
+        run: |
+          python3 tools/ci/check_determinism_lint.py --selftest
+          python3 tools/ci/check_determinism_lint.py
+      - name: Purity audit of deterministic libraries
+        run: |
+          libs=$(find build/sim/src build/sim/sim -name 'liblle_*.a' | grep -E 'liblle_(engine|lob|book|sequencer|journal|itch50|ouch50|soupbin|moldudp64|glimpse|snapshot|outlog|repl|witness|gateway|sim|sim_worlds|sim_exchange|sim_ha)\.a' || true)
+          [ -z "$libs" ] || tools/ci/check_sim_purity.sh $libs

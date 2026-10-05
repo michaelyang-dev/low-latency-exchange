@@ -1,0 +1,37 @@
+name: ci-msan
+# MemorySanitizer over the deterministic components and their tests
+# (docs/design/determinism.md: uninitialized memory is a determinism bug).
+# MSan needs every linked library instrumented, so libc++/libc++abi and zlib are
+# built with MSan first (tools/ci/build_msan_libcxx.sh) and cached.
+on:
+  schedule:
+    - cron: '53 2 * * *'
+  pull_request:
+    paths: ['tools/ci/build_msan_libcxx.sh', 'tools/ci/msan_flags.sh', '.github/workflows/ci-msan.yml']
+
+jobs:
+  msan:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake clang-21 libclang-rt-21-dev git
+      - name: Cache MSan libc++ and zlib
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: msan-prefix
+          key: msan-${{ hashFiles('tools/ci/build_msan_libcxx.sh') }}-llvmorg-21.1.8
+      - name: Build MSan libc++ and zlib
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/ci/build_msan_libcxx.sh "$PWD/msan-prefix" llvmorg-21.1.8 -21
+      - name: Configure and build
+        run: |
+          mapfile -t F < <(tools/ci/msan_flags.sh "$PWD/msan-prefix")
+          cmake -S . -B build/msan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLLE_SANITIZE=memory \
+            -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 "${F[@]}" -DLLE_BUILD_BENCH=OFF \
+            -DLLE_ONLY="src/common;src/env;src/runtime;src/concurrent;src/lob;src/book;src/engine;src/sequencer;src/journal;src/snapshot;src/outlog;src/witness;src/repl;src/proto;sim;tests/unit;tests/golden;tests/sim_regressions"
+          cmake --build build/msan -j
+      - name: Test
+        run: ctest --test-dir build/msan --output-on-failure -LE fuzz -j 4 --timeout 900

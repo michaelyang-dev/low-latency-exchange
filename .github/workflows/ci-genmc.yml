@@ -1,0 +1,41 @@
+name: ci-genmc
+on:
+  push:
+    branches: [main]
+    paths: ['src/concurrent/**', 'verify/genmc/**', 'tools/genmc/**', '.github/workflows/ci-genmc.yml']
+  pull_request:
+    paths: ['src/concurrent/**', 'verify/genmc/**', 'tools/genmc/**', '.github/workflows/ci-genmc.yml']
+  schedule:
+    - cron: '41 2 * * *'
+
+jobs:
+  genmc:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 22 and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-22 llvm-22 llvm-22-dev libclang-22-dev libffi-dev zlib1g-dev libedit-dev g++-15
+      - name: Cache GenMC build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: genmc-install
+          key: genmc-v0.19.0-llvm22
+      - name: Build GenMC v0.19.0
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v0.19.0 https://github.com/MPI-SWS/genmc.git genmc-src
+          cmake -S genmc-src -B genmc-build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_PREFIX_PATH=/usr/lib/llvm-22 -DCMAKE_CXX_COMPILER=g++-15 \
+            -DCMAKE_INSTALL_PREFIX=$PWD/genmc-install
+          cmake --build genmc-build -j
+          cmake --install genmc-build
+      - name: Queue headers include only the allowed headers (GenMC-checkable)
+        run: tools/genmc/check_includes.sh
+      - name: Run every harness under RC11 and IMM
+        # --quick skips the long pre-registered SCQ bounds, which run on a lab or VM
+        # host without a CI time limit (verify/genmc/RESULTS.md).
+        run: PATH=$PWD/genmc-install/bin:$PATH GENMC_TIMEOUT=3600 tools/genmc/run_all.sh --quick

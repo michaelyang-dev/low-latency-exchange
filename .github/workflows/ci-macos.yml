@@ -1,0 +1,23 @@
+name: ci-macos
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [dev, asan-ubsan, tsan]
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ninja cmake || true
+      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --build build/${{ matrix.preset }} -j
+      - run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -j 3

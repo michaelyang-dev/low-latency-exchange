@@ -1,0 +1,12 @@
+function(lle_apply_sanitizers target)
+  if(NOT LLE_SANITIZE)
+    return()
+  endif()
+  string(REPLACE ";" "," san "${LLE_SANITIZE}")
+  target_compile_options(${target} INTERFACE -fsanitize=${san} -fno-omit-frame-pointer -fno-sanitize-recover=all)
+  target_link_options(${target} INTERFACE -fsanitize=${san})
+  if("memory" IN_LIST LLE_SANITIZE)
+    # Report where an uninitialized value came from (MSan nightly, docs/design/determinism.md).
+    target_compile_options(${target} INTERFACE -fsanitize-memory-track-origins=2)
+  endif()
+endfunction()

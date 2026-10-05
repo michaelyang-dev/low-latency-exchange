@@ -1,0 +1,48 @@
+name: ci-stress
+# T28 queue stress accumulation (docs/plan/08 §8; docs/verification/queues-stress.md):
+# >= 1e10 checksummed items per production queue under TSan, on Linux x86-64 (TSO) and
+# macOS arm64 (a weaker hardware memory model). One TSan pass of the long stress binary
+# moves about 1e8 items per queue, so the total is accumulated over shards: each job runs
+# tools/stress/run_shards.py within the job time limit and uploads its ledger records.
+# Records are merged into verify/stress/runs.jsonl by PR; tools/stress/sum_items.py
+# reports progress at the current source tree hash.
+on:
+  schedule:
+    - cron: '41 2 * * 6'   # weekly
+  workflow_dispatch:
+
+jobs:
+  shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build cmake clang-21
+          echo "CC=clang-21" >> $GITHUB_ENV; echo "CXX=clang++-21" >> $GITHUB_ENV
+      - name: Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Build the long stress binary under TSan
+        run: |
+          cmake --preset tsan -DLLE_ONLY="src/common;src/env;src/concurrent;src/runtime;tests/unit/concurrent"
+          cmake --build build/tsan --target concurrent_stress_long_test
+      - name: Run shards within the job budget
+        run: |
+          python3 tools/stress/run_shards.py --bin build/tsan/tests/unit/concurrent/concurrent_stress_long_test \
+            --sanitizer tsan --runs 1000 --time-budget 18000 \
+            --seed-offset-start $(( ${{ github.run_number }} * 100000 + ${{ matrix.shard }} * 1000 )) \
+            --ledger stress-${{ matrix.os }}-${{ matrix.shard }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stress-${{ matrix.os }}-${{ matrix.shard }}
+          path: stress-*.jsonl
+          if-no-files-found: ignore
