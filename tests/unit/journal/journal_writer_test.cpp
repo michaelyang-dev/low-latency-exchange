@@ -241,6 +241,84 @@ TEST(JournalWriter, SegmentSwitchDrainsThenChains) {
   testing::expect_journal_matches(f.dir, s, s.size());
 }
 
+// A read of a range near the tail (RecordLog's L3 window during a catch-up) walks only
+// the segments that hold it with skip_before_from, and delivers the same records as a
+// read that walks the whole day.
+TEST(JournalReader, SkipBeforeFromWalksOnlyTheSegmentsOfTheRange) {
+  constexpr std::uint64_t kSmall = kSegmentHeaderBytes + 128 * 1024;
+  Fixture f(8, kSmall);
+  RecordStream s(11, RecordStream::Mix{140, 50, 20000});
+  for (int i = 0; i < 3000; ++i) append_one(f.w, s.next(), s.sealer());
+  drain(f.w);
+  ASSERT_GE(f.w.stats().segments, 4u);
+  MemWriter::AssignedSegment a;
+  std::vector<MemWriter::AssignedSegment> assigned;
+  while (f.w.take_assigned(a)) assigned.push_back(a);
+  const std::uint64_t from = assigned.back().header.first_index + 3;  // in the last segment
+  auto read = [&](bool skip, ReadSummary& sum) {
+    std::vector<std::uint64_t> got;
+    ReadOptions o;
+    o.day = kDay;
+    o.from_index = from;
+    o.skip_before_from = skip;
+    sum = read_journal(f.dir, o, [&](const RecordView& r, const RecordLocation&) {
+      got.push_back(r.index());
+      EXPECT_TRUE(same_content(r, RecordView(s.at(r.index())))) << r.index();
+      return true;
+    });
+    return got;
+  };
+  ReadSummary full, skipped;
+  const std::vector<std::uint64_t> all = read(false, full);
+  const std::vector<std::uint64_t> tail = read(true, skipped);
+  EXPECT_EQ(tail, all);
+  ASSERT_FALSE(all.empty());
+  EXPECT_EQ(all.front(), from);
+  EXPECT_EQ(all.back(), s.size());
+  EXPECT_EQ(full.segments, assigned.size());
+  EXPECT_EQ(skipped.segments, 1u) << "the segments before the range were walked";
+  EXPECT_EQ(skipped.stop, full.stop);
+  EXPECT_EQ(skipped.chain, full.chain);
+}
+
+// A walk resumed right after a record (its segment, the next offset, the chain after it)
+// delivers what a walk from the start delivers after that record, across segments.
+TEST(JournalReader, AResumedWalkContinuesAfterTheRecord) {
+  constexpr std::uint64_t kSmall = kSegmentHeaderBytes + 128 * 1024;
+  Fixture f(8, kSmall);
+  RecordStream s(12, RecordStream::Mix{140, 50, 20000});
+  for (int i = 0; i < 3000; ++i) append_one(f.w, s.next(), s.sealer());
+  drain(f.w);
+  ASSERT_GE(f.w.stats().segments, 4u);
+  for (const std::uint64_t at : {std::uint64_t{1}, std::uint64_t{777}, std::uint64_t{2999}}) {
+    ReadOptions o;
+    o.day = kDay;
+    std::uint64_t seg = 0, off = 0;
+    ChainState chain;
+    (void)read_journal(f.dir, o, [&](const RecordView& r, const RecordLocation& loc) {
+      seg = loc.header->first_index;
+      off = loc.offset + r.len();
+      chain = ChainState{r.index(), loc.sealer->content_of(r.data()), r.ts_ns(), r.epoch()};
+      return r.index() < at;
+    });
+    ASSERT_EQ(chain.last_index, at);
+    ReadOptions r;
+    r.day = kDay;
+    r.resume_segment = seg;
+    r.resume_offset = off;
+    r.resume_chain = chain;
+    std::uint64_t next = at + 1;
+    const ReadSummary sum = read_journal(f.dir, r, [&](const RecordView& v, const RecordLocation&) {
+      EXPECT_EQ(v.index(), next);
+      EXPECT_TRUE(same_content(v, RecordView(s.at(v.index())))) << v.index();
+      ++next;
+      return true;
+    });
+    EXPECT_EQ(next, s.size() + 1) << "resumed after " << at;
+    EXPECT_EQ(sum.stop, ReadStop::End);
+  }
+}
+
 TEST(JournalWriter, NeedSegmentUntilOneIsPrepared) {
   MemSegmentDir dir;
   MemWriter w(writer_options());

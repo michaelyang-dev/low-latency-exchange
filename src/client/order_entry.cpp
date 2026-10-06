@@ -143,10 +143,16 @@ void HaOrderEntry::pump(Nanos now) {
 }
 
 void HaOrderEntry::on_response(std::span<const std::byte> m) noexcept {
-  if (m.size() < 13 || static_cast<char>(m[0]) == 'S') return;
+  if (m.size() < 13) return;
   const char t = static_cast<char>(m[0]);
-  // Every outbound type but S carries a UserRefNum at offset 9; Replaced carries
-  // the new one at 13 (and the original at 9).
+  // System Event names no message. Account Query Response carries NextUserRefNum at
+  // offset 9, one above the last UserRefNum consumed, so it would match the next Enter
+  // Order still pending and release it unprocessed; nor does it say which pending query
+  // it answers (a query re-sent after a takeover is answered twice). It releases nothing:
+  // a query goes with the messages before the next response that names one.
+  if (t == 'S' || t == 'Q') return;
+  // Every other outbound type carries a UserRefNum at offset 9; Replaced carries the
+  // new one at 13 (and the original at 9).
   const UserRefNum u9 = load_be32(m.data() + 9);
   const UserRefNum u13 = (t == 'U' && m.size() >= 17) ? load_be32(m.data() + 13) : 0;
   // Only solicited answers to a Cancel or Modify: Order Canceled with reason User

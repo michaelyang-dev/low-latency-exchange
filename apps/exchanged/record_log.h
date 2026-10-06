@@ -58,7 +58,10 @@ class BasicRecordLog {
     ring_ = std::make_unique<mold::MessageRing>(max_records_, arena_bytes_, base.last_index + 1);
     tail_ = base;
     window_.clear();
+    window_bytes_.clear();
     window_first_ = 0;
+    resume_offset_ = 0;
+    l3_seen_ = 0;
   }
 
   // Reloads records 1..upto from the L3 journal (a restart; cold). The newest that fit
@@ -110,6 +113,13 @@ class BasicRecordLog {
     return true;
   }
 
+  // The node's L3 durable index (the replication stage's poll): a read past the last
+  // record found in L3, of a record the arena no longer holds, then fails at once until
+  // durability passes that record, instead of walking the journal on every attempt (the
+  // arena can evict records the io stage has not made durable yet). Not set: every read
+  // looks in L3.
+  void note_durable(std::uint64_t d) noexcept { durable_hint_ = d; }
+
   [[nodiscard]] const journal::ChainState& tail() const noexcept { return tail_; }
   [[nodiscard]] std::uint64_t lowest() const noexcept { return ring_->lowest(); }
 
@@ -137,11 +147,22 @@ class BasicRecordLog {
   }
 
  private:
-  // Records older than the arena come from L3 a window at a time (catch-up and epoch
-  // scans read sequentially), so a scan costs one journal pass per window, not per record.
+  // Records older than the arena come from L3 a window at a time. A catch-up reads them
+  // in order and rewinds (go-back-N) to its oldest unacknowledged record, at most
+  // kRewindRecords back. Reading on past the window slides it: it keeps its newest
+  // kRewindRecords records and continues the journal walk where the window ended, so
+  // neither the reads nor the rewinds walk a segment again. Any other read fills a new
+  // window starting kRewindRecords before the record, skipping the segments before it.
   std::uint32_t read_l3(std::uint64_t idx, std::span<std::byte> out) const {
-    if (window_first_ == 0 || idx < window_first_ || idx >= window_first_ + window_.size()) {
-      if (!fill_window(idx)) return 0;
+    if (!in_window(idx)) {
+      if (idx > l3_seen_ && durable_hint_ <= l3_seen_) return 0;  // not in L3 yet
+      const bool slid = idx == window_first_ + window_.size() && window_first_ != 0 && slide_window();
+      if (!slid || !in_window(idx)) {
+        const std::uint64_t back = std::min<std::uint64_t>(idx - 1, kRewindRecords);
+        if (!fill_window(idx - back) || !in_window(idx)) {
+          if (!fill_window(idx)) return 0;  // large records cut the window short of idx
+        }
+      }
     }
     const auto& [off, len] = window_[idx - window_first_];
     if (len > out.size()) return 0;
@@ -152,26 +173,65 @@ class BasicRecordLog {
     window_.clear();
     window_bytes_.clear();
     window_first_ = 0;
-    auto dir = open_(l3_dir_);
-    if (!dir) return false;
+    resume_offset_ = 0;
     journal::ReadOptions o;
-    o.day = day_;
     o.from_index = from;
-    o.to_index = std::min(tail_.last_index, from + kWindowRecords - 1);
-    (void)journal::read_journal(*dir, o, [&](const journal::RecordView& r, const journal::RecordLocation& loc) {
-      if (r.index() != from + window_.size()) return false;
-      const std::size_t at = window_bytes_.size();
-      window_bytes_.insert(window_bytes_.end(), r.data(), r.data() + r.len());
-      store_le32(window_bytes_.data() + at + journal::hdr::kCrc, loc.sealer->content_of(r.data()));
-      window_.emplace_back(at, r.len());
-      return window_bytes_.size() < kWindowBytes;
-    });
-    if (window_.empty()) return false;
+    o.skip_before_from = true;  // a window near the tail costs the window, not the day
+    if (!walk_into_window(o, from)) return false;
     window_first_ = from;
     return true;
   }
+  // Drops all but the newest kRewindRecords records and reads on from where the window
+  // ended. False if it could not continue (the window is then unchanged or empty).
+  bool slide_window() const {
+    if (resume_offset_ == 0) return false;
+    const std::size_t drop = window_.size() > kRewindRecords ? window_.size() - kRewindRecords : 0;
+    if (drop != 0) {
+      const std::size_t cut = window_[drop].first;
+      window_bytes_.erase(window_bytes_.begin(), window_bytes_.begin() + static_cast<std::ptrdiff_t>(cut));
+      window_.erase(window_.begin(), window_.begin() + static_cast<std::ptrdiff_t>(drop));
+      for (auto& [off, len] : window_) off -= cut;
+      window_first_ += drop;
+    }
+    const std::size_t had = window_.size();
+    journal::ReadOptions o;
+    o.from_index = window_first_ + had;
+    o.resume_segment = resume_segment_;
+    o.resume_offset = resume_offset_;
+    o.resume_chain = resume_chain_;
+    (void)walk_into_window(o, window_first_);
+    return window_.size() > had;
+  }
+  // Appends records o.from_index.. to the window (whose first index is `first`) up to
+  // kWindowRecords or kWindowBytes, and remembers where the walk can resume.
+  bool walk_into_window(journal::ReadOptions o, std::uint64_t first) const {
+    auto dir = open_(l3_dir_);
+    if (!dir) return false;
+    o.day = day_;
+    o.to_index = std::min(tail_.last_index, first + kWindowRecords - 1);
+    const std::size_t had = window_.size();
+    (void)journal::read_journal(*dir, o, [&](const journal::RecordView& r, const journal::RecordLocation& loc) {
+      if (r.index() != first + window_.size()) return false;
+      const std::size_t at = window_bytes_.size();
+      window_bytes_.insert(window_bytes_.end(), r.data(), r.data() + r.len());
+      const std::uint32_t content = loc.sealer->content_of(r.data());
+      store_le32(window_bytes_.data() + at + journal::hdr::kCrc, content);
+      window_.emplace_back(at, r.len());
+      l3_seen_ = std::max(l3_seen_, r.index());
+      resume_segment_ = loc.header->first_index;
+      resume_offset_ = loc.offset + r.len();
+      resume_chain_ = journal::ChainState{r.index(), content, r.ts_ns(), r.epoch()};
+      return window_bytes_.size() < kWindowBytes;
+    });
+    return window_.size() > had;
+  }
+
+  [[nodiscard]] bool in_window(std::uint64_t idx) const noexcept {
+    return window_first_ != 0 && idx >= window_first_ && idx < window_first_ + window_.size();
+  }
 
   static constexpr std::uint64_t kWindowRecords = 16'384;
+  static constexpr std::uint64_t kRewindRecords = 8'192;  // repl::Config::window_records
   static constexpr std::size_t kWindowBytes = std::size_t{4} << 20;
 
   std::size_t arena_bytes_;
@@ -184,6 +244,12 @@ class BasicRecordLog {
   mutable std::vector<std::pair<std::size_t, std::uint32_t>> window_;  // L3 window: offset, length
   mutable std::vector<std::byte> window_bytes_;
   mutable std::uint64_t window_first_ = 0;
+  // Where the walk that filled the window can resume (after its last record).
+  mutable std::uint64_t resume_segment_ = 0;  // that segment's first index
+  mutable std::uint64_t resume_offset_ = 0;   // 0: nowhere
+  mutable journal::ChainState resume_chain_{};
+  mutable std::uint64_t l3_seen_ = 0;                            // the highest index found in L3
+  std::uint64_t durable_hint_ = ~std::uint64_t{0};              // note_durable(); unknown: max
   Opener open_;
 };
 

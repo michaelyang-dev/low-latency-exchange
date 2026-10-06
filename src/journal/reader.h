@@ -21,6 +21,18 @@ struct ReadOptions {
   std::uint64_t from_index = 0;
   std::uint64_t to_index = std::numeric_limits<std::uint64_t>::max();
   bool include_pads = false;
+  // Skip every segment whose records all precede from_index (the next segment's header
+  // starts at or below it): such a segment is neither walked nor counted in the summary,
+  // and the chain resumes from that header. A reader of a range near the tail of a long
+  // day (RecordLog's L3 window) then costs the range, not the day.
+  bool skip_before_from = false;
+  // Resume a walk right after a record seen before (resume_offset != 0): in the segment
+  // whose header starts at resume_segment, at byte resume_offset, with the chain after
+  // that record. The segments before are not walked. If no such segment is assigned
+  // (the journal changed), nothing is read (ReadStop::End, no records).
+  std::uint64_t resume_segment = 0;
+  std::uint64_t resume_offset = 0;
+  ChainState resume_chain{};
 };
 
 // Where a record lives. `sealer` is the segment's: sealer->content_of(rec) gives the
@@ -68,14 +80,32 @@ ReadSummary read_journal(Dir& dir, const ReadOptions& opts, F&& f) {
   }
   const SegmentHeader& first = hs.assigned.front().header;
   ChainState chain{first.first_index - 1, first.prev_last_crc, 0, 0};
+  std::size_t k0 = 0;
+  std::uint64_t start = kSegmentHeaderBytes;
+  if (opts.resume_offset != 0) {
+    while (k0 < hs.assigned.size() && hs.assigned[k0].header.first_index != opts.resume_segment) ++k0;
+    if (k0 == hs.assigned.size()) {
+      s.stop = ReadStop::End;
+      return s;
+    }
+    chain = opts.resume_chain;
+    start = opts.resume_offset;
+  }
   ChainState accepted = chain;  // last record not rejected by to_index
   auto sealer = std::make_unique<Sealer>();
   s.stop = ReadStop::End;
-  for (std::size_t k = 0; k < hs.assigned.size(); ++k) {
+  for (std::size_t k = k0; k < hs.assigned.size(); ++k) {
     const auto& e = hs.assigned[k];
-    if (k > 0 && (e.header.first_index != chain.last_index + 1 || e.header.prev_last_crc != chain.last_crc)) {
+    if (k > k0 && (e.header.first_index != chain.last_index + 1 || e.header.prev_last_crc != chain.last_crc)) {
       s.stop = ReadStop::ChainBreak;
       break;
+    }
+    if (opts.skip_before_from && k + 1 < hs.assigned.size() &&
+        hs.assigned[k + 1].header.first_index <= opts.from_index) {
+      const SegmentHeader& next = hs.assigned[k + 1].header;
+      chain = ChainState{next.first_index - 1, next.prev_last_crc, 0, 0};
+      accepted = chain;
+      continue;
     }
     auto& dev = dir.device(e.handle);
     const std::uint64_t limit = std::min(dev.size(), e.header.segment_bytes);
@@ -83,7 +113,7 @@ ReadSummary read_journal(Dir& dir, const ReadOptions& opts, F&& f) {
     *sealer = Sealer(e.header.nonce);
     const RecordLocation base{e.handle, 0, &e.header, sealer.get()};
     bool stopped = false;
-    const WalkResult w = walk_segment(rd, *sealer, chain, kSegmentHeaderBytes,
+    const WalkResult w = walk_segment(rd, *sealer, chain, k == k0 ? start : kSegmentHeaderBytes,
                                       [&](const RecordView& rec, std::uint64_t off, bool pad) {
                                         if (!pad && rec.index() > opts.to_index) {
                                           s.stop = ReadStop::ToIndex;

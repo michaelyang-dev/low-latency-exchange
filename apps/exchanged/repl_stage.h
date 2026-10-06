@@ -64,6 +64,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "exchanged/clock.h"
@@ -244,10 +245,17 @@ class BasicReplStage {
   // From here on the journal, engine and output log belong to the running stages.
   void go_live() noexcept { live_ = true; }
   [[nodiscard]] bool started() const noexcept { return started_; }
+  // Alarms raised so far (10 §3: each is an nlog ERROR and counts in repl_alarms), and
+  // the last one with its detail.
+  [[nodiscard]] std::uint64_t alarms() const noexcept { return alarms_; }
+  [[nodiscard]] std::pair<repl::Alarm, std::uint64_t> last_alarm() const noexcept {
+    return {last_alarm_, last_alarm_detail_};
+  }
 
   bool poll() {
     const Nanos now = clock_->now_mono();
     bool did = false;
+    log_->note_durable(sh_->durable.load());
     if (split_) did |= drain_tee();
     did |= poll_links(now);
     StateHashMsg h;
@@ -415,7 +423,10 @@ class BasicReplStage {
       (void)drain_tee();                // its last records first
     }
     const auto len = static_cast<std::uint32_t>(rec.size());
-    std::byte* dst = sh_->l2.try_reserve(len);
+    // Replicated records leave the reserve, as the sequencer does: only an EpochStart
+    // may take it, so a node can always open the epoch it was granted (DST-016).
+    const bool epoch_start = journal::RecordView{rec}.type() == journal::RecordType::EpochStart;
+    std::byte* dst = epoch_start ? sh_->l2.try_reserve(len) : sh_->l2.try_reserve_keeping_reserve(len);
     if (dst == nullptr) return false;  // L2 full: the io stage is behind
     std::memcpy(dst, rec.data(), len);
     (void)sh_->l2.sealer().reseal(dst, canonical_);
@@ -471,23 +482,74 @@ class BasicReplStage {
     }
   }
 
+  // The last record of epoch e or before (EPOCH_END_QUERY), and the first record of epoch
+  // e, from the epoch index (record epochs never decrease along the log).
   repl::EpochEndInfo epoch_end(std::uint64_t e) const {
+    index_epochs();
     repl::EpochEndInfo out;
+    std::size_t i = 0;
+    while (i < marks_.size() && marks_[i].epoch <= e) ++i;
+    if (i < marks_.size()) {
+      if (i != 0) out = repl::EpochEndInfo{marks_[i].index - 1, marks_[i].prev_crc, marks_[i - 1].epoch};
+    } else if (marks_upto_ != 0) {
+      out = repl::EpochEndInfo{marks_upto_, marks_upto_crc_, marks_last_epoch_};
+    }
+#ifndef NDEBUG
+    repl::EpochEndInfo scan;
     log_->scan(1, [&](const journal::RecordView& v) {
       if (v.epoch() > e) return false;
-      out = repl::EpochEndInfo{v.index(), v.crc(), v.epoch()};
+      scan = repl::EpochEndInfo{v.index(), v.crc(), v.epoch()};
       return true;
     });
+    LLE_ASSERT(scan.index == out.index && scan.crc == out.crc && scan.epoch == out.epoch, "epoch index: end");
+#endif
     return out;
   }
   repl::EpochEndInfo epoch_start(std::uint64_t e) const {
+    index_epochs();
     repl::EpochEndInfo out;
+    for (const EpochMark& m : marks_) {
+      if (m.epoch < e) continue;
+      if (m.epoch == e) out = repl::EpochEndInfo{m.index, m.crc, m.epoch};
+      break;
+    }
+#ifndef NDEBUG
+    repl::EpochEndInfo scan;
     log_->scan(1, [&](const journal::RecordView& v) {
       if (v.epoch() < e) return true;
-      if (v.epoch() == e) out = repl::EpochEndInfo{v.index(), v.crc(), v.epoch()};
+      if (v.epoch() == e) scan = repl::EpochEndInfo{v.index(), v.crc(), v.epoch()};
       return false;
     });
+    LLE_ASSERT(scan.index == out.index && scan.crc == out.crc && scan.epoch == out.epoch, "epoch index: start");
+#endif
     return out;
+  }
+  // The epoch index: record 1 and every record whose epoch differs from its predecessor's,
+  // extended over the records appended since the last query. A rejoin's handshake asks
+  // for these at every retransmission (rejoin_retry); a scan of the record log from
+  // record 1 per query read the day back from L3 each time, on the thread that also
+  // sequences in combined mode. A log that moved under it (a truncation, a reload) is
+  // indexed again: its last indexed record is gone or differs.
+  void index_epochs() const {
+    const std::uint64_t tail = log_->tail().last_index;
+    if (marks_upto_ > tail || (marks_upto_ != 0 && crc_at(marks_upto_) != marks_upto_crc_)) {
+      marks_.clear();
+      marks_upto_ = 0;
+    }
+    if (marks_upto_ == tail) return;
+    log_->scan(marks_upto_ + 1, [&](const journal::RecordView& v) {
+      if (marks_upto_ == 0 || v.epoch() != marks_last_epoch_)
+        marks_.push_back(EpochMark{v.index(), v.epoch(), v.crc(), v.prev_crc()});
+      marks_upto_ = v.index();
+      marks_upto_crc_ = v.crc();
+      marks_last_epoch_ = v.epoch();
+      return true;
+    });
+  }
+  // Content crc of record i of the log (0 if it cannot be read).
+  std::uint32_t crc_at(std::uint64_t i) const {
+    const std::uint32_t n = log_->read(i, std::span<std::byte>(mark_buf_.get(), journal::kMaxRecordBytes));
+    return n == 0 ? 0 : journal::RecordView{std::span<const std::byte>(mark_buf_.get(), n)}.crc();
   }
 
   // 10 §5 step 2: drop the records after t (never committed in the primary's history).
@@ -735,6 +797,8 @@ class BasicReplStage {
   }
   void on_alarm(repl::Alarm a, std::uint64_t d) {
     ++alarms_;
+    last_alarm_ = a;
+    last_alarm_detail_ = d;
     NLOG_ERROR("repl: ALARM {} at {}", std::string_view(repl::to_string(a)), d);
   }
   void on_trace(const repl::TraceEvent& e) {
@@ -777,6 +841,17 @@ class BasicReplStage {
   bool down_overflow_noted_ = false;
   std::vector<seq::InboundMsg> pending_ahead_;  // a promotion's re-injected input (inject_ahead)
   std::vector<std::byte> record_buf_;            // day_ended(): one record at a time
+  struct EpochMark {
+    std::uint64_t index;
+    std::uint32_t epoch;
+    std::uint32_t crc;       // its content crc
+    std::uint32_t prev_crc;  // its predecessor's
+  };
+  mutable std::vector<EpochMark> marks_;  // index_epochs()
+  mutable std::uint64_t marks_upto_ = 0;
+  mutable std::uint32_t marks_upto_crc_ = 0;
+  mutable std::uint32_t marks_last_epoch_ = 0;
+  std::unique_ptr<std::byte[]> mark_buf_{new std::byte[journal::kMaxRecordBytes]};
   std::size_t ahead_next_ = 0;
   bool ahead_overflow_noted_ = false;
   bool staged_ = false;
@@ -784,6 +859,8 @@ class BasicReplStage {
   seq::InboundMsg staged_msg_{};
   seq::SessionEventMsg staged_ev_{};
   std::uint64_t alarms_ = 0;
+  repl::Alarm last_alarm_{};
+  std::uint64_t last_alarm_detail_ = 0;
   RejoinHooks hooks_;
   bool split_ = false;
   bool published_allowed_ = false;

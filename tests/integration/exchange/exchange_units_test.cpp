@@ -1,17 +1,111 @@
 // In-process checks of exchanged's own pieces (apps/exchanged), next to the end-to-end
-// tests: the input SCQs' single-consumer guard, the ring-occupancy gauges.
+// tests: the input SCQs' single-consumer guard, the ring-occupancy gauges, the record
+// log's L3 window.
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <thread>
 
+#include "../../unit/journal/journal_test_util.h"
 #include "concurrent/mpsc_scq.h"
 #include "exchanged/consumer_guard.h"
+#include "exchanged/record_log.h"
 #include "exchanged/restart_guard.h"
 #include "exchanged/ring_gauge.h"
+#include "journal/mem_journal_device.h"
 
 namespace lle::exch {
 namespace {
+
+// RecordLog's L3 reads over an in-memory journal: a view of the shared directory, as
+// the opener returns one per window.
+struct MemDirView {
+  using Device = journal::MemJournalDevice;
+  journal::MemSegmentDir* d;
+  [[nodiscard]] std::size_t count() const { return d->count(); }
+  Device& device(std::size_t i) { return d->device(i); }
+  [[nodiscard]] std::string_view name(std::size_t i) const { return d->name(i); }
+  std::optional<std::size_t> create(std::string_view n, std::uint64_t sz) { return d->create(n, sz); }
+  bool rename(std::size_t i, std::string_view n) { return d->rename(i, n); }
+  bool sync_dir() { return d->sync_dir(); }
+};
+struct MemOpener {
+  journal::MemSegmentDir* d = nullptr;
+  [[nodiscard]] std::expected<MemDirView, std::string> operator()(const std::string&) const { return MemDirView{d}; }
+};
+using MemRecordLog = BasicRecordLog<MemOpener>;
+
+struct JournalOf {
+  journal::MemSegmentDir dir;
+  journal::testing::MemWriter w{journal::testing::writer_options()};
+  journal::testing::RecordStream s{21, journal::testing::RecordStream::Mix{140, 40, 6000}};
+  explicit JournalOf(std::uint64_t segment_bytes = journal::kSegmentHeaderBytes + 128 * 1024) {
+    w.start(journal::ChainState{});
+    for (const auto& p : journal::testing::prepare_segments(dir, 8, segment_bytes))
+      EXPECT_TRUE(w.add_prepared(dir.device(p.handle), p.handle, p.header));
+  }
+  void journal(std::uint64_t n) {
+    for (std::uint64_t i = 0; i < n; ++i) journal::testing::append_one(w, s.next(), s.sealer());
+    journal::testing::drain(w);
+  }
+};
+
+bool same_record(std::span<const std::byte> got, std::span<const std::byte> want) {
+  return journal::same_content(journal::RecordView(got), journal::RecordView(want));
+}
+
+// A catch-up reads old records in order and rewinds to its oldest unacknowledged one:
+// every record comes back exact, across segments and window slides (more than the
+// window's 4 MiB), with an arena far smaller than the day.
+TEST(RecordLogL3, InOrderReadsWithRewindsReturnEveryRecord) {
+  JournalOf j(journal::kSegmentHeaderBytes + (std::uint64_t{1} << 20));
+  constexpr std::uint64_t kDayRecords = 20'000;
+  j.journal(kDayRecords);
+  ASSERT_GE(j.w.stats().segments, 4u);
+  MemRecordLog log(std::size_t{1} << 16, 128, "journal", journal::testing::kDay, MemOpener{&j.dir});
+  ASSERT_TRUE(log.load(kDayRecords));
+  ASSERT_GT(log.lowest(), kDayRecords - 1000) << "the arena should hold only the newest records";
+  std::vector<std::byte> buf(journal::kMaxRecordBytes);
+  std::uint64_t i = 1;
+  for (int step = 0; i <= kDayRecords; ++step) {
+    const std::uint32_t n = log.read(i, buf);
+    ASSERT_NE(n, 0u) << "record " << i;
+    ASSERT_TRUE(same_record(std::span<const std::byte>(buf.data(), n), j.s.at(i))) << "record " << i;
+    // Every 97 reads, go back 60 records (a go-back-N rewind), then on.
+    if (step % 97 == 96 && i > 60) {
+      i -= 60;
+    } else {
+      ++i;
+    }
+  }
+}
+
+// A record the arena evicted before the io stage made it durable is in neither place: the
+// read fails at once (no journal walk per attempt) until durability passes it.
+TEST(RecordLogL3, ARecordNotYetInL3IsReadOnceDurable) {
+  JournalOf j;
+  j.journal(1000);
+  MemRecordLog log(std::size_t{1} << 16, 128, "journal", journal::testing::kDay, MemOpener{&j.dir});
+  ASSERT_TRUE(log.load(1000));
+  std::vector<std::byte> buf(journal::kMaxRecordBytes);
+  ASSERT_NE(log.read(500, buf), 0u);  // in L3
+  // 1,000 more records reach the log (sequenced) before any is durable.
+  std::vector<std::vector<std::byte>> more;
+  for (int k = 0; k < 1000; ++k) {
+    const std::span<const std::byte> r = j.s.next();
+    more.emplace_back(r.begin(), r.end());
+    ASSERT_TRUE(log.append_from(r.data(), static_cast<std::uint32_t>(r.size()), j.s.sealer()));
+  }
+  ASSERT_GT(log.lowest(), 1500u);
+  log.note_durable(1000);
+  EXPECT_EQ(log.read(1200, buf), 0u) << "neither in the arena nor durable";
+  for (const auto& r : more) journal::testing::append_one(j.w, r, j.s.sealer());
+  journal::testing::drain(j.w);
+  log.note_durable(2000);
+  const std::uint32_t n = log.read(1200, buf);
+  ASSERT_NE(n, 0u);
+  EXPECT_TRUE(same_record(std::span<const std::byte>(buf.data(), n), j.s.at(1200)));
+}
 
 TEST(ScqConsumerGuard, HandOversBetweenTheTwoConsumersPass) {
   ScqConsumerGuard g;

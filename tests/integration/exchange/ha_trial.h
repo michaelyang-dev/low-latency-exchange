@@ -1033,7 +1033,7 @@ class Trial {
       if (r_.cls == "F6") victim_roles.insert(role(victim_));
       if (!solo) pump(2);
     }
-    if (!solo) return fail("the survivor never became the solo primary: " + statuses());
+    if (!solo) return fail("the survivor never became the solo primary: " + statuses() + outputs_tail());
     r_.ms["fault_to_solo_primary"] =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fault_steady).count();
     primary_ = survivor;
@@ -1603,6 +1603,16 @@ class Trial {
     sub_.set_servers(p[a], p[b], ex(a).host(), ex(b).host());
   }
   std::string statuses() { return "[A " + ex(0).status() + "] [B " + ex(1).status() + "]"; }
+  // The last lines each node printed (a node that died says why there).
+  std::string outputs_tail(std::size_t n = 1500) {
+    std::string r;
+    for (int i = 0; i < 2; ++i) {
+      const std::string out = ex(i).output();
+      r += std::string("\n--- ") + (i == 0 ? "A" : "B") + " output (last " + std::to_string(n) + " bytes) ---\n" +
+           (out.size() > n ? out.substr(out.size() - n) : out);
+    }
+    return r;
+  }
   bool wait_roles(const std::string& a, const std::string& b) {
     const auto end = std::chrono::steady_clock::now() + o_.step_timeout;
     while (std::chrono::steady_clock::now() < end) {
