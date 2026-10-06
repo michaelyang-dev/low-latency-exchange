@@ -47,7 +47,7 @@ class BasicSeqRing {
       t_ = tee_->try_reserve(n);
       if (t_ == nullptr) return nullptr;
     }
-    p_ = ring_->try_reserve(n);
+    p_ = ring_->try_reserve_keeping_reserve(n);  // a replica's EpochStart always fits (DST-016)
     n_ = n;
     if (p_ != nullptr && meter_ != nullptr) {
       meter_->start();
