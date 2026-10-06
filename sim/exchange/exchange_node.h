@@ -38,6 +38,7 @@
 #include <utility>
 #include <vector>
 
+#include "env/buggify.h"
 #include "common/endian.h"
 #include "engine/engine.h"
 #include "engine/records.h"
@@ -151,6 +152,9 @@ struct TapOuchQueue {
   lle::exch::OuchQueue* q = nullptr;
   const NodeTaps* taps = nullptr;
   bool try_push(const seq::InboundMsg& m) noexcept {
+    // A queue the sequencer has not drained yet (load): the gateway stages the message,
+    // stops reading the connection and retries, its session events in a backlog behind.
+    if (SIM_BUGGIFY("exchange.ouch_queue_full")) return false;
     if (!q->try_push(m)) return false;
     if (taps == nullptr) return true;
     // Session events can travel in this queue, tagged (InboundMsg::reserved = 1, payload
@@ -219,6 +223,17 @@ struct ExchangeDay {
   [[nodiscard]] std::vector<std::uint32_t> session_ids() const;  // sorted
 };
 
+// exchanged's L2 in a file ([journal] l2_path; hugetlbfs in production): memory that
+// outlives the process image and is lost with the host (a power loss). The world keeps
+// one per data node and hands it to every image; a fresh image reopens it unless the
+// host crashed since it was written.
+struct L2File {
+  std::unique_ptr<std::uint64_t[]> mem;
+  std::size_t bytes = 0;
+  std::uint64_t nonce = 0;
+  std::uint64_t host_crashes = 0;  // Node::host_crashes() when it was created
+};
+
 struct NodeParams {
   std::uint16_t node_id = 1;
   std::string root;  // disk prefix of this node's files ("" = top level)
@@ -265,6 +280,8 @@ struct NodeParams {
   Nanos t_ack = 25'000'000;
   Nanos rejoin_retry = 5'000'000;
   Nanos ha_rto = 2'000'000;
+  std::uint64_t hash_interval = 65'536;  // state-hash checkpoint every N records (node.cpp's value)
+  std::shared_ptr<L2File> l2_file;      // [journal] l2_path; null: anonymous L2
   std::size_t repl_log_bytes = std::size_t{8} << 20;
   // [ha] repl_thread: the replica on its own stage ("thread"), the sequencer on the seq
   // stage (BasicSeqSide), its records reaching the record log through a tee of this size.
@@ -289,6 +306,8 @@ struct NodeHooks {
   std::function<void(std::uint64_t incarnation)> rejoining;                    // a paired restart began its handshake
   std::function<void(repl::Role, std::uint64_t index, std::uint64_t truncated_from)> rejoined;  // ...finished it
   SimRecordLog::Held held;                                                     // paired: a record appended to L2
+  std::function<void(repl::Alarm, std::uint64_t detail, std::uint64_t count)> alarm;  // replica ALARMs (10 §3)
+  std::function<void(std::uint64_t records, std::uint64_t last)> l2_restored;  // a reopened L2 file's records
 };
 
 class ExchangeProc final : public Process {
@@ -310,6 +329,7 @@ class ExchangeProc final : public Process {
   [[nodiscard]] const SimGlimpse* glimpse() const noexcept { return glimpse_.get(); }
   [[nodiscard]] const SimIoStage* io() const noexcept { return io_stage_.get(); }
   [[nodiscard]] const SimEngineStage* engine_stage() const noexcept { return engine_stage_.get(); }
+  [[nodiscard]] const engine::Engine* engine() const noexcept { return engine_.get(); }
   [[nodiscard]] const SimSnapshotter* follower() const noexcept { return follower_.get(); }
   [[nodiscard]] const SimSequencer* sequencer() const noexcept { return sequencer_.get(); }
   [[nodiscard]] const SimReplStage* repl() const noexcept { return repl_.get(); }
@@ -349,10 +369,12 @@ class ExchangeProc final : public Process {
   };
 
   void fail(std::string why);
+  void note_alarms();
   bool supervise();
   bool follow();
   void start_follower();
   void open_journal();
+  bool restore_l2(journal::RecoveryResult& rr);
   void recover_or_start();
   std::expected<void, std::string> open_writer(const journal::RecoveryResult& rr);
   void begin_rejoin();
@@ -374,6 +396,7 @@ class ExchangeProc final : public Process {
   std::unique_ptr<SimSnapStorage> snaps_;
   std::unique_ptr<lle::exch::Shared> sh_;
   std::unique_ptr<std::uint64_t[]> l2_mem_;
+  bool l2_reopened_ = false;  // the L2 file outlived the previous image
   std::unique_ptr<worlds::SimSegmentDir> dir_;
   std::unique_ptr<SimPreparer> prep_;
   std::unique_ptr<SimWriter> writer_;
@@ -413,6 +436,7 @@ class ExchangeProc final : public Process {
   bool rejoin_ = false;    // a paired node restarting mid-day (10 §5)
   bool rejoined_ = false;  // its handshake finished and the stages are built
   bool exited_ = false;    // Env::exit ended the image
+  std::uint64_t alarms_seen_ = 0;  // repl_->alarms() already reported
   std::string boot_error_;
 };
 

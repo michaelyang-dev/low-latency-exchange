@@ -23,7 +23,7 @@ jobs:
   campaign:
     if: github.event.schedule != '37 4 * * 0'
     runs-on: ubuntu-26.04
-    timeout-minutes: 300
+    timeout-minutes: 360  # the nightly 20,000 seeds (GitHub-hosted maximum)
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain

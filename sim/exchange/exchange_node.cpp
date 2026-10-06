@@ -48,12 +48,33 @@ ExchangeProc::ExchangeProc(Node& n, const ExchangeDay& day, const NodeParams& p,
   sh_ = std::make_unique<ex::Shared>();
   sh_->egress.init(p_.egress_bytes);
   sh_->apply_limit.store(~std::uint64_t{0});
-  l2_mem_.reset(new std::uint64_t[p_.l2_bytes / 8]());
+  // Node::open_journal's L2: in a file that may outlive the previous image (06 §5), or
+  // anonymous memory.
   std::uint64_t nonce = 0;
-  do {
-    nonce = rng_.next_u64();
-  } while (!journal::usable_nonce(nonce));
-  sh_->l2.init(reinterpret_cast<std::byte*>(l2_mem_.get()), p_.l2_bytes, nonce);
+  auto draw_nonce = [&] {
+    do {
+      nonce = rng_.next_u64();
+    } while (!journal::usable_nonce(nonce));
+  };
+  std::byte* l2 = nullptr;
+  if (p_.l2_file) {
+    L2File& f = *p_.l2_file;
+    l2_reopened_ = f.mem && f.bytes == p_.l2_bytes && f.host_crashes == n.host_crashes();
+    if (!l2_reopened_) {
+      f.mem.reset(new std::uint64_t[p_.l2_bytes / 8]());
+      f.bytes = p_.l2_bytes;
+      draw_nonce();
+      f.nonce = nonce;
+      f.host_crashes = n.host_crashes();
+    }
+    nonce = f.nonce;
+    l2 = reinterpret_cast<std::byte*>(f.mem.get());
+  } else {
+    l2_mem_.reset(new std::uint64_t[p_.l2_bytes / 8]());
+    draw_nonce();
+    l2 = reinterpret_cast<std::byte*>(l2_mem_.get());
+  }
+  sh_->l2.init(l2, p_.l2_bytes, nonce);
   if (p_.paired) {
     sh_->mirror.store(p_.node_id != p_.initial_primary);
     sh_->lines.store(p_.node_id == p_.initial_primary ? md::kLineA : md::kLineB);
@@ -91,6 +112,10 @@ void ExchangeProc::open_journal() {
     return;
   }
   engine_ = std::make_unique<engine::Engine>();
+  if (l2_reopened_) {
+    if (!restore_l2(rr)) return;
+    recovered_index_ = rr.chain.last_index;
+  }
   // A paired node restarting mid-day rejoins (10 §5): the writer opens after the
   // handshake, which may truncate the journal first. Node::open_journal's decision,
   // including a restart on an empty journal of a day this node already started.
@@ -121,6 +146,51 @@ void ExchangeProc::open_journal() {
     recovered_ = std::move(*rd);
     if (hooks_.recovered) hooks_.recovered(recovered_);
   }
+}
+
+// Node::restore_l2 (06 §5): the previous image's L2 may hold records beyond L3, e.g. ones
+// a backup acknowledged. They are journaled now, before anything else reads the journal;
+// then the ring starts over (its bytes stay: only a chain from durable + 1 validates).
+// The writer's drain runs inside this event, its I/O applied at once (the directory's
+// at-once mode), as it spins inside start-up in production.
+bool ExchangeProc::restore_l2(journal::RecoveryResult& rr) {
+  const std::optional<std::uint32_t> prev =
+      rr.chain.last_index == 0 ? std::nullopt : std::optional<std::uint32_t>(rr.chain.last_crc);
+  const journal::L2RestoreResult res = sh_->l2.restore(rr.chain.last_index + 1, prev);
+  if (res.found && res.records != 0) {
+    if (auto r = open_writer(rr); !r) {
+      fail(r.error());
+      return false;
+    }
+    dir_->set_at_once(true);
+    bool ok = false;
+    {
+      SimIoStage io(*sh_, *dir_, *prep_, *writer_, *outlog_, p_.spares, false, clock_);
+      io.drain();
+      ok = !io.failed() && writer_->durable_index() == res.chain.last_index;
+    }
+    dir_->set_at_once(false);
+    if (!ok) {
+      fail("L2: journaling the restored records failed at " + std::to_string(writer_->durable_index()) + " of " +
+           std::to_string(res.chain.last_index));
+      return false;
+    }
+    writer_.reset();
+    journal::RecoveryOptions ro;
+    ro.day = d_.date;
+    rr = journal::recover(*dir_, ro);
+    if (!rr.usable() || rr.chain.last_index != res.chain.last_index) {
+      fail("L2: recovery after journaling the restored records: " + rr.detail);
+      return false;
+    }
+    if (hooks_.log)
+      hooks_.log(std::format("exchanged: L2: restored {} records ({}..{}) into the journal", res.records,
+                             res.chain.last_index - res.records + 1, res.chain.last_index));
+    if (hooks_.l2_restored) hooks_.l2_restored(res.records, res.chain.last_index);
+  }
+  sh_->l2.init(reinterpret_cast<std::byte*>(p_.l2_file->mem.get()), p_.l2_bytes, p_.l2_file->nonce);
+  sh_->durable.store(rr.chain.last_index);
+  return true;
 }
 
 // Node::open_writer: the writer continues after the recovered prefix.
@@ -279,15 +349,28 @@ bool ExchangeProc::repl_poll() {
   try {
     if (rejoin_ && !rejoined_) {
       const bool did = repl_->poll_prestart();
+      note_alarms();
       if (!repl_->handshake_done()) return did;
       complete_rejoin();
       return true;
     }
-    return repl_->poll();
+    const bool did = repl_->poll();
+    note_alarms();
+    return did;
   } catch (const ProcessExit& e) {
+    note_alarms();
     exit_process(e.code);
     return true;
   }
+}
+
+// The replica's ALARMs (10 §3: an nlog ERROR and the repl_alarms metric in production).
+void ExchangeProc::note_alarms() {
+  if (!repl_ || repl_->alarms() == alarms_seen_) return;
+  const auto [a, detail] = repl_->last_alarm();
+  const std::uint64_t n = repl_->alarms() - alarms_seen_;
+  alarms_seen_ = repl_->alarms();
+  if (hooks_.alarm) hooks_.alarm(a, detail, n);
 }
 
 void ExchangeProc::exit_process(int code) {
@@ -341,7 +424,7 @@ void ExchangeProc::finish_boot() {
   NodeBinding bind(n, eph_);
   const bool paired = p_.paired;
   ex::EngineStageConfig ec;
-  ec.hash_interval = paired ? 65'536 : 0;
+  ec.hash_interval = paired ? p_.hash_interval : 0;
   engine_stage_ = std::make_unique<SimEngineStage>(*sh_, *engine_, ec, recovered_index_, clock_);
   if (recovered_index_ != 0) engine_stage_->set_totals(recovered_.itch_total, recovered_.soup_total);
   // Node::build_stages: a rejoin's reloaded outputs still to release (DST-013).

@@ -14,7 +14,10 @@
 // Operations tagged journal::kSyncHelperTag come from the synchronous cold-path
 // helpers (write_sync, sync_device: recovery repair, segment preparation),
 // which spin on poll() and cannot let virtual time advance: they are applied
-// at once through sim::Disk::write_now/sync_now, with the same EIO draws.
+// at once through sim::Disk::write_now/sync_now, with the same EIO draws. A
+// directory in at-once mode (SimSegmentDir::set_at_once) applies all of its
+// devices' operations that way: a start-up step that drains a journal writer
+// (exchanged's L2 restore) runs inside one event, as it spins in production.
 //
 // The device also hits the journal's must-hit probes (09 §8) that only the
 // device can observe: the process dying between a record's pwrite and its
@@ -52,8 +55,9 @@ class SimJournalDevice {
  public:
   static constexpr std::size_t kMaxOps = 64;  // like PosixJournalDevice's completion queue
 
-  SimJournalDevice(Node& node, std::string_view name, JournalDurableObserver* obs = nullptr)
-      : node_(&node), disk_(&node.disk()), file_(node, name), obs_(obs) {
+  SimJournalDevice(Node& node, std::string_view name, JournalDurableObserver* obs = nullptr,
+                   const bool* at_once = nullptr)
+      : node_(&node), disk_(&node.disk()), file_(node, name), obs_(obs), at_once_(at_once) {
     fidx_ = disk_->open(name);
   }
   // Destroyed with the process image. Node::crash marks the node dead first,
@@ -73,7 +77,7 @@ class SimJournalDevice {
 
   bool submit_write(std::uint64_t off, std::span<const std::byte> b, bool dsync, std::uint64_t tag) {
     if (in_flight() >= kMaxOps) return false;
-    if (tag == journal::kSyncHelperTag) {
+    if (tag == journal::kSyncHelperTag || (at_once_ != nullptr && *at_once_)) {
       std::int32_t r = disk_->write_now(fidx_, off, b, false);
       if (r == static_cast<std::int32_t>(b.size()) && dsync) {
         const std::int32_t s = disk_->sync_now(fidx_);
@@ -91,7 +95,7 @@ class SimJournalDevice {
 
   bool submit_sync(std::uint64_t tag) {
     if (in_flight() >= kMaxOps) return false;
-    if (tag == journal::kSyncHelperTag) {
+    if (tag == journal::kSyncHelperTag || (at_once_ != nullptr && *at_once_)) {
       const std::int32_t r = disk_->sync_now(fidx_);
       if (r == 0 && obs_ != nullptr) obs_->on_durable(*disk_, fidx_, 0, 0);
       ready_.push(env::DiskCompletion{tag, r});
@@ -169,6 +173,7 @@ class SimJournalDevice {
   Disk* disk_;
   DiskFile file_;
   JournalDurableObserver* obs_ = nullptr;
+  const bool* at_once_ = nullptr;  // the directory's at-once mode
   std::uint32_t fidx_ = 0;
   std::vector<Op> ops_;
   RingQueue<env::DiskCompletion> ready_;
@@ -188,10 +193,13 @@ class SimSegmentDir {
     for (const std::string& n : node.disk().list()) {
       // As PosixSegmentDir::open: segment files only (*.seg), not e.g. the incarnation file.
       if (n.starts_with(prefix_) && n.ends_with(".seg")) {
-        files_.push_back(Entry{n.substr(prefix_.size()), std::make_unique<Device>(node, n, obs_)});
+        files_.push_back(Entry{n.substr(prefix_.size()), std::make_unique<Device>(node, n, obs_, &at_once_)});
       }
     }
   }
+
+  SimSegmentDir(const SimSegmentDir&) = delete;  // the devices point at at_once_
+  SimSegmentDir& operator=(const SimSegmentDir&) = delete;
 
   [[nodiscard]] std::size_t count() const noexcept { return files_.size(); }
   [[nodiscard]] Device& device(std::size_t i) noexcept { return *files_[i].dev; }
@@ -200,7 +208,7 @@ class SimSegmentDir {
   std::optional<std::size_t> create(std::string_view name, std::uint64_t size) {
     const std::string full = prefix_ + std::string(name);
     if (node_->disk().exists(full)) return std::nullopt;  // O_CREAT | O_EXCL
-    files_.push_back(Entry{std::string(name), std::make_unique<Device>(*node_, full, obs_)});
+    files_.push_back(Entry{std::string(name), std::make_unique<Device>(*node_, full, obs_, &at_once_)});
     files_.back().dev->resize(size);  // ftruncate
     return files_.size() - 1;
   }
@@ -214,6 +222,8 @@ class SimSegmentDir {
     return true;
   }
   bool sync_dir() noexcept { return true; }
+  // At-once mode: every device's I/O is applied when submitted (see the header).
+  void set_at_once(bool on) noexcept { at_once_ = on; }
 
  private:
   struct Entry {
@@ -223,6 +233,7 @@ class SimSegmentDir {
   Node* node_;
   std::string prefix_;
   JournalDurableObserver* obs_ = nullptr;
+  bool at_once_ = false;  // devices hold a pointer to it: the directory does not move
   std::vector<Entry> files_;
 };
 

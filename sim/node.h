@@ -66,6 +66,7 @@ class Node {
   [[nodiscard]] bool pausable() const noexcept { return opts_.pausable; }
   [[nodiscard]] std::uint32_t incarnation() const noexcept { return incarnation_; }
   [[nodiscard]] std::uint64_t crashes() const noexcept { return crashes_; }
+  [[nodiscard]] std::uint64_t host_crashes() const noexcept { return host_crashes_; }  // power losses
 
   // Workload stream for this node and incarnation (sub-stream `sub`).
   [[nodiscard]] Rng rng(std::uint64_t sub = 0) const noexcept;
@@ -123,6 +124,7 @@ class Node {
   std::uint64_t restart_gen_ = 0;
   std::uint64_t pause_gen_ = 0;
   std::uint64_t crashes_ = 0;
+  std::uint64_t host_crashes_ = 0;
 
   friend class World;
 };

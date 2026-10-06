@@ -85,7 +85,10 @@ void Node::crash(CrashKind kind, bool injected) {
   crash_requested_ = false;
   ++crashes_;
   proc_.reset();  // memory is gone: ports reset, file handles closed
-  if (kind == CrashKind::Host) disk_.crash_host();
+  if (kind == CrashKind::Host) {
+    ++host_crashes_;
+    disk_.crash_host();
+  }
   if (injected) ++(kind == CrashKind::Host ? w_.stats().crashes_host : w_.stats().crashes_process);
 }
 

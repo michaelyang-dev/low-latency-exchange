@@ -167,7 +167,7 @@ struct Ledger {
 struct Harness {
   World* w = nullptr;
   OracleRegistry* o = nullptr;
-  OracleId o_stream = 0, o_arb = 0, o_once = 0, o_seq = 0, o_cod = 0, o_commit = 0, o_recover = 0;
+  OracleId o_stream = 0, o_arb = 0, o_once = 0, o_seq = 0, o_cod = 0, o_commit = 0, o_recover = 0, o_replay = 0;
   std::uint64_t seed = 0;
   bool verbose = false;
 
@@ -175,6 +175,7 @@ struct Harness {
   NodeParams params;
   Nanos t0 = 0;            // local time where compression starts
   std::int64_t speed = 1;  // compression after t0
+  bool clock = false;      // the 1 Hz clock is on
   Nanos lead = 0;          // the run starts `lead` (local, uncompressed) before t0
   Nanos close_at = 0;      // virtual time of 16:00 local
   Nanos open_at = 0;       // virtual time of 09:30 local
@@ -251,6 +252,7 @@ struct Harness {
   void match_pushes(const Truth& t);
   void check_cod(const Truth& t);
   void check_commit(const Truth& t);
+  void check_replay(const Truth& t);
 };
 
 // ---- regeneration ------------------------------------------------------------------
@@ -467,7 +469,7 @@ void Harness::check_cod(const Truth& t) {
       for (const auto& [k, life] : born) {
         if (k >= upto) break;
         // Frozen in the opening freeze: spared by cancel-on-disconnect, it goes to the cross.
-        if (life->accepted <= d && t.frozen_at(d, life->accepted)) continue;
+        if (life->accepted <= d && t.frozen_at(d, *life)) continue;
         if (life->accepted > d && (life->closed == 0 || life->closed > life->accepted)) {
           ++late_orders;
           dump(d);
@@ -567,7 +569,7 @@ void Harness::check_cod(const Truth& t) {
         // (sent after its Login) must not survive it.
         for (const auto& [k, life] : born) {
           if (k >= upto) break;
-          if (k < since || t.frozen_at(r, life->accepted)) continue;
+          if (k < since || t.frozen_at(r, *life)) continue;
           if (life->accepted <= r && (life->closed == 0 || life->closed > r)) {
             dump(r);
             o->fail(o_cod, "session " + std::to_string(c.session) + " UserRefNum " + std::to_string(life->urn) +
@@ -633,6 +635,35 @@ void Harness::check_commit(const Truth& t) {
   }
 }
 
+void Harness::check_replay(const Truth& t) {
+  // The running node's engine is consistent, and once it has applied the whole journal
+  // it equals a fresh replay of it (O-REPLAY): recovery, from the journal or a snapshot,
+  // leaves no state the records do not explain.
+  const ExchangeProc* x = node_proc();
+  if (x == nullptr || x->engine() == nullptr || x->engine_stage() == nullptr) return;
+  std::string err;
+  if (!x->engine()->check(&err)) {
+    o->fail(o_replay, "engine consistency: " + err);
+    return;
+  }
+  for (std::size_t g = 0; g < 2; ++g) {
+    // A session event lost to a full backlog leaves the journal without that
+    // connection's Disconnect or Login (gateway.h: "must stay 0").
+    if (x->gateway(g) != nullptr && x->gateway(g)->stats().events_dropped != 0) {
+      o->fail(o_seq, "gateway " + std::to_string(g) + " dropped " +
+                         std::to_string(x->gateway(g)->stats().events_dropped) + " session events");
+      return;
+    }
+  }
+  if (x->engine_stage()->applied() != t.recs.size()) return;
+  if (x->engine()->state_hash() != t.state_hash) {
+    o->fail(o_replay, "engine state after " + std::to_string(t.recs.size()) +
+                          " records differs from a fresh replay of the journal");
+    return;
+  }
+  o->pass(o_replay);
+}
+
 void Harness::final_checks() {
   const Truth t = regenerate();
   if (!t.ok) {
@@ -647,6 +678,7 @@ void Harness::final_checks() {
                      static_cast<int>(r.event), r.instance);
     }
   }
+  check_replay(t);
   check_streams(t);
   check_arb(t);
   check_once(t);
@@ -699,6 +731,11 @@ ex::NodeHooks node_hooks(Harness& h) {
       return;
     }
     if (!h.w->faults_active()) h.o->fail(h.o_recover, "the node refused to start after healing: " + why);
+  };
+  k.l2_restored = [&h](std::uint64_t records, std::uint64_t last) {
+    h.log("x: L2 file: %llu records journaled through %llu", static_cast<unsigned long long>(records),
+          static_cast<unsigned long long>(last));
+    SIM_PROBE("exchange_world.l2_restored");
   };
   k.recovered = [&h](const lle::exch::RecoveredDay& d) {
     ++h.recoveries;
@@ -1525,6 +1562,7 @@ Report run_exchange(const Options& o) {
       "O-COD", "no order of a dropped connection is open or executes after its disconnect is sequenced");
   h.o_commit = w.oracles().activate(kOOutputCommit, "every output received comes from a record durable at that time");
   h.o_recover = w.oracles().activate("O-RECOVER", "the node starts on every journal it left");
+  h.o_replay = w.oracles().activate(kOReplay, "the node's engine equals a fresh replay of its journal");
   h.durable_tap = std::make_unique<ex::DurableTap>(w, h.durable_at);
 
   // ---- the day ----
@@ -1569,7 +1607,7 @@ Report run_exchange(const Options& o) {
     spec.cancel_on_disconnect = cod;
     d.specs.push_back(spec);
   }
-  // Compressed standard day (no 1 Hz clock): real speed until t0, then `speed` times
+  // Compressed standard day: real speed until t0, then `speed` times
   // faster, so 16:00 lands at a seeded point around the end of the faulted phase.
   h.t0 = hms_ns(9, 24, 0);
   h.lead = 2 * kMs + static_cast<Nanos>(wl.below(8 * kMs));
@@ -1577,7 +1615,14 @@ Report run_exchange(const Options& o) {
       std::max<Nanos>(50 * kMs, static_cast<Nanos>(o.plan.safety_ns) / 2 +
                                     static_cast<Nanos>(wl.below(static_cast<std::uint64_t>(o.plan.safety_ns))));
   h.speed = std::max<std::int64_t>(1, (hms_ns(16, 0, 0) - h.t0) / std::max<Nanos>(1, close_target - h.lead));
-  for (en::ScheduleEntry e : en::standard_schedule(false, false)) {
+  // One seed in 16 runs production's 1 Hz clock ([day] noii_clock, on by default):
+  // a timer record every second from 04:00:01, about 19,000 of them overdue when the day
+  // starts at t0 and the rest compressed with the day, through the sequencer's timer
+  // batches, replication and the engine's clock tick. A stream of its own keeps the
+  // other draws as they were.
+  Rng day_cfg = w.stream(Stream::Workload, 0xE8F);
+  h.clock = day_cfg.below(16) == 0;
+  for (en::ScheduleEntry e : en::standard_schedule(false, h.clock)) {
     if (e.timer_id != 0) e.time_ns = h.compressed(e.time_ns);
     d.schedule.push_back(e);
   }
@@ -1595,7 +1640,9 @@ Report run_exchange(const Options& o) {
   p.segment_bytes = jr::kSegmentHeaderBytes + jr::kBatchBytes * (8 + wl.below(24));
   p.l2_bytes = std::size_t{1} << (20 + wl.below(3));
   p.egress_bytes = std::size_t{1} << (17 + wl.below(5));
-  p.snapshot_every = wl.below(4) == 0 ? 0 : 50 + wl.below(1500);
+  // Snapshots every 50 to 1,550 records, 32 times as far apart on a day with the 1 Hz
+  // clock (some 30 times the records; each snapshot carries the 0.9 MB schedule).
+  p.snapshot_every = wl.below(4) == 0 ? 0 : (50 + wl.below(1500)) * (h.clock ? 32 : 1);
   p.use_snapshots = wl.below(8) != 0;
   p.follower = p.snapshot_every != 0;
   p.follower_poll = static_cast<Nanos>(2 * kMs + wl.below(20 * kMs));
@@ -1618,11 +1665,18 @@ Report run_exchange(const Options& o) {
   p.max_packet_b = static_cast<std::size_t>(300 + wl.below(1173));
   p.md_heartbeat = static_cast<Nanos>(5 * kMs + wl.below(100 * kMs));
   p.md_eos_linger = 30 * kNsPerSec;  // production default: receivers that missed it hear it after healing
+  // Half the seeds keep L2 in a file ([journal] l2_path, as every lab configuration
+  // does): it outlives a process crash, and the next image journals what it held beyond
+  // L3 before recovering (restore_l2). A stream of its own keeps the draws above.
+  if (Rng l2_cfg = w.stream(Stream::Workload, 0xE90); l2_cfg.below(2) == 0) p.l2_file = std::make_shared<ex::L2File>();
   x.set_boot([&h](Node& nd, BootReason) { nd.emplace_process<NodeProc>(nd, h); });
 
   // ---- clients, subscribers, operator ----
+  // Clients and subscribers may be paused (SIGSTOP): a paused client misses heartbeats,
+  // the server's idle timeout closes its session (cancel-on-disconnect while it believes
+  // it is connected), and a paused subscriber falls behind both lines.
   for (std::size_t c = 0; c < nsess; ++c) {
-    Node& nc = w.add_node("c" + std::to_string(c + 1), NodeOptions{false, false});
+    Node& nc = w.add_node("c" + std::to_string(c + 1), NodeOptions{false, true});
     const env::Endpoint gw = p.gw[h.clients[c].gateway];
     nc.set_boot([&h, c, gw](Node& nd, BootReason) { nd.emplace_process<ClientProc>(nd, h, c, gw); });
   }
@@ -1645,7 +1699,7 @@ Report run_exchange(const Options& o) {
   gl.username = Alpha<sb::kUsernameLen>("GLIMPS");
   gl.password = Alpha<sb::kPasswordLen>(kGlimpsePassword);
   for (std::size_t s = 0; s < nsub; ++s) {
-    Node& ns = w.add_node("s" + std::to_string(s + 1), NodeOptions{false, false});
+    Node& ns = w.add_node("s" + std::to_string(s + 1), NodeOptions{false, true});
     ns.set_boot([&h, s, fc, rr, glimpse, gl](Node& nd, BootReason) {
       nd.emplace_process<SubProc>(nd, h, s, fc, rr, glimpse, gl);
     });

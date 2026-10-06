@@ -17,6 +17,7 @@
 #include "engine/engine.h"
 #include "engine/records.h"
 #include "journal/record.h"
+#include "proto/ouch50/ouch50.h"
 #include "sim/node.h"
 #include "sim/world.h"
 #include "sim/worlds/journal_device.h"
@@ -48,6 +49,7 @@ struct OrderLife {
   std::int64_t open = 0;
   std::vector<std::uint64_t> executions;  // record indices
   std::vector<Nanos> execution_ts;
+  ouch50::CrossType cross = ouch50::CrossType::Continuous;
 };
 struct Truth {
   bool ok = false;
@@ -60,14 +62,21 @@ struct Truth {
   // (session, urn) -> consuming responses (A, U-new, J) with their indices.
   std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::uint64_t>> consumed;
   std::uint64_t day_end = 0;
+  std::uint64_t state_hash = 0;  // the fresh engine's, after the last record
   // The opening freeze (09:25 StateChange) and the opening cross (09:30 Cross 'O'):
-  // held orders are frozen in between, and cancel-on-disconnect spares frozen orders
-  // (matching-rules.md 13.2, 13.6).
-  std::uint64_t open_freeze = 0, open_cross = 0;
-  [[nodiscard]] bool frozen_at(std::uint64_t d, std::uint64_t accepted) const {
+  // on-open and held orders are frozen in between; on-close orders from the closing
+  // freeze (15:50) until the close, with no cross-cancel permit in the worlds; and
+  // cancel-on-disconnect spares frozen orders (matching-rules.md 13.2, 13.6).
+  std::uint64_t open_freeze = 0, open_cross = 0, close_freeze = 0;
+  [[nodiscard]] bool frozen_at(std::uint64_t d, const OrderLife& o) const {
+    if (o.cross == ouch50::CrossType::Closing) {
+      // Until the symbol closes: its closing cross, or later for a symbol halted then
+      // (the engine keeps it frozen); its orders are gone after the close either way.
+      return close_freeze != 0 && d >= close_freeze;
+    }
     if (open_freeze == 0 || d < open_freeze) return false;
     if (open_cross != 0 && d >= open_cross) return false;
-    return open_cross == 0 || accepted < open_cross;
+    return open_cross == 0 || o.accepted < open_cross;
   }
 };
 

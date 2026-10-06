@@ -43,7 +43,7 @@ Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
         case 'A': {
           const auto m = oo::OrderAccepted::decode_base(b.data());
           t->consumed[{session, m.user_ref_num}].push_back(i);
-          OrderLife ol{session, m.user_ref_num, i, 0, static_cast<std::int64_t>(m.quantity), {}, {}};
+          OrderLife ol{session, m.user_ref_num, i, 0, static_cast<std::int64_t>(m.quantity), {}, {}, m.cross_type};
           if (m.order_state == ouch50::OrderState::Dead) {
             ol.open = 0;
             ol.closed = i;
@@ -58,7 +58,7 @@ Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
             old->open = 0;
             close_if_done(*old);
           }
-          OrderLife ol{session, m.user_ref_num, i, 0, static_cast<std::int64_t>(m.quantity), {}, {}};
+          OrderLife ol{session, m.user_ref_num, i, 0, static_cast<std::int64_t>(m.quantity), {}, {}, m.cross_type};
           if (m.order_state == ouch50::OrderState::Dead) {
             ol.open = 0;
             ol.closed = i;
@@ -95,6 +95,20 @@ Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
             ol->open -= m.decrement_shares;
             close_if_done(*ol);
           }
+          break;
+        }
+        case 'M': {  // Order Modified: the order's leaves after a Modify
+          const auto m = oo::OrderModified::decode_base(b.data());
+          if (OrderLife* ol = life(m.user_ref_num)) {
+            ol->open = static_cast<std::int64_t>(m.quantity);
+            close_if_done(*ol);
+          }
+          break;
+        }
+        case 'X':    // Mass Cancel Response
+        case 'G':    // Disable Order Entry Response
+        case 'K': {  // Enable Order Entry Response: each consumed its request's UserRefNum
+          t->consumed[{session, load_be32(b.data() + 9)}].push_back(i);
           break;
         }
         default:
@@ -148,6 +162,9 @@ Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
                 e.arg == static_cast<std::uint16_t>(en::Milestone::OpenFreeze) && t->open_freeze == 0)
               t->open_freeze = r.index();
             if (e.kind == en::TimerKind::Cross && e.arg == 'O' && t->open_cross == 0) t->open_cross = r.index();
+            if (e.kind == en::TimerKind::StateChange &&
+                e.arg == static_cast<std::uint16_t>(en::Milestone::CloseFreeze) && t->close_freeze == 0)
+              t->close_freeze = r.index();
           }
         }
       }
@@ -166,6 +183,7 @@ Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
     return t;
   }
   t.crc = canonical_crcs(n, journal_prefix, date);
+  t.state_hash = eng.state_hash();
   t.ok = true;
   return t;
 }
