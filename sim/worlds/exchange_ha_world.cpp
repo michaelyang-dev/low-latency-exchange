@@ -205,7 +205,7 @@ struct Harness {
   World* w = nullptr;
   OracleRegistry* o = nullptr;
   OracleId o_stream = 0, o_lost = 0, o_arb = 0, o_line = 0, o_once = 0, o_prefix = 0, o_seq = 0, o_cod = 0,
-           o_commit = 0, o_recover = 0, o_replay = 0, o_internal = 0;
+           o_commit = 0, o_recover = 0, o_replay = 0, o_internal = 0, o_book = 0;
   std::uint64_t alarms = 0;  // replica ALARMs raised on either node
   bool verbose = false;
 
@@ -321,6 +321,7 @@ struct Harness {
   void check_streams(const Truth& t);
   void check_lost(const Truth& t);
   void check_arb(const Truth& t);
+  void check_book(const Truth& t);
   void check_lines();
   void check_once(const Truth& t);
   void match_pushes(const Truth& t);
@@ -470,6 +471,33 @@ void Harness::check_arb(const Truth& t) {
                          ", the stream holds " + std::to_string(t.itch.size()));
       return;
     }
+  }
+}
+
+void Harness::check_book(const Truth& t) {
+  // A subscriber's book at End of Session (GLIMPSE spins included) equals a book built
+  // from the final journal's ITCH stream, and took every message (O-BOOK).
+  std::uint64_t truth_digest = 0;
+  bool built = false;
+  for (std::size_t s = 0; s < subs.size(); ++s) {
+    const SubTruth& st = subs[s];
+    if (!st.book_taken) continue;
+    if (!built) {
+      book::OptBook<> b;
+      for (const Out& m : t.itch) (void)book::apply_itch(b, m.bytes.data(), m.bytes.size());
+      truth_digest = b.books_digest();
+      built = true;
+    }
+    if (st.book_bad != 0) {
+      o->fail(o_book, "subscriber " + std::to_string(s) + "'s book refused " + std::to_string(st.book_bad) +
+                          " ITCH messages (unknown or duplicate order references, over-reduces)");
+      return;
+    }
+    if (st.book_digest != truth_digest) {
+      o->fail(o_book, "subscriber " + std::to_string(s) + "'s book at End of Session differs from the final journal's");
+      return;
+    }
+    o->pass(o_book);
   }
 }
 
@@ -879,6 +907,7 @@ void Harness::final_checks() {
   check_streams(t);
   check_lost(t);
   check_arb(t);
+  check_book(t);
   check_lines();
   check_once(t);
   match_pushes(t);
@@ -1658,6 +1687,13 @@ class HaSubProc final : public Process {
     SubTruth& t = h_.subs[s_];
     t.ended = true;
     t.end_at = e;
+    if (!t.book_taken) {
+      t.book_taken = true;
+      t.book_digest = feed_->book().books_digest();
+      const auto& bs = feed_->stats().book_status;
+      t.book_bad = 0;
+      for (std::size_t k = 1; k < bs.size(); ++k) t.book_bad += bs[k];
+    }
   }
 
  private:
@@ -1966,6 +2002,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
       kOOutputCommit, "every output received comes from a record held by both nodes or durable on one at that time");
   h.o_recover = w.oracles().activate("O-RECOVER", "a node starts on every journal it left");
   h.o_replay = w.oracles().activate(kOReplay, "the nodes' engine state hashes agree at every checkpoint");
+  h.o_book = w.oracles().activate(kOBook, "each subscriber's book at End of Session equals the final journal's");
   h.o_internal = w.oracles().activate("O-HA-INTERNAL", "neither replica raises an ALARM its failure model excludes");
   for (std::size_t n = 0; n < 2; ++n)
     h.nodes[n].durable_tap = std::make_unique<ex::DurableTap>(w, h.nodes[n].durable_at);
@@ -2049,9 +2086,9 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   const Nanos soup_idle = 4 * soup_hb + static_cast<Nanos>(wl.below(static_cast<std::uint64_t>(6 * soup_hb)));
   NodeParams base;
   base.segment_bytes = jr::kSegmentHeaderBytes + jr::kBatchBytes * (8 + wl.below(24));
-  // L2 from 1 MiB (production: 1 GiB) so it fills and pushes back; a day with the 1 Hz
-  // clock starts with about 0.93 MB of configuration, which the ring takes at once.
-  base.l2_bytes = std::size_t{1} << ((h.clock ? 21 : 20) + wl.below(3));
+  // L2 from 1 MiB (production: 1 GiB) so it fills and pushes back; it takes a day's
+  // configuration at once (about 0.93 MB with the 1 Hz clock).
+  base.l2_bytes = std::size_t{1} << (20 + wl.below(3));
   base.egress_bytes = std::size_t{1} << (17 + wl.below(5));
   // Snapshots every 50 to 1,550 records, 32 times as far apart on a day with the 1 Hz
   // clock (some 30 times the records; each snapshot carries the 0.9 MB schedule).

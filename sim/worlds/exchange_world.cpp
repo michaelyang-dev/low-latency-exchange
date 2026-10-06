@@ -167,7 +167,8 @@ struct Ledger {
 struct Harness {
   World* w = nullptr;
   OracleRegistry* o = nullptr;
-  OracleId o_stream = 0, o_arb = 0, o_once = 0, o_seq = 0, o_cod = 0, o_commit = 0, o_recover = 0, o_replay = 0;
+  OracleId o_stream = 0, o_arb = 0, o_once = 0, o_seq = 0, o_cod = 0, o_commit = 0, o_recover = 0, o_replay = 0,
+           o_book = 0;
   std::uint64_t seed = 0;
   bool verbose = false;
 
@@ -248,6 +249,7 @@ struct Harness {
   void final_checks();
   void check_streams(const Truth& t);
   void check_arb(const Truth& t);
+  void check_book(const Truth& t);
   void check_once(const Truth& t);
   void match_pushes(const Truth& t);
   void check_cod(const Truth& t);
@@ -635,6 +637,33 @@ void Harness::check_commit(const Truth& t) {
   }
 }
 
+void Harness::check_book(const Truth& t) {
+  // A subscriber's book at End of Session (GLIMPSE spins included) equals a book built
+  // from the journal's ITCH stream, and took every message (O-BOOK).
+  std::uint64_t truth_digest = 0;
+  bool built = false;
+  for (std::size_t s = 0; s < subs.size(); ++s) {
+    const SubTruth& st = subs[s];
+    if (!st.book_taken) continue;
+    if (!built) {
+      book::OptBook<> b;
+      for (const Out& m : t.itch) (void)book::apply_itch(b, m.bytes.data(), m.bytes.size());
+      truth_digest = b.books_digest();
+      built = true;
+    }
+    if (st.book_bad != 0) {
+      o->fail(o_book, "subscriber " + std::to_string(s) + "'s book refused " + std::to_string(st.book_bad) +
+                          " ITCH messages (unknown or duplicate order references, over-reduces)");
+      return;
+    }
+    if (st.book_digest != truth_digest) {
+      o->fail(o_book, "subscriber " + std::to_string(s) + "'s book at End of Session differs from the journal's");
+      return;
+    }
+    o->pass(o_book);
+  }
+}
+
 void Harness::check_replay(const Truth& t) {
   // The running node's engine is consistent, and once it has applied the whole journal
   // it equals a fresh replay of it (O-REPLAY): recovery, from the journal or a snapshot,
@@ -681,6 +710,7 @@ void Harness::final_checks() {
   check_replay(t);
   check_streams(t);
   check_arb(t);
+  check_book(t);
   check_once(t);
   match_pushes(t);
   check_cod(t);
@@ -1345,6 +1375,13 @@ class SubProc final : public Process {
     SubTruth& t = h_.subs[s_];
     t.ended = true;
     t.end_at = e;
+    if (!t.book_taken) {
+      t.book_taken = true;
+      t.book_digest = feed_->book().books_digest();
+      const auto& bs = feed_->stats().book_status;
+      t.book_bad = 0;
+      for (std::size_t k = 1; k < bs.size(); ++k) t.book_bad += bs[k];
+    }
   }
 
  private:
@@ -1563,6 +1600,7 @@ Report run_exchange(const Options& o) {
   h.o_commit = w.oracles().activate(kOOutputCommit, "every output received comes from a record durable at that time");
   h.o_recover = w.oracles().activate("O-RECOVER", "the node starts on every journal it left");
   h.o_replay = w.oracles().activate(kOReplay, "the node's engine equals a fresh replay of its journal");
+  h.o_book = w.oracles().activate(kOBook, "each subscriber's book at End of Session equals the journal's");
   h.durable_tap = std::make_unique<ex::DurableTap>(w, h.durable_at);
 
   // ---- the day ----

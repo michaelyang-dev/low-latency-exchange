@@ -88,6 +88,10 @@ struct SubTruth {
   std::uint64_t delivered = 0, snapshots = 0, snapshot_failures = 0, covered = 0;
   bool ended = false;
   SeqNo end_at = 0;
+  // The subscriber's book at End of Session (FeedHandler: snapshot spins, then the stream).
+  bool book_taken = false;
+  std::uint64_t book_digest = 0;
+  std::uint64_t book_bad = 0;  // ITCH messages its book refused (unknown or duplicate ref, ...)
 };
 
 // Replays the journal at `journal_prefix` on node `n`'s disk (read-only) through a
