@@ -645,3 +645,148 @@ bugs:
       a day with the production sequencer, runs the rejoin's reload_to against an output
       log that holds nothing, and checks that the reload wrote no ITCH or OUCH message into
       it: at the found tree it wrote 2 ITCH and 6 OUCH messages, at the fix none.
+  - id: DST-014
+    title: "refclient's HA order entry took an Account Query Response's NextUserRefNum for the UserRefNum of the next pending Enter Order and released that order unprocessed, which a failover could then lose"
+    component: client
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-05T23:30:00Z"
+    campaign_id: 20261006T035056Z-029df774-4708f8f654eda1ad
+    sha_found: fe43bd7c12f56fab52e4b570e7aa809792174159
+    seed: "0x4708f8f654eda28d"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0xddcf16495295bc58"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-EXACTLY-ONCE
+    signature: "O-EXACTLY-ONCE:192004:0x4c364644c74d78ce"
+    root_cause: >-
+      HaOrderEntry::on_response (src/client/order_entry.cpp) read the UserRefNum at
+      offset 9 of every response but System Event, and a response naming the
+      UserRefNum a pending message consumed released that message and every one
+      before it (the engine applies a session's messages in order). Account Query
+      Response carries NextUserRefNum at that offset: one above the last UserRefNum
+      the account consumed, which is the UserRefNum of the next Enter Order still in
+      the node's queue. The client released that order as processed. In the seed (the
+      fastest of 57 failures in 400 exchange_ha seeds at the found tree) a client sent an
+      Account Query and entered order 1; the response released order 1 before the engine
+      saw it, the node holding it died, and the client never sent it again, while later
+      orders were accepted (O-EXACTLY-ONCE: "Enter Order UserRefNum 1 was sent before
+      UserRefNum 22, which got a response, but the final journal never consumed it"). It
+      was first seen on seed 0x5 of a development run, before the later world changes
+      moved every seed's trajectory. Fix: an Account Query Response releases nothing (nor does it
+      say which pending query it answers: a query re-sent after a takeover is answered
+      twice); a query goes with the messages before the next response that names a
+      UserRefNum.
+    fix_sha: c8ef81c0a3b3ba2c4836c5d200e78ab19f970a5e
+    regression_test: tests/sim_regressions/DST-014_ha_client_account_query
+    counted: false
+    count_reason: >-
+      Not counted: a code survey of the simulator's coverage gaps found this path by
+      reading HaOrderEntry before exsim reproduced it. The survey noted that no world
+      sent Account Query and predicted this exact release. exsim reproduced it on seed
+      5, the fifth it ran after the exchange_ha clients gained Account Query (after a
+      takeover and at random), Modify and Mass Cancel. Rule 2 asks for a bug found by
+      exsim, and here exsim confirmed a bug that code review had already found. The
+      fix, the regression test and the workload are kept.
+  - id: DST-015
+    title: "a replica reassembled a fragmented record only from fragments in order, so over a reordering data plane the day's large schedule records never arrived and a joiner's catch-up stalled for the rest of the day"
+    component: repl
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-05T23:58:00Z"
+    campaign_id: 20261006T035348Z-029df774-369b2e18318abda0
+    sha_found: b3b4a9ddc7dcb474bc9106af44b0e2c99e2e8446
+    seed: "0x369b2e18318abed4"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x7f3f9520129577ef"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:13580325:0x77fd32fd4725b7f4"
+    root_cause: >-
+      An APPEND carries whole records up to the 1,400-byte datagram limit, or one
+      fragment of a larger record. Replica::receive_records (src/repl/replica.h) took
+      a record's fragments only in order: a fragment that arrived ahead of its
+      predecessor counted as a gap (a NACK), and one at offset 0 started the record
+      over. The data plane loses, duplicates and reorders datagrams (the network of
+      plan 10 §6), and the sender's go-back-N retransmission resends a record's
+      fragments back to back, so every retry of a record cut into k fragments needed
+      all k to arrive in order. With production's 1 Hz clock ([day] noii_clock, on by
+      default) the day's schedule is about 57,600 entries, journaled at day start as
+      some 29 config records near the 32 KiB limit, about 24 fragments each. In the
+      seed (the fastest of 28 O-LIVE failures in 1,500 exchange_ha seeds at the found
+      tree; its day ran the clock) xa stopped on an I/O error before its day start had
+      an EpochStart, was refused at restart, the runbook moved its journal aside, and it
+      caught up from an empty journal while xb resumed as solo primary. Under the
+      network's delay jitter (2.1 million of 2.4 million datagrams reordered, none
+      lost) no burst of 24 fragments arrived in order: xa took records 1-4, then
+      counted 2.2 million gaps and sent 12,789 NACKs, xb retransmitted 12,788 times,
+      and the catch-up never reached the JOIN for the rest of the day (O-LIVE). It was
+      first seen on seed 0xd of a development run, before the later world changes
+      moved every seed's trajectory. Fix: fragments are copied to
+      their offsets in any order, the received byte ranges are tracked in a fixed
+      array, and the record is checked and appended once all of its bytes are there.
+      A reassembly is keyed by index, length, epoch and stream, so fragments of
+      another record start over.
+    fix_sha: f7b1f804fc67734aa07187a35f171b268f8586e6
+    regression_test: tests/sim_regressions/DST-015_fragments_out_of_order
+    counted: true
+    count_reason: >-
+      Production code (src/repl/replica.h). Found by exsim (O-LIVE) in exchange_ha
+      once its days ran production's default 1 Hz clock, which is a coverage change,
+      not a planted fault. The coverage survey that suggested the clock gave a general
+      reason (bursts of overdue timers) and did not anticipate this mechanism.
+      Reproduces from seed at the found tree with the recorded signature on
+      macos-arm64. One root cause, one fix. The seed-independent regression test
+      replicates a 30,000-byte record (about 23 fragments) to a backup that receives
+      every datagram newest first: at the found tree the backup stops at the record
+      (3 of 7 records); at the fix it holds all 7.
+  - id: DST-016
+    title: "a primary granted a new epoch with its L2 ring full could not append the epoch's EpochStart, and release, the engine and L2 waited on each other for the rest of the day"
+    component: exchanged
+    targets: [T05, T24, T26]
+    category: production
+    found_utc: "2026-10-06T01:40:00Z"
+    campaign_id: 20261006T042559Z-5cdef605-4304275c077401c
+    sha_found: 5252675c85d3ebb793ba83b40ef165b1d9c2036a
+    seed: "0x04304275c0774277"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x7a899b7d94d3de2a"
+    platform: linux-aarch64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:17462761:0x77fd32fd4725b7f4"
+    root_cause: >-
+      A primary releases up to its backup's acknowledgement (paired) or its durable
+      index (solo), and a new primary releases nothing before its own EpochStart is
+      durable (10 §4; the SoloReleaseFromL2 mutant). While release is held the engine
+      fills the egress ring with outputs it may not send and stops applying, so its L2
+      cursor stops; the sequencer goes on until L2 is full. The 1 Hz clock's timer
+      records fill it quickly. When the witness then granted the primary an epoch
+      (SOLO), the replica had to append the epoch's EpochStart after every sequenced
+      record, and L2 had no room for it (src/journal/l2_ring.h, appended through
+      apps/exchanged/repl_stage.h append): release waited for the EpochStart, the engine
+      for release, L2 for the engine. The node never sequenced or released again, and
+      its partner's rejoin was refused at every attempt (no epoch end while the
+      EpochStart is pending), so the day never ended (O-LIVE). In the seed (the only
+      failure in 10,000 exchange_ha and exchange_ha_split seeds at the found tree; its
+      day ran the clock) the backup's acknowledgements stopped at 10,821 while the
+      primary sequenced on to 51,041: its engine stopped at 37,106 with the egress ring
+      full, and its 1 MiB L2 held 32 free bytes when W granted it SOLO in epoch 2. The
+      deposed partner restarted and was refused 3,614 times. Fix: the sequencer's
+      reservations (seq_stage.h) and replicated records leave room for one EpochStart in
+      L2 (L2Ring::try_reserve_keeping_reserve, kEpochStartReserve); only an EpochStart
+      may take it.
+    fix_sha: 60328d896e041caba2f33e5506c5bbf1e595bf13
+    regression_test: tests/sim_regressions/DST-016_epoch_start_l2_reserve
+    counted: true
+    count_reason: >-
+      Production code (the L2 ring and exchanged's sequencer and replication stages).
+      Found by exsim (O-LIVE) in exchange_ha (and exchange_ha_split) once their days ran
+      production's default 1 Hz clock; the mechanism was not anticipated by the coverage
+      survey. Reproduces from seed at the found tree with the recorded signature on
+      linux-aarch64. One root cause, one fix. The seed-independent regression test fills
+      a 1 MiB and a 2 MiB L2 ring through exchanged's sequencer ring adapter with
+      nothing consuming, then reserves an EpochStart as the replication stage does: at
+      the found tree there is no room in either; at the fix there is.

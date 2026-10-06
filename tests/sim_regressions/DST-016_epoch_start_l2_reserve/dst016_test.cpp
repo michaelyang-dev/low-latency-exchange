@@ -1,16 +1,16 @@
 // DST-016 regression test (scripted, seed-independent): after the sequencer has filled the
 // L2 ring to its back-pressure, the EpochStart of an epoch the witness granted must still
-// fit. Found by `exsim --world=exchange_ha_split` (O-LIVE) once the world ran production's
-// 1 Hz clock; see sim/ledger/bugs.yaml.
+// fit. Found by `exsim --world=exchange_ha_split` and reproduced in `exchange_ha` (O-LIVE)
+// once the worlds ran production's 1 Hz clock; see sim/ledger/bugs.yaml.
 //
 // A primary releases up to its backup's ACK (paired) or its durable index (solo), and a new
 // primary releases nothing before its EpochStart is durable (10 §4). While release is held
 // the engine fills the egress ring with outputs it may not send and stops applying, so its
 // L2 cursor stops; the sequencer goes on until L2 is full (the 1 Hz clock's timer records
-// do it quickly). In the seed the backup's ACKs stopped at 18,811, the primary sequenced on
-// to 48,707 with a 1 MiB L2 holding 32 free bytes, and W granted it SOLO: the EpochStart did
-// not fit, release could not move without it, the engine could not move without release,
-// and L2 could not drain without the engine. The node never sequenced or released again;
+// do it quickly). In the recorded seed the backup's ACKs stopped at 10,821, the primary
+// sequenced on to 51,041 with a 1 MiB L2 holding 32 free bytes, and W granted it SOLO: the
+// EpochStart did not fit, release could not move without it, the engine could not move
+// without release, and L2 could not drain without the engine. The node never sequenced or released again;
 // its partner's rejoin was refused at every attempt (no epoch end while the EpochStart is
 // pending). At the fix the sequencer and replicated records leave room for one EpochStart.
 //

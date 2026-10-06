@@ -1,0 +1,128 @@
+diff --git a/src/repl/replica.h b/src/repl/replica.h
+--- a/src/repl/replica.h
++++ b/src/repl/replica.h
+@@ -37,7 +37,6 @@
+ #include <memory>
+ #include <optional>
+ #include <span>
+-#include <utility>
+ #include <variant>
+ #include <vector>
+ 
+@@ -1198,31 +1197,23 @@
+         dup = true;
+       } else if (a.first_index > next) {
+         gap = true;
+-      } else if (a.first_len <= journal::kMaxRecordBytes && a.first_offset < a.first_len &&
+-                 !a.records.empty() && a.records.size() <= a.first_len - a.first_offset) {
+-        // The data plane loses, duplicates and reorders datagrams (the network of 10 §6),
+-        // so the fragments of one record are taken in any order: each is copied to its
+-        // offset, and the record is checked and appended once all of its bytes are here.
+-        // Fragments of another record at this index (another length, epoch or stream)
+-        // start over.
+-        if (reasm_index_ != next || reasm_len_ != a.first_len || reasm_epoch_ != a.epoch ||
+-            reasm_catchup_ != catchup) {
+-          reasm_reset();
++      } else {
++        if (reasm_index_ != next || a.first_offset == 0) {
+           reasm_index_ = next;
+-          reasm_len_ = a.first_len;
+-          reasm_epoch_ = a.epoch;
+-          reasm_catchup_ = catchup;
+-        }
+-        switch (reasm_put(a.first_offset, a.records)) {
+-          case Reasm::kComplete:
++          reasm_have_ = 0;
++        }
++        if (a.first_offset == reasm_have_) {
++          std::memcpy(reasm_.get() + reasm_have_, a.records.data(), a.records.size());
++          reasm_have_ += static_cast<std::uint32_t>(a.records.size());
++          if (reasm_have_ == a.first_len) {
+             appended = accept_record(std::span<const std::byte>(reasm_.get(), a.first_len), a.epoch, catchup);
+-            reasm_reset();
+-            break;
+-          case Reasm::kAdded:
+-            break;
+-          case Reasm::kHadIt:
+-            dup = true;
+-            break;
++            reasm_have_ = 0;
++            reasm_index_ = 0;
++          }
++        } else if (a.first_offset < reasm_have_) {
++          dup = true;
++        } else {
++          gap = true;
+         }
+       }
+     } else {
+@@ -1239,7 +1230,8 @@
+           gap = true;
+           break;
+         }
+-        reasm_reset();
++        reasm_have_ = 0;
++        reasm_index_ = 0;
+         if (!accept_record(rec, a.epoch, catchup)) break;
+         appended = true;
+         ++next;
+@@ -1259,43 +1251,6 @@
+         last_nack_sent_ = now;
+       }
+     }
+-  }
+-
+-  // Reassembly of a record that came in fragments: the byte ranges received so far,
+-  // disjoint and sorted, in a fixed array (no allocation on the data path).
+-  enum class Reasm : std::uint8_t { kComplete, kAdded, kHadIt };
+-  using Span = std::pair<std::uint32_t, std::uint32_t>;  // [first, second)
+-  void reasm_reset() noexcept {
+-    reasm_index_ = 0;
+-    reasm_len_ = 0;
+-    reasm_spans_n_ = 0;
+-  }
+-  Reasm reasm_put(std::uint32_t off, std::span<const std::byte> b) noexcept {
+-    const Span f{off, off + static_cast<std::uint32_t>(b.size())};
+-    for (std::size_t i = 0; i < reasm_spans_n_; ++i)
+-      if (reasm_spans_[i].first <= f.first && f.second <= reasm_spans_[i].second) return Reasm::kHadIt;
+-    std::memcpy(reasm_.get() + f.first, b.data(), b.size());
+-    // The ranges before f, f merged with every range it overlaps or touches, the rest.
+-    std::array<Span, kReasmSpans + 1> out{};
+-    std::size_t n = 0, i = 0;
+-    Span cur = f;
+-    for (; i < reasm_spans_n_ && reasm_spans_[i].second < cur.first; ++i) out[n++] = reasm_spans_[i];
+-    for (; i < reasm_spans_n_ && reasm_spans_[i].first <= cur.second; ++i) {
+-      cur.first = std::min(cur.first, reasm_spans_[i].first);
+-      cur.second = std::max(cur.second, reasm_spans_[i].second);
+-    }
+-    out[n++] = cur;
+-    for (; i < reasm_spans_n_; ++i) out[n++] = reasm_spans_[i];
+-    if (n > kReasmSpans) {
+-      // Too scattered to track: keep this fragment only (the sender's go-back-N
+-      // retransmission brings the others again).
+-      out[0] = f;
+-      n = 1;
+-    }
+-    std::copy_n(out.begin(), n, reasm_spans_.begin());
+-    reasm_spans_n_ = n;
+-    const bool whole = n == 1 && reasm_spans_[0].first == 0 && reasm_spans_[0].second == reasm_len_;
+-    return whole ? Reasm::kComplete : Reasm::kAdded;
+   }
+ 
+   // Validates one replicated record against the local chain and appends it to L2
+@@ -1880,13 +1835,8 @@
+   bool unpromotable_ = false;
+   bool suspect_alarmed_ = false;
+   bool build_alarmed_ = false;
+-  static constexpr std::size_t kReasmSpans = 64;
+-  std::uint64_t reasm_index_ = 0;  // the record being reassembled (0: none)
+-  std::uint32_t reasm_len_ = 0;
+-  std::uint64_t reasm_epoch_ = 0;
+-  bool reasm_catchup_ = false;
+-  std::array<std::pair<std::uint32_t, std::uint32_t>, kReasmSpans> reasm_spans_{};  // Span
+-  std::size_t reasm_spans_n_ = 0;
++  std::uint64_t reasm_index_ = 0;
++  std::uint32_t reasm_have_ = 0;
+   Nanos last_ack_sent_ = 0;
+   Nanos last_nack_sent_ = 0;
+ 
