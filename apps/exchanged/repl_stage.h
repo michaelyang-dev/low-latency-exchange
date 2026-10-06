@@ -423,10 +423,7 @@ class BasicReplStage {
       (void)drain_tee();                // its last records first
     }
     const auto len = static_cast<std::uint32_t>(rec.size());
-    // Replicated records leave the reserve, as the sequencer does: only an EpochStart
-    // may take it, so a node can always open the epoch it was granted (DST-016).
-    const bool epoch_start = journal::RecordView{rec}.type() == journal::RecordType::EpochStart;
-    std::byte* dst = epoch_start ? sh_->l2.try_reserve(len) : sh_->l2.try_reserve_keeping_reserve(len);
+    std::byte* dst = sh_->l2.try_reserve(len);
     if (dst == nullptr) return false;  // L2 full: the io stage is behind
     std::memcpy(dst, rec.data(), len);
     (void)sh_->l2.sealer().reseal(dst, canonical_);

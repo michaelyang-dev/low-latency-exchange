@@ -32,11 +32,6 @@
 
 namespace lle::journal {
 
-// Free bytes that the sequencer and replicated records leave in the ring
-// (L2Ring::try_reserve_keeping_reserve): room for one EpochStart record, placed after a
-// pad to the end of the buffer in the worst case.
-inline constexpr std::uint64_t kEpochStartReserve = 2 * conc::detail::record_bytes(record_size(EpochStart{}));
-
 struct L2RestoreResult {
   bool found = false;          // the record `from_index` was in the ring and chained
   std::uint64_t records = 0;   // records re-published (from_index .. chain.last_index)
@@ -62,7 +57,6 @@ class L2Ring {
     capacity_ = capacity;
     sealer_ = std::make_unique<Sealer>(nonce);
     ring_.init(storage, capacity);
-    reserve_min_ = 0;
   }
 
   [[nodiscard]] const Sealer& sealer() const noexcept { return *sealer_; }
@@ -72,23 +66,6 @@ class L2Ring {
   // Space for one journal record of `record_len` bytes (multiple of 8, <= kMaxRecordBytes);
   // nullptr when the slowest cursor lags by the capacity (back-pressure).
   [[nodiscard]] std::byte* try_reserve(std::uint32_t record_len) noexcept { return ring_.try_reserve(record_len); }
-  // As try_reserve, leaving kEpochStartReserve bytes free behind the record: the
-  // reservation of the sequencer and of replicated records, so that a replica can always
-  // append the EpochStart of an epoch it was granted (try_reserve). That record can be
-  // the only way out of a full ring: a new primary releases nothing before its
-  // EpochStart is durable (10 §4), its engine waits on the release (the outputs fill the
-  // egress ring), and this ring waits on the engine (DST-016).
-  [[nodiscard]] std::byte* try_reserve_keeping_reserve(std::uint32_t record_len) noexcept {
-    // Worst case: a pad to the end of the buffer, then the record.
-    const std::uint64_t need = 2 * conc::detail::record_bytes(record_len) + kEpochStartReserve;
-    const std::uint64_t w = ring_.write_position();
-    if (w + need - reserve_min_ > capacity_) {
-      reserve_min_ = ring_.cursor_position(0);
-      for (std::size_t c = 1; c < N; ++c) reserve_min_ = std::min(reserve_min_, ring_.cursor_position(c));
-      if (w + need - reserve_min_ > capacity_) return nullptr;
-    }
-    return ring_.try_reserve(record_len);
-  }
   // Publishes the reserved record to every cursor; the record must be complete and sealed.
   void commit() noexcept { ring_.commit(); }
 
@@ -156,7 +133,6 @@ class L2Ring {
     }
     // Re-publish the chain from position 0, then zero everything else.
     ring_.init(storage_, capacity_);
-    reserve_min_ = 0;
     std::uint64_t used = 0;
     for (std::size_t pos = 0; pos < chain_bytes.size();) {
       const std::uint32_t len = load_le32(chain_bytes.data() + pos);
@@ -207,7 +183,6 @@ class L2Ring {
   std::size_t capacity_ = 0;
   std::unique_ptr<Sealer> sealer_;
   conc::BroadcastRing<N> ring_;
-  std::uint64_t reserve_min_ = 0;  // try_reserve_keeping_reserve's cached slowest cursor (producer)
 };
 
 }  // namespace lle::journal
