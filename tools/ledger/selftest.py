@@ -113,7 +113,20 @@ def test_verify_dry_run() -> None:
         ef.write_text("schema_version: 1\nbugs: []\n")
         r = py(str(HERE / "verify_bugs.py"), "--dry-run", "--ledger", str(ef))
     check(r.returncode == 0 and "counted=0 verified=0" in r.stdout, f"empty ledger verifies vacuously: {r.stdout}")
-    r = py(str(HERE / "verify_bugs.py"), "--dry-run")
+    # An uncommitted fix (sha_found/fix_sha "uncommitted"): the trees are copies of the
+    # working tree, the found one with found_patch applied. The example's committed entry
+    # turned uncommitted, with a patch file the repository has.
+    patch = next(iter(sorted((REPO / "sim" / "ledger" / "patches").glob("*.patch"))), None)
+    check(patch is not None, "a found patch exists to point at")
+    text = EXAMPLE.read_text().split("  - id: DST-002")[0]
+    text = text.replace('    sha_found: "0123456789abcdef0123456789abcdef01234567"\n',
+                        "    sha_found: uncommitted\n    found_patch: " + str(patch.relative_to(REPO)) + "\n")
+    text = text.replace('    fix_sha: "fedcba9876543210fedcba9876543210fedcba98"\n', "    fix_sha: uncommitted\n")
+    check("sha_found: uncommitted" in text and "fix_sha: uncommitted" in text, "uncommitted fixture built")
+    with tempfile.TemporaryDirectory() as td:
+        uf = Path(td) / "uncommitted.yaml"
+        uf.write_text(text)
+        r = py(str(HERE / "verify_bugs.py"), "--dry-run", "--ledger", str(uf))
     check(r.returncode == 0 and "copy working tree" in r.stdout, f"uncommitted entries reproduce from a copy: {r.stdout}")
     r = py(str(HERE / "verify_bugs.py"), "--dry-run", "--ledger", str(EXAMPLE))
     check(r.returncode == 0 and "DST-001: FAILED" in r.stdout and "dst/DST-001/found" in r.stdout,

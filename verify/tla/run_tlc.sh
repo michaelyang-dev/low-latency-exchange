@@ -16,7 +16,9 @@ trap 'rm -rf "$meta"' EXIT
 spec_te=()
 if java -cp "$jar" tlc2.TLC -help 2>&1 | grep -q noGenerateSpecTE; then spec_te=(-noGenerateSpecTE); fi
 java -cp "$jar" tlc2.TLC -help 2>&1 | grep -m1 "TLC2 Version" || true
-tlc() { java -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers "$workers" -deadlock ${spec_te[@]+"${spec_te[@]}"} -metadir "$meta/$1" -config "$2" "${3:-HotStandby.tla}"; }
+# TLC_JAVA_OPTS: extra JVM options (the nightly full model sizes the heap for its runner).
+# shellcheck disable=SC2086
+tlc() { java -XX:+UseParallelGC ${TLC_JAVA_OPTS:-} -cp "$jar" tlc2.TLC -workers "$workers" -deadlock ${spec_te[@]+"${spec_te[@]}"} -metadir "$meta/$1" -config "$2" "${3:-HotStandby.tla}"; }
 
 status=0
 echo "== safety model $safety_cfg (expect: no error)"

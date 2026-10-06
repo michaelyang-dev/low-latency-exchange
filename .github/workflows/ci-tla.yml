@@ -20,12 +20,24 @@ jobs:
         run: |
           curl -sSLf -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
           echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c
+      - name: Room for the full model (nightly)
+        if: github.event_name == 'schedule'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - name: Safety model must pass; every mutant must fail
         # Push and PR runs use reduced bounds; the nightly run checks the full model.
         run: |
+          set -o pipefail
           cfg=HotStandbyCI.cfg
-          if [ "${{ github.event_name }}" = "schedule" ]; then cfg=HotStandby.cfg; fi
-          verify/tla/run_tlc.sh "$PWD/tla2tools.jar" auto "$cfg"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # About 3 x 10^8 distinct states: the JVM's default heap (a quarter of the
+            # runner's memory) does not hold the fingerprint set and the state queue.
+            cfg=HotStandby.cfg
+            export TLC_JAVA_OPTS="-Xmx10g -XX:MaxDirectMemorySize=3g"
+          fi
+          verify/tla/run_tlc.sh "$PWD/tla2tools.jar" auto "$cfg" 2>&1 | tee tlc-run.log
+      - name: Report the failure as an annotation
+        if: failure()
+        run: tools/ci/annotate_tail.sh "TLC" tlc-run.log 60
       - name: Trace converter fixtures (pass/ must validate, fail/ must be rejected)
         run: |
           python3 verify/tla/trace/validate.py --jar "$PWD/tla2tools.jar" verify/tla/trace/fixtures/pass/*.ndjson

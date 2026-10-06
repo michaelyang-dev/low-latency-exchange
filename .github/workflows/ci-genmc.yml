@@ -18,12 +18,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang-22 llvm-22 llvm-22-dev libclang-22-dev libffi-dev zlib1g-dev libedit-dev g++-15
+      - name: LLVM version (keys the GenMC cache; a point update needs a rebuild)
+        id: llvm
+        run: echo "version=$(llvm-config-22 --version)" >> "$GITHUB_OUTPUT"
       - name: Cache GenMC build
         id: cache
         uses: actions/cache@v4
         with:
           path: genmc-install
-          key: genmc-v0.19.0-llvm22
+          key: genmc-v0.19.0-llvm${{ steps.llvm.outputs.version }}
       - name: Build GenMC v0.19.0
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -38,4 +41,10 @@ jobs:
       - name: Run every harness under RC11 and IMM
         # --quick skips the long pre-registered SCQ bounds, which run on a lab or VM
         # host without a CI time limit (verify/genmc/RESULTS.md).
-        run: PATH=$PWD/genmc-install/bin:$PATH GENMC_TIMEOUT=3600 tools/genmc/run_all.sh --quick
+        run: |
+          set -o pipefail
+          genmc-install/bin/genmc --version 2>&1 | tee genmc-run.log
+          PATH=$PWD/genmc-install/bin:$PATH GENMC_TIMEOUT=3600 tools/genmc/run_all.sh --quick 2>&1 | tee -a genmc-run.log
+      - name: Report the failure as an annotation
+        if: failure()
+        run: tools/ci/annotate_tail.sh "GenMC" genmc-run.log 60

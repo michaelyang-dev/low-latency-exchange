@@ -27,11 +27,17 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: tools/ci/build_msan_libcxx.sh "$PWD/msan-prefix" llvmorg-21.1.8 -21
       - name: Configure and build
+        id: build
         run: |
+          set -o pipefail
+          exec > >(tee msan-build.log) 2>&1
           mapfile -t F < <(tools/ci/msan_flags.sh "$PWD/msan-prefix")
           cmake -S . -B build/msan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLLE_SANITIZE=memory \
             -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 "${F[@]}" -DLLE_BUILD_BENCH=OFF \
             -DLLE_ONLY="src/common;src/env;src/runtime;src/concurrent;src/lob;src/book;src/engine;src/sequencer;src/journal;src/snapshot;src/outlog;src/witness;src/repl;src/proto;sim;tests/unit;tests/golden;tests/sim_regressions"
           cmake --build build/msan -j
+      - name: Report a build failure as an annotation
+        if: failure() && steps.build.outcome == 'failure'
+        run: tools/ci/annotate_tail.sh "MSan build" msan-build.log 60
       - name: Test
         run: tools/ci/ctest.sh --test-dir build/msan --output-on-failure -LE fuzz -j 4 --timeout 900

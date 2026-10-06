@@ -32,7 +32,13 @@ jobs:
       - name: Fuzz every target
         run: |
           secs=60
-          if [ "${{ github.event_name }}" = "schedule" ]; then secs=900; fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # About 250 minutes shared by the targets, at most 15 minutes each (the job's
+            # limit is 300 minutes, the build included).
+            n=$(grep -c '=' build/fuzz/fuzz_targets.txt)
+            secs=$(( 15000 / (n > 0 ? n : 1) ))
+            if [ "$secs" -gt 900 ]; then secs=900; fi
+          fi
           status=0
           while IFS='=' read -r name bin; do
             [ -n "$name" ] || continue
