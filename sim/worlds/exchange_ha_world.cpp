@@ -249,6 +249,7 @@ struct Harness {
   std::shared_ptr<ex::L2File> prev_l2_file[2];  // the previous day's L2 files
   bool rolled = true;  // the nodes run `day` (else still `prev_day`)
   bool witness_reinit = false;  // W's next image starts from a fresh state file (rollover)
+  Nanos day_start_at = 0;       // rollover: the new day's images start no earlier (the quiet gap)
   std::uint64_t targeted = 0, targeted_partial = 0, targeted_halt = 0;
   std::uint64_t cod_fills_before_down = 0, partial_takeovers = 0, halt_spans = 0;
   std::uint64_t snapshots_written = 0, auction_snapshots = 0, dropped_at_close = 0;
@@ -1092,10 +1093,37 @@ ex::NodeHooks node_hooks(Harness& h, std::size_t n) {
   return k;
 }
 
+// A rollover's new-day image started before the quiet gap ended (healing restarts every
+// stopped node at once): it waits out the gap, then exits so that the supervisor starts
+// the real image. The operator would not start the day before then.
+class Dormant {
+ public:
+  Dormant(Node& n, Nanos until) : node_(n), until_(until), stage_{this} { n.add_stage(stage_, "dormant"); }
+
+ private:
+  struct Stage {
+    Dormant* d;
+    bool poll() {
+      if (d->node_.world().now() < d->until_ || d->done_) return false;
+      d->done_ = true;
+      d->node_.request_crash();
+      return true;
+    }
+  };
+  Node& node_;
+  Nanos until_;
+  bool done_ = false;
+  Stage stage_;
+};
+
 class NodeProc final : public Process {
  public:
   NodeProc(Node& nd, Harness& h, std::size_t n) {
     NodeTrack& t = h.nodes[n];
+    if (h.rolled && nd.world().now() < h.day_start_at) {
+      dormant_ = std::make_unique<Dormant>(nd, h.day_start_at);
+      return;
+    }
     if (!h.rolled) {
       // The previous day: nothing of it is checked, only what it leaves behind. Its L2
       // file is its own (production names it <name>-<date>.l2).
@@ -1122,23 +1150,28 @@ class NodeProc final : public Process {
     proc_ = std::make_unique<ExchangeProc>(nd, h.day, h.params[n], node_hooks(h, n));
     if (proc_->boot_error().empty()) ++t.boots;
   }
-  [[nodiscard]] ExchangeProc& proc() { return *proc_; }
+  [[nodiscard]] ExchangeProc* proc() { return proc_.get(); }
 
  private:
   std::unique_ptr<ExchangeProc> proc_;
+  std::unique_ptr<Dormant> dormant_;
 };
 
 ExchangeProc* Harness::node_proc(std::size_t n) const {
   Node& nd = w->node(kX[n]);
   if (!nd.alive()) return nullptr;
   auto* p = dynamic_cast<NodeProc*>(nd.process());
-  return p != nullptr && p->proc().started() ? &p->proc() : nullptr;
+  return p != nullptr && p->proc() != nullptr && p->proc()->started() ? p->proc() : nullptr;
 }
 
 // ---- the witness ----------------------------------------------------------------------
 class WitnessHost final : public Process {
  public:
   WitnessHost(Node& n, Harness& h, Nanos tie_break) : h_(h) {
+    if (h.rolled && n.world().now() < h.day_start_at) {
+      dormant_ = std::make_unique<Dormant>(n, h.day_start_at);
+      return;
+    }
     if (h.witness_reinit) {
       // The new day's witnessd --init --force --primary 0 --inc0 1 --inc1 1: the state
       // file rewritten and synced before W starts (the stopped image's writes have
@@ -1177,12 +1210,13 @@ class WitnessHost final : public Process {
     if (proc_->core() != nullptr) h.witness = proc_.get();
   }
   ~WitnessHost() override {
-    if (h_.witness == proc_.get()) h_.witness = nullptr;
+    if (proc_ && h_.witness == proc_.get()) h_.witness = nullptr;
   }
 
  private:
   Harness& h_;
   std::unique_ptr<ex::WitnessProc> proc_;
+  std::unique_ptr<Dormant> dormant_;
 };
 
 // ---- clients: the HA client rule (client::HaOrderEntry) ---------------------------------
@@ -2312,6 +2346,7 @@ class OperatorProc final : public Process {
         x[0]->shared().epoch.load() != x[1]->shared().epoch.load())
       return false;
     h_.rolled = true;
+    h_.day_start_at = h_.w->now() + kRolloverGap - kMs;
     h_.log("operator: %u ended at %llu on both nodes: rollover to %u", kPrevDay,
            static_cast<unsigned long long>(x[0]->shared().day_end_index.load()), kDay);
     for (std::size_t n = 0; n < 2; ++n) {
@@ -2824,14 +2859,14 @@ Report run_exchange_ha_world(const Options& o, bool split) {
             // A live image still in its rejoin handshake (not started): its replica's state.
             if (h.verbose && h.w->node(kX[n]).alive()) {
               if (auto* np = dynamic_cast<NodeProc*>(h.w->node(kX[n]).process());
-                  np != nullptr && np->proc().repl() != nullptr) {
-                const auto& r = np->proc().repl()->replica();
+                  np != nullptr && np->proc() != nullptr && np->proc()->repl() != nullptr) {
+                const auto& r = np->proc()->repl()->replica();
                 const auto dv = r.debug_view();
                 nodes += "[rejoining role " + std::to_string(static_cast<int>(r.role())) + " epoch " +
                          std::to_string(r.epoch()) + " phase " + std::to_string(dv.phase) + " catchup_epoch " +
                          std::to_string(dv.catchup_epoch) + " tail " +
-                         std::to_string(np->proc().record_log() != nullptr ? np->proc().record_log()->tail().last_index
-                                                                            : 0) +
+                         std::to_string(np->proc()->record_log() != nullptr ? np->proc()->record_log()->tail().last_index
+                                                                              : 0) +
                          " received " + std::to_string(r.stats().records_received) + " stale " +
                          std::to_string(r.stats().stale_dropped) + " rejects " + std::to_string(r.stats().rejects) +
                          " witness_requests " + std::to_string(r.stats().witness_requests) + "]";
