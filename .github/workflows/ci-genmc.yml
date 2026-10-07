@@ -26,7 +26,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: genmc-install
-          key: genmc-v0.19.0-llvm${{ steps.llvm.outputs.version }}
+          # r2: installs carry the C++ runtime wrappers (see the build step)
+          key: genmc-v0.19.0-r2-llvm${{ steps.llvm.outputs.version }}
       - name: Build GenMC v0.19.0
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -36,6 +37,12 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=$PWD/genmc-install
           cmake --build genmc-build -j
           cmake --install genmc-build
+          # v0.19.0 installs only the runtime's *.h files, not its C++ wrappers (atomic,
+          # thread, cstdlib, cstdio); the binary finds those in its source tree, which a
+          # cache hit does not have, and <atomic> would resolve to libstdc++'s.
+          cp -R genmc-src/lli/runtime-include/c/. genmc-install/include/genmc/runtime/
+      - name: The GenMC install is self-contained (its C++ runtime wrappers are there)
+        run: test -f genmc-install/include/genmc/runtime/atomic && test -f genmc-install/include/genmc/runtime/thread
       - name: Queue headers include only the allowed headers (GenMC-checkable)
         run: tools/genmc/check_includes.sh
       - name: Run every harness under RC11 and IMM
