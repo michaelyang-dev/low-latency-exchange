@@ -220,6 +220,9 @@ class JournalWriter {
 
   // ---- state ----------------------------------------------------------------------------
   [[nodiscard]] std::uint64_t durable_index() const noexcept { return durable_index_; }
+  // The last record of the newest submitted batch (0: none yet): the owner times a
+  // batch's commit from its submission until durable_index() reaches this.
+  [[nodiscard]] std::uint64_t submitted_index() const noexcept { return submitted_index_; }
   [[nodiscard]] std::uint64_t appended_index() const noexcept { return chain_.last_index; }
   [[nodiscard]] const ChainState& chain() const noexcept { return chain_; }
   [[nodiscard]] bool failed() const noexcept { return failed_; }
@@ -268,6 +271,7 @@ class JournalWriter {
     LLE_ASSERT(in_flight() == 0, "repositioning with writes in flight");
     chain_ = chain;
     durable_index_ = chain.last_index;
+    submitted_index_ = chain.last_index;
     batch_used_ = 0;
     batch_last_index_ = 0;
     need_switch_ = false;
@@ -318,6 +322,7 @@ class JournalWriter {
     const std::uint32_t b = cur_buf_;
     if (!submit_slot(woff_, std::span<const std::byte>(buf, padded), b, batch_last_index_)) return false;
     woff_ += padded;
+    if (batch_last_index_ != 0) submitted_index_ = batch_last_index_;
     batch_used_ = 0;
     batch_last_index_ = 0;
     cur_buf_ = pick_free_buffer();
@@ -395,6 +400,7 @@ class JournalWriter {
 
   ChainState chain_{};
   std::uint64_t durable_index_ = 0;
+  std::uint64_t submitted_index_ = 0;  // the last record of the newest submitted batch
   bool failed_ = false;
   FatalError error_{};
 

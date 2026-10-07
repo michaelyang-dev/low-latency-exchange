@@ -42,17 +42,23 @@ namespace lle::exch {
   X(engine_records, kCounter) X(engine_orders, kCounter) X(engine_fills, kCounter) X(engine_rejects, kCounter)       \
   X(engine_cancels, kCounter) X(engine_audits, kCounter) X(engine_itch, kCounter) X(engine_ouch, kCounter)           \
   X(engine_halts, kCounter) X(engine_crosses, kCounter) X(engine_applied, kGauge) X(engine_live_orders, kGauge)      \
-  X(engine_state_hash, kGauge)                                                                                        \
+  X(engine_state_hash, kGauge) X(engine_replaced, kCounter) X(engine_supervisory_cancels, kCounter)                 \
+  X(engine_lag, kGauge) X(engine_books_active, kGauge) X(engine_book_levels, kGauge)                                  \
   X(io_durable_index, kGauge) X(io_records, kCounter) X(io_segments, kCounter) X(io_l2_lag, kGauge)                  \
   X(outlog_itch, kCounter) X(outlog_soup, kCounter) X(outlog_errors, kCounter) X(release_index, kGauge)              \
+  X(io_batches, kCounter)                                                                                             \
   X(gw0_sessions, kGauge) X(gw0_logins, kCounter) X(gw0_login_rejects, kCounter) X(gw0_msgs_in, kCounter)          \
   X(gw0_msgs_out, kCounter) X(gw0_mpsc_full, kCounter) X(gw0_decode_errors, kCounter) X(gw0_disconnects, kCounter)  \
+  X(gw0_ouch_malformed, kCounter) X(gw0_cod_triggers, kCounter) X(gw0_replays, kCounter)                            \
   X(gw1_sessions, kGauge) X(gw1_logins, kCounter) X(gw1_login_rejects, kCounter) X(gw1_msgs_in, kCounter)          \
   X(gw1_msgs_out, kCounter) X(gw1_mpsc_full, kCounter) X(gw1_decode_errors, kCounter) X(gw1_disconnects, kCounter)  \
+  X(gw1_ouch_malformed, kCounter) X(gw1_cod_triggers, kCounter) X(gw1_replays, kCounter)                            \
   X(md_messages, kCounter) X(md_packets_a, kCounter) X(md_packets_b, kCounter) X(md_heartbeats, kCounter)           \
   X(md_rerequests, kCounter) X(md_rerequests_served, kCounter) X(md_next_seq, kGauge)                               \
+  X(md_rerequests_refused, kCounter)                                                                                  \
   X(repl_role, kGauge) X(repl_epoch, kGauge) X(repl_commit, kGauge) X(repl_ack_lag, kGauge)                         \
-  X(repl_forwards, kCounter) X(repl_alarms, kCounter)                                                                \
+  X(repl_forwards, kCounter) X(repl_alarms, kCounter) X(repl_heartbeat_misses, kCounter)                           \
+  X(repl_hash_checks, kCounter) X(repl_retransmits, kCounter) X(repl_tail, kGauge) X(repl_commit_lag, kGauge)       \
   X(tsc_hz, kGauge)                                                                                                   \
   X(gw0_work_tsc, kCounter) X(gw0_work_items, kCounter) X(gw1_work_tsc, kCounter) X(gw1_work_items, kCounter)       \
   X(seq_work_tsc, kCounter) X(seq_work_items, kCounter) X(engine_work_tsc, kCounter) X(engine_work_items, kCounter) \
@@ -96,7 +102,11 @@ class NodeMetrics {
     set(at(3), g.peak);
     set(at(4), g.window);
   }
+  // Histograms, in schema order (metrics.cpp).
   [[nodiscard]] metrics::Histogram md_batch() const noexcept { return seg_->histogram(std::size_t{0}); }
+  [[nodiscard]] metrics::Histogram repl_ack_rtt() const noexcept { return seg_->histogram(std::size_t{1}); }
+  [[nodiscard]] metrics::Histogram journal_commit() const noexcept { return seg_->histogram(std::size_t{2}); }
+  [[nodiscard]] metrics::Histogram engine_reject_codes() const noexcept { return seg_->histogram(std::size_t{3}); }
   void heartbeat() noexcept { seg_->heartbeat(); }
 
  private:

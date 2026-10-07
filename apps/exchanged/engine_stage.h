@@ -19,10 +19,13 @@
 // Work time (T32, md/work_meter.h): items are the records applied. Generic over the
 // clock the meter reads (only its tsc(); the engine itself never reads a clock, 01 §6),
 // so the simulator runs this stage on virtual time; EngineStage is the production binding.
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "common/endian.h"
@@ -41,9 +44,12 @@ namespace lle::exch {
 struct EngineStageConfig {
   std::size_t batch = 256;                 // records per poll
   std::uint64_t hash_interval = 0;         // state-hash checkpoints (paired mode: 10 §3); 0 = off
-  std::uint32_t sample_every = 1024;       // accept/execution log sampling
+  std::uint64_t metric_hash_every = 65'536;  // without checkpoints, the state hash for the metrics (0 = off)
+  std::uint32_t sample_every = 1024;       // order lifecycle log sampling
   std::size_t overflow_reserve = std::size_t{1} << 20;
 };
+
+inline constexpr std::size_t kRejectCodeSlots = 128;  // OUCH reject reasons; the last slot takes the rest
 
 struct EngineStats {
   std::uint64_t records = 0;
@@ -51,7 +57,8 @@ struct EngineStats {
   std::uint64_t accepted = 0, replaced = 0, canceled = 0, executed = 0, rejected = 0;
   std::uint64_t halts = 0, crosses = 0, admin = 0, timers = 0;
   std::uint64_t overflow_records = 0;  // records whose outputs did not fit the egress ring at once
-  std::uint64_t reject_codes[64] = {};  // by OUCH reject reason (low 6 bits)
+  std::uint64_t reject_codes[kRejectCodeSlots] = {};  // by OUCH reject reason
+  std::uint64_t supervisory_cancels = 0;  // orders a kill switch canceled
   std::uint64_t state_hash = 0;
   std::uint64_t hash_index = 0;
 };
@@ -99,6 +106,13 @@ class BasicEngineStage {
   [[nodiscard]] const engine::Engine& engine() const noexcept { return *eng_; }
 
  private:
+  [[nodiscard]] static std::string_view admin_name(std::uint16_t c) noexcept {
+    static constexpr std::string_view kNames[] = {"?",           "Halt",       "QuoteOnly",  "Resume",     "IpoSchedule",
+                                                  "IpoQuote",    "IpoRelease", "LuldBands",  "MwcbLevels", "MwcbBreach",
+                                                  "KillSwitch",  "KillReset",  "RiskLimit",  "CrossCancelPermit",
+                                                  "RegSho"};
+    return c < std::size(kNames) ? kNames[c] : kNames[0];
+  }
   bool run() {
     bool did = false;
     if (!ov_entries_.empty()) {
@@ -153,14 +167,22 @@ class BasicEngineStage {
     if (type == journal::RecordType::Admin) {
       ++stats_.admin;
       if (const auto a = journal::decode_admin(v)) {
-        NLOG_INFO("engine admin command {} operator {} at index {}", a->command, a->operator_id, v.index());
+        const auto args = engine::parse_admin_args(a->args, a->tlv_version);
+        NLOG_INFO("engine admin {} operator {} account {} symbol {} at index {}", admin_name(a->command),
+                  a->operator_id, args && args->has(engine::AdminTag::Account) ? args->account : 0,
+                  args && args->has(engine::AdminTag::Symbol) ? args->symbol.view() : std::string_view("-"),
+                  v.index());
       }
     } else if (type == journal::RecordType::Timer) {
       ++stats_.timers;
     }
     Sink sink{this};
+    record_supervisory_ = 0;
     eng_->apply(engine::to_input(v), sink);
     applied_ = v.index();
+    if (record_supervisory_ != 0) {  // a kill switch: the operator's, or the exposure limit's
+      NLOG_WARN("engine kill switch: {} orders canceled at index {}", record_supervisory_, v.index());
+    }
     if (type == journal::RecordType::DayEnd) {
       emit(v.index(), md::OutKind::DayEnd, 0, {});
       sh_->day_end_index.store(v.index());
@@ -170,6 +192,9 @@ class BasicEngineStage {
       stats_.state_hash = eng_->state_hash();
       stats_.hash_index = applied_;
       (void)sh_->hashes.try_push(StateHashMsg{applied_, stats_.state_hash});
+    } else if (cfg_.hash_interval == 0 && cfg_.metric_hash_every != 0 && applied_ % cfg_.metric_hash_every == 0) {
+      stats_.state_hash = eng_->state_hash();  // the metric only: no partner compares it
+      stats_.hash_index = applied_;
     }
   }
 
@@ -209,8 +234,21 @@ class BasicEngineStage {
           NLOG_INFO("engine order accepted session {} urn {} ref {} (sampled)", session, load_be32(b.data() + 9),
                     load_be64(b.data() + 36));
         break;
-      case 'U': ++stats_.replaced; break;
-      case 'C': ++stats_.canceled; break;
+      case 'U':
+        ++stats_.replaced;
+        if (stats_.replaced % cfg_.sample_every == 1)
+          NLOG_INFO("engine order replaced session {} urn {} (sampled)", session, load_be32(b.data() + 9));
+        break;
+      case 'C':
+        ++stats_.canceled;
+        if (static_cast<char>(b[17]) == 'S') {
+          ++stats_.supervisory_cancels;
+          ++record_supervisory_;
+        } else if (stats_.canceled % cfg_.sample_every == 1) {
+          NLOG_INFO("engine order canceled session {} urn {} reason '{}' (sampled)", session, load_be32(b.data() + 9),
+                    static_cast<char>(b[17]));
+        }
+        break;
       case 'E':
         ++stats_.executed;
         if (stats_.executed % cfg_.sample_every == 1)
@@ -220,7 +258,7 @@ class BasicEngineStage {
       case 'J': {
         ++stats_.rejected;
         const std::uint16_t code = load_be16(b.data() + 13);
-        ++stats_.reject_codes[code & 63u];
+        ++stats_.reject_codes[std::min<std::size_t>(code, kRejectCodeSlots - 1)];
         NLOG_WARN("engine reject session {} urn {} code {} at index {}", session, load_be32(b.data() + 9), code, idx);
         break;
       }
@@ -270,6 +308,7 @@ class BasicEngineStage {
   std::vector<std::byte> ov_bytes_;
   std::size_t ov_head_ = 0;
   EngineStats stats_{};
+  std::uint64_t record_supervisory_ = 0;  // supervisory cancels of the record being applied
   md::WorkMeter<ClockT> work_;
 
  public:

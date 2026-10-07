@@ -257,21 +257,38 @@ class MdStage {
       while (bucket < 7 && (std::size_t{2} << bucket) <= h.count) ++bucket;
       ++stats_.batch_hist[bucket];
     }
+    note_state(h);
     if (tx_.send(cfg_.line_a, p)) {
       ++stats_.packets_a;
       stats_.bytes_a += p.size();
     } else {
-      ++stats_.send_failures;
+      send_failed('A');
     }
   }
   void send_b(std::span<const std::byte> p) {
     if ((lines() & kLineB) == 0) return;
+    if ((lines() & kLineA) == 0) note_state(mold::decode_header(p.data()));  // a backup: B is its line
     if (tx_.send(cfg_.line_b, p)) {
       ++stats_.packets_b;
       stats_.bytes_b += p.size();
     } else {
-      ++stats_.send_failures;
+      send_failed('B');
     }
+  }
+  // Heartbeat state (11 §3): the lines go idle when the first heartbeat follows data
+  // (a heartbeat interval of silence) and active again with the next data packet.
+  void note_state(const mold::PacketHeader& h) {
+    if (h.is_heartbeat()) {
+      if (!idle_) NLOG_INFO("md lines idle at sequence {}: heartbeating", h.seq);
+      idle_ = true;
+    } else if (!h.is_end_of_session() && idle_) {
+      NLOG_INFO("md lines active again at sequence {} ({} heartbeats so far)", h.seq, stats_.heartbeats);
+      idle_ = false;
+    }
+  }
+  void send_failed(char line) {
+    if (stats_.send_failures++ % 1024 == 0)
+      NLOG_WARN("md: a line {} packet was not sent ({} so far)", line, stats_.send_failures);
   }
 
   void end_session(Nanos now) {
@@ -312,6 +329,7 @@ class MdStage {
   Store store_;
   mold::RerequestServer<Store> server_;
   MdStats stats_{};
+  bool idle_ = false;  // the lines carry heartbeats only
   SeqNo republish_next_ = 1;
   bool deferred_ = false;
   std::atomic<int> state_{0};

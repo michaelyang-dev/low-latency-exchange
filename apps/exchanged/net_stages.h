@@ -109,6 +109,9 @@ class NetStagesT final : public NetStagesBase {
   }
 
  private:
+  // gw0_* and gw1_* are the same block, at(0) sessions through at(10) replays.
+  static_assert(static_cast<std::size_t>(Ctr::gw0_replays) - static_cast<std::size_t>(Ctr::gw0_sessions) == 10 &&
+                static_cast<std::size_t>(Ctr::gw1_replays) - static_cast<std::size_t>(Ctr::gw1_sessions) == 10);
   void publish_gw(std::size_t i, NodeMetrics& m) {
     const gw::GatewayStats& s = i == 0 ? gw0_.stats() : gw1_.stats();
     const std::size_t base = i == 0 ? static_cast<std::size_t>(Ctr::gw0_sessions) : static_cast<std::size_t>(Ctr::gw1_sessions);
@@ -121,6 +124,9 @@ class NetStagesT final : public NetStagesBase {
     m.set(at(5), s.mpsc_full);
     m.set(at(6), s.violations);
     m.set(at(7), s.disconnects);
+    m.set(at(8), s.truncated_in);
+    m.set(at(9), s.cod_triggers);
+    m.set(at(10), s.replays);
     m.set_work(i == 0 ? Ctr::gw0_work_tsc : Ctr::gw1_work_tsc, i == 0 ? gw0_.work() : gw1_.work());
   }
   void publish_md(NodeMetrics& m) {
@@ -132,6 +138,7 @@ class NetStagesT final : public NetStagesBase {
     m.set(Ctr::md_rerequests, s.rerequests);
     m.set(Ctr::md_rerequests_served, s.rerequests_served);
     m.set(Ctr::md_next_seq, md_.next_seq());
+    m.set(Ctr::md_rerequests_refused, s.rerequests_refused);
     m.set_work(Ctr::md_work_tsc, md_.work());
     // Packet-size distribution: record what was added since the last publication.
     metrics::Histogram h = m.md_batch();

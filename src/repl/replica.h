@@ -82,6 +82,7 @@ class Replica {
     std::uint64_t joins = 0;
     std::uint64_t snapshot_chunks = 0;
     std::uint64_t hash_checks = 0;
+    std::uint64_t heartbeat_misses = 0;  // heartbeat intervals that passed without word from the partner
   };
 
   enum class ForwardStatus : std::uint8_t { kAccepted, kFull, kNotForwarding, kTooLarge };
@@ -116,6 +117,7 @@ class Replica {
       peer_inc_ = backup_inc;
       ack_ = t.last_index;
       stream_.reset(ack_, epoch_, peer_inc_, false, now);
+      rtt_probe_ = 0;
       set_role(Role::kPrimary);
     } else {
       // Nothing is mirrored or applied, not even the day-start EpochStart, before the
@@ -307,6 +309,12 @@ class Replica {
   [[nodiscard]] bool join_window() const noexcept { return join_window_; }
   [[nodiscard]] std::size_t pending_forwards() const noexcept { return fwd_count_; }
   [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
+  // ACK round trips (11 §3): one record at a time is timed from its first send to the
+  // ACK that covers it, never across a retransmission (Karn's rule). Samples k with
+  // count - kRttSamples <= k < count are still held.
+  static constexpr std::size_t kRttSamples = 64;
+  [[nodiscard]] std::uint64_t ack_rtt_count() const noexcept { return rtt_count_; }
+  [[nodiscard]] Nanos ack_rtt_sample(std::uint64_t k) const noexcept { return rtt_ring_[k % kRttSamples]; }
 
  private:
   enum class Phase : std::uint8_t { kAskWitness, kQueryEpochEnd, kCatchingUp };
@@ -733,6 +741,7 @@ class Replica {
     last_peer_heard_ = now;
     last_ack_progress_ = now;
     stream_.reset(ack_, epoch_, peer_inc_, false, now);
+    rtt_probe_ = 0;
     set_role(Role::kPrimary);
     try_finish_grant();
   }
@@ -847,6 +856,11 @@ class Replica {
     ack_ = k.l2_index;
     last_ack_progress_ = now;
     stream_.on_ack(ack_, now);
+    if (rtt_probe_ != 0 && ack_ >= rtt_probe_) {
+      rtt_ring_[rtt_count_ % kRttSamples] = now - rtt_probe_sent_;
+      ++rtt_count_;
+      rtt_probe_ = 0;
+    }
     trace(TraceKind::kRecvAck, ack_);
     if (losing_) {
       // The backup came back before SOLO was sent: resume paired service (the spec's P
@@ -876,6 +890,7 @@ class Replica {
     if (expected > stream_.acked && expected <= stream_.loaded + 1) {
       ++stats_.retransmits;
       stream_.rewind(expected, now);
+      if (rtt_probe_ >= expected) rtt_probe_ = 0;
     }
   }
 
@@ -898,6 +913,7 @@ class Replica {
           SIM_PROBE("repl.primary_pairs_on_admission_proof");
           peer_inc_ = hb.inc;
           stream_.reset(ack_, epoch_, peer_inc_, false, now);
+          rtt_probe_ = 0;
           last_ack_progress_ = now;
         }
         if (hb.epoch == epoch_ && hb.inc == peer_inc_) {
@@ -1144,6 +1160,7 @@ class Replica {
     join_.acked = prev;
     join_.last_heard = now;
     stream_.reset(prev, epoch_, c.inc, true, now);
+    rtt_probe_ = 0;
     if (tail.last_index - prev > cfg_.snapshot_threshold) {
       const SnapshotOffer offer = h_.snapshot_offer();
       if (offer.bytes != 0 && offer.index > prev) {
@@ -1441,8 +1458,22 @@ class Replica {
 
   // ---- role pollers ---------------------------------------------------------------------
 
+  // Heartbeat intervals that passed without word from the partner, counted once each.
+  void count_misses(Nanos now) {
+    if (last_peer_heard_ != miss_base_) {
+      miss_base_ = last_peer_heard_;
+      misses_counted_ = 0;
+    }
+    const auto missed = static_cast<std::uint64_t>((now - last_peer_heard_) / std::max<Nanos>(1, cfg_.heartbeat_ns));
+    if (missed > misses_counted_) {
+      stats_.heartbeat_misses += missed - misses_counted_;
+      misses_counted_ = missed;
+    }
+  }
+
   bool poll_primary(Nanos now) {
     bool did = false;
+    if (peer_inc_ != kNoPartner) count_misses(now);
     if (es_pending_) try_finish_grant();
     const journal::ChainState tail = h_.log_tail();
     if (ack_ >= tail.last_index) last_ack_progress_ = now;
@@ -1528,6 +1559,7 @@ class Replica {
 
   bool poll_backup(Nanos now) {
     bool did = false;
+    count_misses(now);
     if (now - last_peer_heard_ > cfg_.t_d) {
       if (unpromotable_) {
         if (!suspect_alarmed_) alarm(Alarm::kUnpromotableSuspect, epoch_);
@@ -1736,15 +1768,16 @@ class Replica {
       ++stats_.retransmits;
       stream_.rewind(stream_.acked + 1, now);
       stream_.last_progress = now;
+      rtt_probe_ = 0;
     }
     for (std::size_t n = 0; n < cfg_.max_datagrams_per_poll && stream_.send_index <= stream_.loaded; ++n) {
-      send_one_append(commit);
+      send_one_append(commit, now);
       did = true;
     }
     return did;
   }
 
-  void send_one_append(std::uint64_t commit) {
+  void send_one_append(std::uint64_t commit, Nanos now) {
     wire::Append a;
     a.from = self_;
     a.catchup = stream_.catchup;
@@ -1765,7 +1798,7 @@ class Replica {
       const std::size_t n = std::min<std::size_t>(first.size() - stream_.send_offset, cap);
       a.first_offset = stream_.send_offset;
       a.records = first.subspan(stream_.send_offset, n);
-      if (stream_.send_offset == 0) note_first_send(stream_.send_index);
+      if (stream_.send_offset == 0) note_first_send(stream_.send_index, now);
       stream_.send_offset += static_cast<std::uint32_t>(n);
       if (stream_.send_offset == first.size()) {
         ++stream_.send_index;
@@ -1778,7 +1811,7 @@ class Replica {
         if (used + r.size() > cap) break;
         std::memcpy(pack_.get() + used, r.data(), r.size());
         used += r.size();
-        note_first_send(stream_.send_index);
+        note_first_send(stream_.send_index, now);
         ++stream_.send_index;
       }
       a.records = std::span<const std::byte>(pack_.get(), used);
@@ -1787,9 +1820,13 @@ class Replica {
     send(a);
   }
 
-  void note_first_send(std::uint64_t index) {
+  void note_first_send(std::uint64_t index, Nanos now) {
     if (index <= stream_.traced) return;
     stream_.traced = index;
+    if (!stream_.catchup && rtt_probe_ == 0) {
+      rtt_probe_ = index;
+      rtt_probe_sent_ = now;
+    }
     trace(stream_.catchup ? TraceKind::kSendCatchup : TraceKind::kSendAppend, index);
   }
 
@@ -1949,6 +1986,12 @@ class Replica {
   // Common.
   std::uint64_t release_ = 0;
   Nanos last_peer_heard_ = 0;
+  Nanos miss_base_ = 0;  // count_misses: the last_peer_heard_ its count started from
+  std::uint64_t misses_counted_ = 0;
+  std::uint64_t rtt_probe_ = 0;  // the record being timed (0: none)
+  Nanos rtt_probe_sent_ = 0;
+  std::array<Nanos, kRttSamples> rtt_ring_{};
+  std::uint64_t rtt_count_ = 0;
   Nanos next_hb_ = 0;
   Nanos next_hb_w_ = 0;
   std::array<wire::StateHash, 8> own_hashes_{};

@@ -137,6 +137,8 @@ class Node {
   // Ring occupancy (ring_gauge.h): sampled by the seq thread (l2, ouch, events, tee) and
   // the engine thread (egress) when they publish.
   RingGauge ring_l2_, ring_ouch_, ring_events_, ring_tee_, ring_egress_;
+  std::uint64_t published_rejects_[kRejectCodeSlots] = {};  // engine thread
+  std::uint64_t published_commits_ = 0;                                           // io thread
 };
 
 }  // namespace lle::exch

@@ -4,7 +4,7 @@
 # The apps are added after the tests (top-level CMakeLists.txt), so their presence
 # is decided from the build options and the LLE_ONLY filter, not with TARGET.
 set(_have_apps ${LLE_BUILD_APPS})
-foreach(_app itch_synth mold_replay refclient loadgen itch2ouch ttt_harness)
+foreach(_app itch_synth mold_replay refclient loadgen itch2ouch ttt_harness nlog_decode lle_top)
   lle_keep("apps/${_app}" _keep)
   if(NOT _keep)
     set(_have_apps OFF)
@@ -25,7 +25,8 @@ add_test(NAME client_feed_lossy_dual_lines
 add_test(NAME client_loadgen_loopback_server COMMAND bash ${_d}/loadgen_test.sh $<TARGET_FILE:loadgen> ${_w}/loadgen 28200)
 add_test(NAME client_refclient_trading
   COMMAND bash ${_d}/refclient_trading_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:mold_replay>
-          $<TARGET_FILE:refclient> $<TARGET_FILE:loadgen> ${_w}/trading 28300)
+          $<TARGET_FILE:refclient> $<TARGET_FILE:loadgen> ${_w}/trading 28300 $<TARGET_FILE:nlog_decode>
+          $<TARGET_FILE:lle_top>)
 add_test(NAME client_refclient_ha_takeover
   COMMAND bash ${_d}/refclient_ha_test.sh $<TARGET_FILE:itch_synth> $<TARGET_FILE:mold_replay>
           $<TARGET_FILE:refclient> $<TARGET_FILE:loadgen> ${_w}/ha 28400)

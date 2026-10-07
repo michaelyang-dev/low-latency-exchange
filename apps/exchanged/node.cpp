@@ -803,6 +803,25 @@ void Node::publish_engine() {
   metrics_->set(Ctr::engine_applied, engine_stage_->applied());
   metrics_->set(Ctr::engine_live_orders, engine_->live_orders());
   metrics_->set(Ctr::engine_state_hash, s.state_hash);
+  metrics_->set(Ctr::engine_replaced, s.replaced);
+  metrics_->set(Ctr::engine_supervisory_cancels, s.supervisory_cancels);
+  const std::uint64_t seqd = sh_->sequenced.load();
+  metrics_->set(Ctr::engine_lag, seqd > engine_stage_->applied() ? seqd - engine_stage_->applied() : 0);
+  // Book counts: books holding orders and their price levels (both sides).
+  std::uint64_t books = 0, levels = 0;
+  for (Locate l = 1; l <= engine_->symbols(); ++l) {
+    const std::size_t n = engine_->book().level_count(l, Side::Buy) + engine_->book().level_count(l, Side::Sell);
+    books += n != 0 ? 1 : 0;
+    levels += n;
+  }
+  metrics_->set(Ctr::engine_books_active, books);
+  metrics_->set(Ctr::engine_book_levels, levels);
+  // Rejects by code since the last publication, one histogram count each.
+  metrics::Histogram codes = metrics_->engine_reject_codes();
+  for (std::size_t c = 0; c < std::size(s.reject_codes); ++c) {
+    for (std::uint64_t k = published_rejects_[c]; k < s.reject_codes[c]; ++k) codes.record(static_cast<std::int64_t>(c));
+    published_rejects_[c] = s.reject_codes[c];
+  }
   metrics_->set_work(Ctr::engine_work_tsc, engine_stage_->work());
   std::uint64_t egress = 0;
   for (std::size_t c = 0; c < md::kConsumers; ++c) egress = std::max(egress, sh_->egress.backlog(c));
@@ -820,6 +839,14 @@ void Node::publish_io() {
   metrics_->set(Ctr::outlog_itch, s.outlog_itch);
   metrics_->set(Ctr::outlog_soup, s.outlog_soup);
   metrics_->set(Ctr::outlog_errors, s.outlog_errors);
+  metrics_->set(Ctr::io_batches, s.batches);
+  // Batch commit times since the last publication (the newest kCommitSamples at most).
+  metrics::Histogram commit = metrics_->journal_commit();
+  const std::uint64_t n = io_stage_->commit_count();
+  const std::uint64_t held = IoStage::kCommitSamples;
+  for (std::uint64_t k = std::max(published_commits_, n > held ? n - held : 0); k < n; ++k)
+    commit.record(io_stage_->commit_sample(k));
+  published_commits_ = n;
   if (cfg_.mode == NodeMode::Solo) metrics_->set(Ctr::release_index, sh_->egress_state.release.load());
   metrics_->set_work(Ctr::io_work_tsc, io_stage_->work());
   metrics_->heartbeat();

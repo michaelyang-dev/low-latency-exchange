@@ -208,6 +208,22 @@ TEST(ExchangeDay, ScriptedDayFeedAndRegeneration) {
   EXPECT_GT(counter("md_rerequests_served"), 0u);
   EXPECT_EQ(counter("gw0_msgs_in") + counter("gw1_msgs_in"), 14u);  // the script's OUCH messages
   EXPECT_EQ(counter("io_durable_index"), counter("seq_last_index"));
+  EXPECT_GT(counter("io_batches"), 0u);
+  EXPECT_EQ(counter("engine_lag"), 0u);
+  // Histograms (11 §3): every journal batch's commit time, and the one reject's code.
+  auto hist = [&](const char* name) {
+    const auto i = reader->find_histogram(name);
+    EXPECT_TRUE(i.has_value()) << name;
+    auto h = reader->histogram(i.value_or(0));
+    EXPECT_TRUE(h.has_value()) << name;
+    return h ? std::move(*h) : metrics::HistogramSnapshot{};
+  };
+  const metrics::HistogramSnapshot commit = hist("journal_commit");
+  EXPECT_GT(commit.count, 0);
+  EXPECT_LE(static_cast<std::uint64_t>(commit.count), counter("io_batches"));
+  const metrics::HistogramSnapshot codes = hist("engine_reject_codes");
+  EXPECT_EQ(codes.count, 1);
+  EXPECT_EQ(codes.min, 23);
   check_work_time(day, counter);
   EXPECT_EQ(day.ex().stop(), 0) << day.ex().output();
 
@@ -217,7 +233,7 @@ TEST(ExchangeDay, ScriptedDayFeedAndRegeneration) {
   for (const char* event : {"gw0 login session 1 instance 0", "gw1 login session 2 instance 0",
                             "gw0 session 3 D (reason 0)", "cancel-on-disconnect trigger: session 3",
                             "gw0 session 3 sequence recovery", "engine reject session 3 urn 3 code 23",
-                            "engine admin command 1", "engine trading action locate 1 state 'H'",
+                            "engine admin Halt operator", "engine trading action locate 1 state 'H'", "io: journal: ",
                             "engine cross locate 1 shares 300", "engine system event 'Q'", "seq day end",
                             "engine day end", "md end of session", "gw0 end of day", "glimpse: snapshot at"}) {
     EXPECT_NE(log.find(event), std::string::npos) << "nlog has no \"" << event << "\"";

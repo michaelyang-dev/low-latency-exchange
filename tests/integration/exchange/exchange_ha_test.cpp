@@ -275,8 +275,10 @@ TEST(ExchangeHa, PrimaryKilledBackupTakesOverExactlyOnce) {
     const auto i = seg->find_counter(name);
     return i ? seg->counter(*i).value : ~std::uint64_t{0};
   };
+  // ... and, as the backup before the takeover, its partner's silence (11 §3: heartbeat
+  // misses).
   for (const char* c : {"repl_work_items", "repl_work_tsc", "seq_work_items", "seq_work_tsc", "engine_work_items",
-                        "gw0_work_items", "gw1_work_items", "ring_l2_hwm"}) {
+                        "gw0_work_items", "gw1_work_items", "ring_l2_hwm", "repl_heartbeat_misses"}) {
     EXPECT_GT(counter(c), 0u) << c;
     EXPECT_NE(counter(c), ~std::uint64_t{0}) << c;
   }

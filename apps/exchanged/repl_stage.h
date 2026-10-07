@@ -281,6 +281,7 @@ class BasicReplStage {
       }
       publish();
       publish_split();
+      observe(now);
       work_.finish();
       return did;
     }
@@ -311,6 +312,7 @@ class BasicReplStage {
       did |= driver_->step(false);  // manual clock only
     }
     publish();
+    observe(now);
     return did;
   }
 
@@ -324,6 +326,23 @@ class BasicReplStage {
     metrics_->set(Ctr::repl_ack_lag, tail > replica_->backup_ack() ? tail - replica_->backup_ack() : 0);
     metrics_->set(Ctr::repl_forwards, replica_->stats().forwards_sent);
     metrics_->set(Ctr::repl_alarms, alarms_);
+    const auto& st = replica_->stats();
+    metrics_->set(Ctr::repl_heartbeat_misses, st.heartbeat_misses);
+    metrics_->set(Ctr::repl_hash_checks, st.hash_checks);
+    metrics_->set(Ctr::repl_retransmits, st.retransmits);
+    metrics_->set(Ctr::repl_tail, tail);
+    // commit_index lag: a primary's journal beyond what the backup holds; a backup's
+    // distance to what its primary announced.
+    const std::uint64_t commit = replica_->commit_index();
+    const bool primary = replica_->role() == repl::Role::kPrimary;
+    metrics_->set(Ctr::repl_commit_lag, primary ? (tail > commit ? tail - commit : 0) : (commit > tail ? commit - tail : 0));
+    // ACK round trips since the last publication (the newest kRttSamples at most).
+    metrics::Histogram rtt = metrics_->repl_ack_rtt();
+    const std::uint64_t n = replica_->ack_rtt_count();
+    const std::uint64_t held = repl::Replica<Host>::kRttSamples;
+    for (std::uint64_t k = std::max(rtt_published_, n > held ? n - held : 0); k < n; ++k)
+      rtt.record(replica_->ack_rtt_sample(k));
+    rtt_published_ = n;
     metrics_->set(Ctr::release_index, replica_->release_watermark());
     metrics_->set_work(Ctr::repl_work_tsc, work_.stats());
   }
@@ -763,6 +782,47 @@ class BasicReplStage {
     return ok;
   }
 
+  // ---- replication events for the node log (11 §3), checked once a millisecond ----------
+  // A backup ACK that stops moving while the journal grows (an episode, logged when it
+  // starts and when it ends), catch-up progress once a second, and the state-hash
+  // comparisons made since the last check (a mismatch is an ALARM).
+  void observe(Nanos now) {
+    if (now < next_observe_) return;
+    next_observe_ = now + 1'000'000;
+    const repl::Role role = replica_->role();
+    const std::uint64_t tail = log_->tail().last_index;
+    if (role == repl::Role::kPrimary) {
+      const std::uint64_t ack = replica_->backup_ack();
+      if (ack != seen_ack_) {
+        seen_ack_ = ack;
+        ack_moved_ = now;
+      }
+      if (!ack_stalled_ && tail > ack && now - ack_moved_ > cfg_.repl.t_ack / 2) {
+        ack_stalled_ = true;
+        stall_ack_ = ack;
+        NLOG_WARN("repl: backup ACK at {} is {} records behind, unchanged for {} ms", ack, tail - ack,
+                  (now - ack_moved_) / 1'000'000);
+      } else if (ack_stalled_ && (ack != stall_ack_ || ack >= tail)) {
+        ack_stalled_ = false;
+        NLOG_INFO("repl: backup ACK moving again at {} ({} records behind)", ack, tail > ack ? tail - ack : 0);
+      }
+    } else {
+      ack_stalled_ = false;
+      seen_ack_ = 0;
+      ack_moved_ = now;
+    }
+    if (role == repl::Role::kRecovering && replica_->debug_view().phase == 2 && now >= next_progress_) {
+      next_progress_ = now + 1'000'000'000;
+      NLOG_INFO("repl: catching up in epoch {}: journal at {}", replica_->debug_view().catchup_epoch, tail);
+    }
+    const std::uint64_t checks = replica_->stats().hash_checks;
+    if (checks != hash_checks_seen_) {
+      NLOG_INFO("repl: {} state-hash comparison(s) with the partner (a mismatch raises an ALARM; journal at {})",
+                checks - hash_checks_seen_, tail);
+      hash_checks_seen_ = checks;
+    }
+  }
+
   // ---- notifications --------------------------------------------------------------------
   void on_role(repl::Role r, std::uint64_t e) {
     NLOG_INFO("repl: role {} epoch {}", std::string_view(repl::to_string(r)), e);
@@ -859,6 +919,10 @@ class BasicReplStage {
   seq::InboundMsg staged_msg_{};
   seq::SessionEventMsg staged_ev_{};
   std::uint64_t alarms_ = 0;
+  std::uint64_t rtt_published_ = 0;  // ACK round-trip samples already in the metrics
+  Nanos next_observe_ = 0, ack_moved_ = 0, next_progress_ = 0;
+  std::uint64_t seen_ack_ = 0, stall_ack_ = 0, hash_checks_seen_ = 0;
+  bool ack_stalled_ = false;
   repl::Alarm last_alarm_{};
   std::uint64_t last_alarm_detail_ = 0;
   RejoinHooks hooks_;

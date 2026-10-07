@@ -12,7 +12,7 @@ lle_library(lle_client
   SOURCES order_entry.cpp report.cpp loadgen.cpp loadgen_profile.cpp variant.cpp histogram.cpp phc_clock.cpp ttt.cpp
           backlog.cpp
   DEPS lle_common lle_env lle_moldudp64 lle_soupbin lle_glimpse lle_itch50 lle_ouch50 lle_book lle_net_backends
-       lle_net_utcp lle_metrics hdr_histogram_static)
+       lle_net_utcp lle_metrics hdr_histogram_static lle_log)
 target_link_libraries(lle_client PUBLIC $<TARGET_NAME_IF_EXISTS:lle_net_xsk> $<TARGET_NAME_IF_EXISTS:lle_net_utcp_linux>)
 target_compile_definitions(lle_client PUBLIC $<$<TARGET_EXISTS:lle_net_xsk>:LLE_CLIENT_HAVE_XSK=1>)
 

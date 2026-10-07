@@ -6,7 +6,8 @@
 //             [--trade --symbol SYM (--sell-at PX | --buy-at PX) [--qty N] [--max-orders N]
 //              --primary IP:PORT [--backup IP:PORT] [--user U --password P]]
 //             [--gap-timeout DUR] [--request-timeout DUR] [--snapshot-gap N] [--reorder-capacity N]
-//             [--stamp-log FILE [--stamp-log-capacity N]] [--max-runtime DUR] [--report FILE]
+//             [--stamp-log FILE [--stamp-log-capacity N]] [--max-runtime DUR] [--report FILE] [--nlog FILE]
+//             [--metrics NAME]
 //             [variant flags: --variant V --ifname IF --timestamps M --wait W --cpu N ...; client/variant.h]
 // Direct replay of a file (the reference of the T10 comparison):
 //   refclient --direct FILE [--book opt|b0] [--checkpoint-every N] [--extra-checkpoints A,B,...]
@@ -22,6 +23,7 @@
 #include <cinttypes>
 #include <csignal>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,8 @@
 #include "client/report.h"
 #include "client/variant.h"
 #include "env/prod_clock.h"
+#include "log/backend.h"
+#include "log/nlog.h"
 #include "proto/itch50/binary_file.h"
 #include "runtime/pinning.h"
 
@@ -55,6 +59,8 @@ struct Options {
   std::string checkpoints_out;
   std::string report;
   std::string stamp_log;
+  std::string nlog;  // the client's event log (11 §3), decoded offline by nlog_decode
+  std::string metrics;  // the client's metrics segment /lle-stats-<name> (11 §3), read by lle-top
   std::uint64_t max_messages = 0;
   bool bbo = false;
 };
@@ -134,6 +140,8 @@ Options parse(int argc, char** argv) {
     else if (f == "--levels-per-side") rc.feed.book.levels_per_side = a.u64();
     else if (f == "--block") o.vc.wait = net::WaitPolicy::Block;
     else if (f == "--stamp-log") o.stamp_log = a.value();
+    else if (f == "--nlog") o.nlog = a.value();
+    else if (f == "--metrics") o.metrics = a.value();
     else if (f == "--stamp-log-capacity") rc.stamp_log_capacity = a.u64();
     else if (f == "--max-runtime") rc.max_runtime = dur();
     else if (f == "--report") o.report = a.value();
@@ -250,6 +258,16 @@ int network(Options& o) {
     std::fprintf(stderr, "refclient: open: %s\n", r.error().c_str());
     return 1;
   }
+  std::optional<metrics::Segment> seg;
+  if (!o.metrics.empty()) {
+    auto s = metrics::Segment::create_shm(o.metrics, client::client_metrics_schema());
+    if (!s) {
+      std::fprintf(stderr, "refclient: metrics: %s\n", s.error().c_str());
+      return 2;
+    }
+    seg.emplace(std::move(*s));
+    c->set_metrics(&*seg);
+  }
   if (o.vc.cpu >= 0) {
     const auto st = rt::pin_current_thread(o.vc.cpu);
     std::fprintf(stderr, "refclient: pin cpu %d: %s\n", o.vc.cpu, rt::to_string(st));
@@ -355,6 +373,21 @@ int main(int argc, char** argv) {
   }
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
+  // --nlog: order sends and responses, gap fills and first arrivals per line, written by
+  // a backend thread; without it the log calls are dropped.
+  nlog::Backend log;
+  if (!o.nlog.empty()) {
+    nlog::BackendOptions bo;
+    bo.path = o.nlog;
+    bo.node = "refclient";
+    if (auto r = log.start(bo); !r) {
+      std::fprintf(stderr, "refclient: nlog: %s\n", r.error().c_str());
+      return 2;
+    }
+    nlog::ThreadOptions to;
+    to.name = "refclient";
+    (void)nlog::register_thread(to);
+  }
   int rc = 2;
   const bool ok = client::with_variant_io(o.vc, [&]<class Io>() {
     rc = o.bbo ? network<Io, book::BboRecorder>(o) : network<Io, book::NullListener>(o);

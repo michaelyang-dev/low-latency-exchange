@@ -18,6 +18,7 @@
 // strategy sends gets a record (hwts_log.h) with the receive timestamps of the
 // packet the client acted on and the TX timestamp of the frame that carried the
 // order, matched by stream offset (tx_stamps.h). TTT_client is computed from it.
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +39,8 @@
 #include "common/endian.h"
 #include "common/types.h"
 #include "env/prod_clock.h"
+#include "log/nlog.h"
+#include "metrics/segment.h"
 #include "net/common/endpoint.h"
 #include "proto/moldudp64/line_comparator.h"
 #include "proto/moldudp64/moldudp64.h"
@@ -82,6 +85,28 @@ struct RefClientResult {
   std::uint64_t snapshot_sessions = 0, snapshot_failures = 0;
   std::uint64_t order_responses = 0;
 };
+
+// The client's metrics segment (11 §3), refclient --metrics NAME, read by lle-top: the
+// first arrivals per source (which line won each message), the gaps and how they were
+// filled, orders and responses, and the A/B skew of the lines.
+#define LLE_CLIENT_COUNTERS(X)                                                                                  \
+  X(first_arrivals_line_a) X(first_arrivals_line_b) X(first_arrivals_rerequest_a) X(first_arrivals_rerequest_b) \
+  X(delivered) X(gaps_opened) X(gaps_filled_line_a) X(gaps_filled_line_b) X(gaps_filled_rerequest)             \
+  X(gaps_filled_snapshot) X(orders_sent) X(order_responses)
+enum class ClientCtr : std::size_t {
+#define LLE_CLIENT_ENUM(name) name,
+  LLE_CLIENT_COUNTERS(LLE_CLIENT_ENUM)
+#undef LLE_CLIENT_ENUM
+      kCount
+};
+[[nodiscard]] inline metrics::Schema client_metrics_schema() {
+  metrics::Schema s;
+#define LLE_CLIENT_SPEC(name) s.counters.push_back(metrics::CounterSpec{#name, metrics::CounterKind::kCounter});
+  LLE_CLIENT_COUNTERS(LLE_CLIENT_SPEC)
+#undef LLE_CLIENT_SPEC
+  s.histograms.push_back(metrics::HistogramSpec{"ab_skew", 1, 10'000'000'000, 2, "ns"});
+  return s;
+}
 
 template <class Io, class Listener = book::NullListener>
 class RefClient {
@@ -159,6 +184,8 @@ class RefClient {
         if (got == 0) break;
       }
       if (now >= feed_.next_deadline()) feed_.on_timer(now, *this);
+      note_feed(now);
+      if (seg_ != nullptr && (++iterations_ & 1023) == 0) publish_metrics();
       io_.poll_streams([&](const env::StreamEvent& ev) { on_stream(ev, now); });
       if (cfg_.trade) {
         if (now >= oe_.next_deadline()) oe_.on_timer(now);
@@ -173,6 +200,7 @@ class RefClient {
       if (cfg_.max_runtime > 0 && now - start >= cfg_.max_runtime) break;
     }
     feed_.finish();
+    if (seg_ != nullptr) publish_metrics();
     if (log_on()) {
       drain_stamps();
       for (auto& m : txm_) m.expire_all();
@@ -224,10 +252,15 @@ class RefClient {
     const bool ok = oe_.send(ouch, now_);
     if (ok && log_on()) record_order(a, before);
     flush_orders();  // the order goes on the wire within this iteration (07 §3 step 6)
+    if (ok && ouch.size() >= 5)  // after the wire: off the tick-to-trade path
+      NLOG_INFO("client order '{}' urn {} sent on instance {}", static_cast<char>(ouch[0]), load_be32(ouch.data() + 1),
+                a);
     return ok;
   }
 
   [[nodiscard]] const Feed& feed() const noexcept { return feed_; }
+  // Publishes into `seg` (client_metrics_schema()) every 1,024 loop iterations and at the end.
+  void set_metrics(metrics::Segment* seg) noexcept { seg_ = seg; }
   // The line comparator (nullptr unless line_compare_window > 0); finish() it after run().
   [[nodiscard]] mold::LineComparator* line_comparator() noexcept { return cmp_.get(); }
   [[nodiscard]] const TriggerStrategy& strategy() const noexcept { return strat_; }
@@ -334,6 +367,62 @@ class RefClient {
     ++snap_sessions_;
   }
 
+  // The feed's events for the node log (11 §3): every gap fill as it happens (by line
+  // A or B, re-request or snapshot), and once a second the first arrivals per source
+  // (which line won each message) since the last line.
+  void note_feed(Nanos now) {
+    const mold::LineArbiterMetrics& m = feed_.arbiter().metrics();
+    if (m.gaps_filled_by_line[0] != logged_.gaps_filled_by_line[0] ||
+        m.gaps_filled_by_line[1] != logged_.gaps_filled_by_line[1] ||
+        m.gaps_filled_by_rerequest != logged_.gaps_filled_by_rerequest ||
+        m.gaps_filled_by_snapshot != logged_.gaps_filled_by_snapshot) {
+      NLOG_INFO("client gap filled: by line A {} line B {} re-request {} snapshot {} (next {})",
+                m.gaps_filled_by_line[0] - logged_.gaps_filled_by_line[0],
+                m.gaps_filled_by_line[1] - logged_.gaps_filled_by_line[1],
+                m.gaps_filled_by_rerequest - logged_.gaps_filled_by_rerequest,
+                m.gaps_filled_by_snapshot - logged_.gaps_filled_by_snapshot, feed_.arbiter().next_expected());
+      logged_.gaps_filled_by_line = m.gaps_filled_by_line;
+      logged_.gaps_filled_by_rerequest = m.gaps_filled_by_rerequest;
+      logged_.gaps_filled_by_snapshot = m.gaps_filled_by_snapshot;
+    }
+    if (now < next_feed_log_) return;
+    next_feed_log_ = now + 1'000'000'000;
+    const auto d = [&](std::size_t s) { return m.first_arrivals[s] - logged_.first_arrivals[s]; };
+    if (d(0) + d(1) + d(2) + d(3) != 0) {
+      NLOG_INFO("client first arrivals: line A {} line B {} re-request A {} B {}; gaps opened {}", d(0), d(1), d(2), d(3),
+                m.gaps_opened - logged_.gaps_opened);
+    }
+    logged_.first_arrivals = m.first_arrivals;
+    logged_.gaps_opened = m.gaps_opened;
+  }
+
+  void publish_metrics() {
+    const mold::LineArbiterMetrics& m = feed_.arbiter().metrics();
+    auto set = [&](ClientCtr c, std::uint64_t v) { seg_->counter(static_cast<std::size_t>(c)).set(v); };
+    set(ClientCtr::first_arrivals_line_a, m.first_arrivals[0]);
+    set(ClientCtr::first_arrivals_line_b, m.first_arrivals[1]);
+    set(ClientCtr::first_arrivals_rerequest_a, m.first_arrivals[2]);
+    set(ClientCtr::first_arrivals_rerequest_b, m.first_arrivals[3]);
+    set(ClientCtr::delivered, m.delivered);
+    set(ClientCtr::gaps_opened, m.gaps_opened);
+    set(ClientCtr::gaps_filled_line_a, m.gaps_filled_by_line[0]);
+    set(ClientCtr::gaps_filled_line_b, m.gaps_filled_by_line[1]);
+    set(ClientCtr::gaps_filled_rerequest, m.gaps_filled_by_rerequest);
+    set(ClientCtr::gaps_filled_snapshot, m.gaps_filled_by_snapshot);
+    set(ClientCtr::orders_sent, oe_.stats().sent);
+    set(ClientCtr::order_responses, responses_);
+    // A/B skew: what the arbiter's base-2 buckets gained since the last publication, at
+    // each bucket's upper bound.
+    metrics::Histogram h = seg_->histogram(std::size_t{0});
+    for (std::size_t b = 0; b < mold::Log2Histogram::kBuckets; ++b) {
+      const std::uint64_t n = m.skew_ns.bucket_count(b);
+      const auto v = static_cast<std::int64_t>(b == 0 ? 1 : (b >= 63 ? std::int64_t{1} << 62 : (std::int64_t{1} << b) - 1));
+      for (std::uint64_t k = skew_published_[b]; k < n; ++k) h.record(v);
+      skew_published_[b] = n;
+    }
+    seg_->heartbeat();
+  }
+
   void on_stream(const env::StreamEvent& ev, Nanos now) {
     const std::size_t inst = ev.conn == oe_conn_[0] ? 0 : ev.conn == oe_conn_[1] ? 1 : 2;
     const bool is_snap = ev.conn == snap_conn_ && snap_conn_ != env::kNoConn;
@@ -352,7 +441,12 @@ class RefClient {
         break;
       case env::StreamEventKind::Data:
         if (inst < 2) {
-          oe_.on_bytes(inst, ev.data, now, [&](SeqNo, std::span<const std::byte>) { ++responses_; });
+          oe_.on_bytes(inst, ev.data, now, [&](SeqNo seq, std::span<const std::byte> m) {
+            ++responses_;
+            if (m.size() >= 13)
+              NLOG_INFO("client response {} '{}' urn {} on instance {}", seq, static_cast<char>(m[0]),
+                        load_be32(m.data() + 9), inst);
+          });
           flush_orders();
         } else if (is_snap && snap_) {
           std::span<const std::byte> in = ev.data;
@@ -477,6 +571,11 @@ class RefClient {
   bool snap_done_ = false;
   Nanos snap_retry_at_ = 0;
   std::uint64_t snap_sessions_ = 0, snap_failures_ = 0, responses_ = 0;
+  mold::LineArbiterMetrics logged_{};  // the arbiter's counters as last logged
+  metrics::Segment* seg_ = nullptr;
+  std::uint64_t iterations_ = 0;
+  std::array<std::uint64_t, mold::Log2Histogram::kBuckets> skew_published_{};
+  Nanos next_feed_log_ = 0;
   Nanos now_ = 0;
   Nanos start_ = 0;
   // T18 order-stamp log.
