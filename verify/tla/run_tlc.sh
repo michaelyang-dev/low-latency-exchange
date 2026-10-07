@@ -17,8 +17,11 @@ spec_te=()
 if java -cp "$jar" tlc2.TLC -help 2>&1 | grep -q noGenerateSpecTE; then spec_te=(-noGenerateSpecTE); fi
 java -cp "$jar" tlc2.TLC -help 2>&1 | grep -m1 "TLC2 Version" || true
 # TLC_JAVA_OPTS: extra JVM options (the nightly full model sizes the heap for its runner).
+# No checkpoints: no run is resumed, and every 30 minutes one copies the state queue and
+# the fingerprint set to disk beside the live ones (the nightly full model's TLC died
+# with an unexpected exception at its first, 32 minutes in).
 # shellcheck disable=SC2086
-tlc() { java -XX:+UseParallelGC ${TLC_JAVA_OPTS:-} -cp "$jar" tlc2.TLC -workers "$workers" -deadlock ${spec_te[@]+"${spec_te[@]}"} -metadir "$meta/$1" -config "$2" "${3:-HotStandby.tla}"; }
+tlc() { java -XX:+UseParallelGC ${TLC_JAVA_OPTS:-} -cp "$jar" tlc2.TLC -workers "$workers" -deadlock -checkpoint 0 ${spec_te[@]+"${spec_te[@]}"} -metadir "$meta/$1" -config "$2" "${3:-HotStandby.tla}"; }
 
 status=0
 echo "== safety model $safety_cfg (expect: no error)"

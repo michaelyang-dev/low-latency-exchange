@@ -38,7 +38,9 @@ jobs:
       - name: Report the failure as an annotation
         if: failure()
         # TLC prints an unexpected exception's message and cause several lines after "Error:".
-        run: tools/ci/annotate_tail.sh "TLC" tlc-run.log 60 14
+        run: |
+          tools/ci/annotate_tail.sh "TLC" tlc-run.log 60 14
+          echo "::warning title=TLC host::disk $(df -h / | awk 'NR==2 {print $4 " free of " $2}'), memory $(free -m | awk '/^Mem/ {print $7 " MiB available of " $2}')"
       - name: Trace converter fixtures (pass/ must validate, fail/ must be rejected)
         run: |
           python3 verify/tla/trace/validate.py --jar "$PWD/tla2tools.jar" verify/tla/trace/fixtures/pass/*.ndjson
