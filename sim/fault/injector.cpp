@@ -236,7 +236,7 @@ Dispatch FaultInjector::fire(const FaultEvent& f) {
       Node& n = w_.node(f.node);
       if (!n.alive() || !n.crashable()) break;
       if (crash_guard_ && !crash_guard_(f.node)) break;
-      n.crash(f.a != 0 ? CrashKind::Host : CrashKind::Process);
+      n.crash(f.a != 0 && n.host() == nullptr ? CrashKind::Host : CrashKind::Process);
       n.restart_after(f.dur);
       ++fired_;
       return {true, 1};

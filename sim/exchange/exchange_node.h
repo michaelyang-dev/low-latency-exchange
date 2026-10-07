@@ -440,4 +440,39 @@ class ExchangeProc final : public Process {
   std::string boot_error_;
 };
 
+// snapshotd in a process of its own beside a data node, as production runs it
+// (exchange-node.md: `snapshotd --follow`): it follows the node's journal and writes
+// snapshots on the node's disk, and lives on while exchanged crashes, restarts and
+// rejoins (a rejoin truncates the journal under it, 10 §5). It runs on a node of its own
+// (its scheduling, its process crashes) that is a cohost of the data node: a host crash
+// takes both down. The world then runs exchanged without its in-process follower.
+class SnapshotdProc final : public Process {
+ public:
+  SnapshotdProc(Node& self, Node& host, const ExchangeDay& day, const NodeParams& p, NodeHooks hooks);
+  ~SnapshotdProc() override;
+  SnapshotdProc(const SnapshotdProc&) = delete;
+  SnapshotdProc& operator=(const SnapshotdProc&) = delete;
+
+  [[nodiscard]] const SimSnapshotter* snapshotter() const noexcept { return snap_.get(); }
+
+ private:
+  struct Stage {
+    SnapshotdProc* p;
+    bool poll() { return p->poll(); }
+  };
+  bool poll();
+  void start();
+
+  Node& self_;
+  Node& host_;
+  std::uint32_t date_;
+  NodeParams p_;
+  NodeHooks hooks_;
+  std::unique_ptr<SimSnapStorage> st_;
+  std::unique_ptr<SimSnapshotter> snap_;
+  Nanos next_ = 0;
+  bool failed_ = false;
+  Stage stage_{this};
+};
+
 }  // namespace lle::sim::exch

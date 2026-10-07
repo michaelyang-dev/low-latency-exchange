@@ -134,6 +134,45 @@ TEST(Node, HealRestartsCrashedAndResumesPausedNodes) {
   EXPECT_EQ(ta.restarts, 1);
 }
 
+TEST(Node, CohostGoesDownWithItsHostAndBootsWithIt) {
+  Tally th, tc;  // outlive w: the processes w destroys count into them
+  World w(7, base_fault_config());
+  Node& host = make(w, th);
+  Node& co = make(w, tc);
+  host.add_cohost(co);
+  EXPECT_EQ(co.host(), &host);
+  EXPECT_EQ(host.host(), nullptr);
+  host.boot();
+  co.boot();
+  test::run_for(w, kMs);
+  // The host's process crashes alone: the cohost runs on.
+  host.crash(CrashKind::Process);
+  EXPECT_TRUE(co.alive());
+  host.restart_after(5 * kMs);
+  test::run_for(w, 10 * kMs);
+  EXPECT_TRUE(host.alive());
+  EXPECT_EQ(tc.destroyed, 0);
+  // So does the cohost's: the host runs on.
+  co.crash(CrashKind::Process);
+  EXPECT_TRUE(host.alive());
+  // A power loss takes both down. The restart the cohost had pending waits for the host,
+  // and it boots when the host does.
+  co.restart_after(2 * kMs);
+  host.crash(CrashKind::Host);
+  EXPECT_FALSE(co.alive());
+  test::run_for(w, 20 * kMs);
+  EXPECT_FALSE(co.alive());
+  EXPECT_EQ(tc.restarts, 0);
+  host.restart_after(kMs);
+  test::run_for(w, 5 * kMs);
+  EXPECT_TRUE(host.alive());
+  EXPECT_TRUE(co.alive());
+  EXPECT_EQ(tc.restarts, 1);
+  EXPECT_EQ(co.host_crashes(), 0u);  // its own disk is untouched; the host's took the power loss
+  EXPECT_EQ(host.host_crashes(), 1u);
+  EXPECT_EQ(w.stats().crashes_host, 1u);  // the cohost's stop is not a fault of its own
+}
+
 TEST(Node, WorkloadStreamsDifferPerIncarnation) {
   Tally t;  // outlives w: the processes w destroys count into it
   World w(6, base_fault_config());

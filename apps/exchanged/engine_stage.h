@@ -28,6 +28,7 @@
 #include "common/endian.h"
 #include "engine/engine.h"
 #include "engine/journal_adapter.h"
+#include "env/buggify.h"
 #include "exchanged/clock.h"
 #include "exchanged/shared.h"
 #include "journal/record.h"
@@ -124,6 +125,7 @@ class BasicEngineStage {
       did = true;
       if (!ov_entries_.empty()) {
         ++stats_.overflow_records;
+        SIM_PROBE("exchanged.engine_outputs_overflow_egress");
         if (!flush_overflow()) return true;
       }
       publish_applied();

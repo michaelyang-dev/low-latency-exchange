@@ -102,6 +102,13 @@ class Node {
   // event, then a supervisor restarts it after a short seeded delay.
   void request_crash();
 
+  // `n` runs a process of its own on this node's machine (snapshotd beside exchanged):
+  // it uses this node's disk and shares its power, not its process. A host crash of this
+  // node takes it down too, and it starts again when this node boots; its own crashes
+  // are process crashes (the injector never power-cycles it alone).
+  void add_cohost(Node& n);
+  [[nodiscard]] const Node* host() const noexcept { return host_; }
+
   // Node-level events (restart, resume), dispatched by the world.
   void on_restart(std::uint64_t gen);
   void on_resume(std::uint64_t gen);
@@ -125,6 +132,9 @@ class Node {
   std::uint64_t pause_gen_ = 0;
   std::uint64_t crashes_ = 0;
   std::uint64_t host_crashes_ = 0;
+  std::vector<Node*> cohosts_;   // processes of their own on this machine
+  Node* host_ = nullptr;         // the machine this node's process runs on (nullptr: its own)
+  bool down_with_host_ = false;  // a host crash took it down: it boots with the host
 
   friend class World;
 };

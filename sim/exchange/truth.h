@@ -63,6 +63,9 @@ struct Truth {
   std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::uint64_t>> consumed;
   std::uint64_t day_end = 0;
   std::uint64_t state_hash = 0;  // the fresh engine's, after the last record
+  // The fresh engine's state hash after each SnapshotMark record (what snapshotd's
+  // snapshot at that index must hold), by index.
+  std::map<std::uint64_t, std::uint64_t> mark_hash;
   // The opening freeze (09:25 StateChange) and the opening cross (09:30 Cross 'O'):
   // on-open and held orders are frozen in between; on-close orders from the closing
   // freeze (15:50) until the close, with no cross-cancel permit in the worlds; and
@@ -99,6 +102,11 @@ struct SubTruth {
 // holds every record's canonical content crc.
 [[nodiscard]] Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
                                const std::vector<engine::ScheduleEntry>& schedule);
+// O-SNAPSHOT: every snapshot snapshotd left in `dir` on node `n`'s disk that validates
+// (recovery and snapshotd skip the others) and lies within the final journal is a
+// snapshot of it: the final journal has a SnapshotMark at its index and the snapshot
+// holds the state a fresh replay reaches there. Empty if so, else what is wrong.
+[[nodiscard]] std::string check_snapshots(Node& n, const std::string& dir, const Truth& t);
 // The canonical content crc of every record of a node's journal (index i at [i-1]).
 [[nodiscard]] std::vector<std::uint32_t> canonical_crcs(Node& n, const std::string& journal_prefix,
                                                        std::uint32_t date);

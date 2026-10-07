@@ -88,8 +88,18 @@ void Node::crash(CrashKind kind, bool injected) {
   if (kind == CrashKind::Host) {
     ++host_crashes_;
     disk_.crash_host();
+    for (Node* c : cohosts_) {  // the power loss stops them too, until this node boots
+      c->crash(CrashKind::Process, false);
+      ++c->restart_gen_;  // a restart they had pending waits for the host
+      c->down_with_host_ = true;
+    }
   }
   if (injected) ++(kind == CrashKind::Host ? w_.stats().crashes_host : w_.stats().crashes_process);
+}
+
+void Node::add_cohost(Node& n) {
+  cohosts_.push_back(&n);
+  n.host_ = this;
 }
 
 void Node::restart_after(Nanos delay) {
@@ -107,7 +117,11 @@ void Node::on_restart(std::uint64_t gen) {
   }
   ++incarnation_;
   ++w_.stats().restarts;
+  down_with_host_ = false;
   boot();
+  for (Node* c : cohosts_) {
+    if (c->down_with_host_) c->restart_after(kMs);  // started with the machine
+  }
 }
 
 void Node::pause(Nanos duration) {

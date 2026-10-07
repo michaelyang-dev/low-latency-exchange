@@ -66,6 +66,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <map>
 #include <memory>
 #include <optional>
@@ -130,6 +131,11 @@ using ex::SubTruth;
 using ex::Truth;
 
 constexpr std::uint32_t kDay = 20261001;
+constexpr std::uint32_t kPrevDay = 20260930;  // the day before, on rollover seeds
+// Rollover seeds: the previous day's time (it normally ends far sooner), then a quiet gap
+// longer than any message's flight (a real rollover is hours apart), then the day.
+constexpr Nanos kPrevDayBudget = 150 * kMs;
+constexpr Nanos kRolloverGap = 150 * kMs;
 constexpr std::uint16_t kGwPort[2] = {15000, 15001};
 constexpr std::uint16_t kRerequestPort = 30003;
 constexpr std::uint16_t kGlimpsePort = 30004;
@@ -160,13 +166,15 @@ struct Push {
 
 // ---- the clients' state ---------------------------------------------------------------
 struct Sent {
-  char kind = 'O';  // 'O' enter, 'U' replace, 'B' malformed / truncated (consumes, expects 'J'), 'X' mass cancel
+  char kind = 'O';  // 'O' enter, 'U' replace, 'B' malformed / truncated (consumes, expects 'J'), 'X' mass
+                    // cancel, 'G' / 'K' disable / enable order entry
   std::vector<std::byte> msg;
   bool resolved = false;
 };
 struct HaLedger {
   std::uint32_t session = 0;
   std::uint32_t account = 0;
+  std::uint8_t idx = 0;  // UserRefIdx: the second session on a shared account uses its own channel
   std::string user, pass;
   std::uint8_t gateway = 0;
   bool cod = false;
@@ -205,7 +213,7 @@ struct Harness {
   World* w = nullptr;
   OracleRegistry* o = nullptr;
   OracleId o_stream = 0, o_lost = 0, o_arb = 0, o_line = 0, o_once = 0, o_prefix = 0, o_seq = 0, o_cod = 0,
-           o_commit = 0, o_recover = 0, o_replay = 0, o_internal = 0, o_book = 0;
+           o_commit = 0, o_recover = 0, o_replay = 0, o_internal = 0, o_book = 0, o_snapshot = 0;
   std::uint64_t alarms = 0;  // replica ALARMs raised on either node
   bool verbose = false;
 
@@ -230,7 +238,17 @@ struct Harness {
   std::vector<HaLedger> clients;
   std::vector<SubTruth> subs;
   std::vector<std::unique_ptr<mo::LineComparator>> comparators;  // one per subscriber
-  std::uint64_t halts = 0, resumes = 0, held_halts = 0, operator_restarts = 0;
+  std::uint64_t halts = 0, resumes = 0, held_halts = 0, operator_restarts = 0, controls = 0;
+  std::size_t traded = 0;  // symbols the clients and the operator use: the first ones of the day's
+  std::size_t deep = 0;    // resting orders each client posts away from the market (deep-book days)
+  std::uint64_t bulk_orders = 0, bursts = 0;
+  bool snapd_apart = false;  // snapshotd runs in a process of its own beside each data node
+  // Rollover seeds: the pair runs the previous trading day first (no clients), then the
+  // operator rolls it over to `day` on the same disks (06 §10 Rollover).
+  std::unique_ptr<ExchangeDay> prev_day;
+  std::shared_ptr<ex::L2File> prev_l2_file[2];  // the previous day's L2 files
+  bool rolled = true;  // the nodes run `day` (else still `prev_day`)
+  bool witness_reinit = false;  // W's next image starts from a fresh state file (rollover)
   std::uint64_t targeted = 0, targeted_partial = 0, targeted_halt = 0;
   std::uint64_t cod_fills_before_down = 0, partial_takeovers = 0, halt_spans = 0;
   std::uint64_t snapshots_written = 0, auction_snapshots = 0, dropped_at_close = 0;
@@ -318,6 +336,7 @@ struct Harness {
   void final_checks();
   void check_prefix(const Truth& t);
   void check_replay(const Truth& t);
+  void check_snapshots(const Truth& t);
   void check_streams(const Truth& t);
   void check_lost(const Truth& t);
   void check_arb(const Truth& t);
@@ -358,6 +377,23 @@ void Harness::check_prefix(const Truth& t) {
     o->pass(o_prefix);
   }
   (void)t;
+}
+
+void Harness::check_snapshots(const Truth& t) {
+  // Every snapshot a data node holds at the end is one of the final journal (O-SNAPSHOT):
+  // snapshotd follows the journal through crashes and a rejoin's truncation, and
+  // recovery and snapshotd itself start from the newest snapshot. A node whose journal
+  // is not the final one (still down, or not converged) is not checked.
+  for (std::size_t n = 0; n < 2; ++n) {
+    if (node_proc(n) == nullptr) continue;
+    if (ex::canonical_crcs(w->node(kX[n]), params[n].journal_prefix(day.date), day.date) != t.crc) continue;
+    if (const std::string err = ex::check_snapshots(w->node(kX[n]), params[n].snapshots_dir(day.date), t);
+        !err.empty()) {
+      o->fail(o_snapshot, err);
+      return;
+    }
+    o->pass(o_snapshot);
+  }
 }
 
 void Harness::check_replay(const Truth& t) {
@@ -731,8 +767,20 @@ void Harness::check_cod(const Truth& t) {
 }
 
 void Harness::check_commit(const Truth& t, const std::vector<std::uint32_t>& crc) {
+  // The day start (DayStart, Config, EpochStart of epoch 1) is held by both nodes from
+  // the start: each writes it on its own, byte for byte from the same configuration
+  // (ADR-028), and the primary takes the backup's ACK to cover it (Replica::start_paired),
+  // so its outputs may go out before the backup has started.
+  std::uint64_t day_start = 0;
+  for (std::size_t i = 0; i < t.recs.size(); ++i) {
+    if (t.recs[i].type == jr::RecordType::EpochStart) {
+      day_start = i + 1;
+      break;
+    }
+  }
   auto ok_at = [&](std::uint64_t index, Nanos rx) {
     if (index == 0 || index > crc.size()) return false;
+    if (index <= day_start) return true;
     const auto key = std::pair{index, crc[index - 1]};
     Nanos both = 0;
     bool in_both = true;
@@ -904,6 +952,7 @@ void Harness::final_checks() {
   const std::vector<std::uint32_t>& crc = t.crc;
   check_prefix(t);
   check_replay(t);
+  check_snapshots(t);
   check_streams(t);
   check_lost(t);
   check_arb(t);
@@ -917,6 +966,33 @@ void Harness::final_checks() {
 }
 
 // ---- the data nodes -------------------------------------------------------------------
+std::function<void(const en::Engine&, std::uint64_t)> snapshot_written_hook(Harness& h) {
+  return [&h](const en::Engine& e, std::uint64_t) {
+    ++h.snapshots_written;
+    if (ex::auction_in_progress(e)) {
+      ++h.auction_snapshots;
+      h.w->probes().hit("snap.during_auction");
+    }
+  };
+}
+
+// The previous trading day's images (rollover seeds): progress lines only.
+ex::NodeHooks prev_day_hooks(Harness& h, std::size_t n) {
+  ex::NodeHooks k;
+  const char* name = n == 0 ? "xa" : "xb";
+  if (h.verbose) k.log = [&h, name](const std::string& s) { h.log("%s (%u): %s", name, kPrevDay, s.c_str()); };
+  return k;
+}
+
+// snapshotd in a process of its own beside data node n (ex::SnapshotdProc).
+ex::NodeHooks snapd_hooks(Harness& h, std::size_t n) {
+  ex::NodeHooks k;
+  const char* name = n == 0 ? "xa-snapd" : "xb-snapd";
+  if (h.verbose) k.log = [&h, name](const std::string& s) { h.log("%s: %s", name, s.c_str()); };
+  k.snapshot_written = snapshot_written_hook(h);
+  return k;
+}
+
 ex::NodeHooks node_hooks(Harness& h, std::size_t n) {
   ex::NodeHooks k;
   NodeTrack& nt = h.nodes[n];
@@ -969,13 +1045,7 @@ ex::NodeHooks node_hooks(Harness& h, std::size_t n) {
       SIM_PROBE("exchange_ha.rejoin_truncated");
     }
   };
-  k.snapshot_written = [&h](const en::Engine& e, std::uint64_t) {
-    ++h.snapshots_written;
-    if (ex::auction_in_progress(e)) {
-      ++h.auction_snapshots;
-      h.w->probes().hit("snap.during_auction");
-    }
-  };
+  k.snapshot_written = snapshot_written_hook(h);
   k.taps.ouch = [&h, n](const sq::InboundMsg& m) {
     Push p;
     p.ouch = true;
@@ -1026,6 +1096,14 @@ class NodeProc final : public Process {
  public:
   NodeProc(Node& nd, Harness& h, std::size_t n) {
     NodeTrack& t = h.nodes[n];
+    if (!h.rolled) {
+      // The previous day: nothing of it is checked, only what it leaves behind. Its L2
+      // file is its own (production names it <name>-<date>.l2).
+      NodeParams p = h.params[n];
+      if (p.l2_file) p.l2_file = h.prev_l2_file[n];
+      proc_ = std::make_unique<ExchangeProc>(nd, *h.prev_day, p, prev_day_hooks(h, n));
+      return;
+    }
     if (t.runbook_pending) {
       // The runbook for an incomplete day start on a paired node (exchange-node.md §8):
       // the journal's segments are moved aside and the incarnation file stays, so the
@@ -1061,8 +1139,21 @@ ExchangeProc* Harness::node_proc(std::size_t n) const {
 class WitnessHost final : public Process {
  public:
   WitnessHost(Node& n, Harness& h, Nanos tie_break) : h_(h) {
+    if (h.witness_reinit) {
+      // The new day's witnessd --init --force --primary 0 --inc0 1 --inc1 1: the state
+      // file rewritten and synced before W starts (the stopped image's writes have
+      // completed: a node restarts only then).
+      h.witness_reinit = false;
+      Disk& d = n.disk();
+      const auto img = ex::WitnessProc::initial_state(0);
+      const std::uint32_t f = d.open(kWitnessState);
+      d.resize(f, img.size());
+      (void)d.write_now(f, 0, img, true);
+      (void)d.sync_now(f);
+    }
     ex::WitnessProc::Hooks hk;
     hk.grant = [&h](const wit::Grant& g) {
+      if (!h.rolled) return;  // the previous day's
       // A JOIN grant goes to the primary and, as a copy, to the joiner: once.
       if (g.request == wit::MsgType::kJoin && g.to_node != g.primary) return;
       if (!h.grants.empty() && h.grants.back().g.epoch >= g.epoch) return;  // a retransmission
@@ -1105,14 +1196,22 @@ class HaClientProc final : public Process {
         port_(n),
         rng_(n.rng(0xC11E)),
         rng2_(n.rng(0xC11F)),
+        rng3_(n.rng(0xC120)),
+        rng4_(n.rng(0xC121)),
         entry_(config(h.clients[c], heartbeat, idle)),
         stage_{this} {
     send_mean_ = static_cast<Nanos>(100 * kUs + rng_.below(1900 * kUs));
     disrupt_mean_ = static_cast<Nanos>(20 * kMs + rng_.below(200 * kMs));
+    if (h.clients[c].idx != 0) tags_.set_user_ref_idx(h.clients[c].idx);
+    bulk_left_ = h.deep;
+    if (h.deep != 0 && rng3_.below(2) == 0)
+      rebulk_at_ = h.open_at + static_cast<Nanos>(rng3_.below(
+                                   static_cast<std::uint64_t>(std::max<Nanos>(1, h.close_at - h.open_at))));
     n.add_stage(stage_, "client");
   }
 
   bool poll() {
+    if (!h_.rolled) return false;  // the previous day has no clients
     const Nanos now = node_.clock().now_mono();
     bool did = false;
     port_.poll([&](const env::StreamEvent& ev) {
@@ -1137,7 +1236,7 @@ class HaClientProc final : public Process {
     // OUCH clients do on reconnecting.
     if (entry_.active() >= 0 && entry_.stats().takeovers != takeovers_seen_) {
       takeovers_seen_ = entry_.stats().takeovers;
-      if (entry_.send(en::account_query_msg(), now)) {
+      if (entry_.send(en::account_query_msg(tags_), now)) {
         ++L.queries;
         SIM_PROBE("exchange_ha.account_query_after_takeover");
       }
@@ -1280,9 +1379,10 @@ class HaClientProc final : public Process {
         resolve(m.user_ref_num);
         break;
       }
-      case 'X': {  // Mass Cancel Response (the orders' 'C' messages follow)
-        const auto m = oo::MassCancelResponse::decode_base(b.data());
-        resolve(m.user_ref_num);
+      case 'X':    // Mass Cancel Response (the orders' 'C' messages follow)
+      case 'G':    // Disable Order Entry Response
+      case 'K': {  // Enable Order Entry Response
+        resolve(load_be32(b.data() + 9));
         break;
       }
       case 'M': {
@@ -1351,11 +1451,27 @@ class HaClientProc final : public Process {
 
   void order(Nanos now) {
     HaLedger& L = h_.clients[c_];
+    // Deep-book days: the client posts its resting orders away from the market in
+    // batches, at the start and sometimes again later in the day (after a kill switch,
+    // COD or mass cancel took the first ones). Bursts: now and then a run of orders in
+    // one go, past what the gateway's queue to the sequencer holds. Their own stream.
+    if (rebulk_at_ != 0 && now >= rebulk_at_) {
+      rebulk_at_ = 0;
+      bulk_left_ = h_.deep;
+    }
+    if (bulk_left_ != 0) {
+      bulk(now);
+      return;
+    }
+    if (rng3_.below(400) == 0) {
+      burst(now);
+      return;
+    }
     // Session-level and order-level requests beyond enter, cancel and replace, from a
     // stream of their own (the draws below stay as they were when none is chosen).
     const std::uint64_t x = rng2_.below(100);
     if (x < 3) {  // Account Query: the next UserRefNum, no state change
-      if (entry_.send(en::account_query_msg(), now)) ++L.queries;
+      if (entry_.send(en::account_query_msg(tags_), now)) ++L.queries;
       SIM_PROBE("exchange_ha.account_query");
       return;
     }
@@ -1371,11 +1487,27 @@ class HaClientProc final : public Process {
         side = marks[rng2_.below(3)];
       }
       const Qty want = static_cast<Qty>(100 * rng2_.below(1 + static_cast<std::uint64_t>(it->second / 100)));
-      if (entry_.send(en::modify_msg(target, side, want), now)) {
+      if (entry_.send(en::modify_msg(target, side, want, tags_), now)) {
         ++L.modifies;
         if (sell) L.side_of[target] = side;  // as the client asked (an 'M' confirms it)
       }
       SIM_PROBE("exchange_ha.modify");
+      return;
+    }
+    // Disable Order Entry (one action in 100) and the Enable that always follows: while
+    // disabled, Enter and Replace get 'J'; cancels, Modify and Mass Cancel still work.
+    if ((x == 16 && !disabled_) || (disabled_ && now >= enable_at_)) {
+      const UserRefNum urn = entry_.next_urn();
+      std::vector<std::byte> msg = disabled_ ? en::enable_msg(urn, "", tags_) : en::disable_msg(urn, "", tags_);
+      if (!entry_.send(msg, now)) return;
+      track(urn, disabled_ ? 'K' : 'G', msg);
+      if (disabled_) {
+        SIM_PROBE("exchange_ha.enable_order_entry");
+      } else {
+        SIM_PROBE("exchange_ha.disable_order_entry");
+        enable_at_ = now + exp_ns(20 * kMs);
+      }
+      disabled_ = !disabled_;
       return;
     }
     if (x >= 10 && x < 16) {
@@ -1387,11 +1519,11 @@ class HaClientProc final : public Process {
       if (pre_open || pre_close) {
         const bool market = rng2_.below(2) == 0 && now < h_.virtual_of(pre_open ? hms_ns(9, 28, 0) : hms_ns(15, 55, 0));
         const bool io = !market && rng2_.below(4) == 0;
-        const std::size_t si = static_cast<std::size_t>(rng2_.below(h_.day.symbols.size()));
+        const std::size_t si = static_cast<std::size_t>(rng2_.below(h_.traded));
         const std::string sym(h_.day.symbols[si].symbol.view());
         const std::int64_t ref = h_.day.symbols[si].prior_close;
         const UserRefNum urn = entry_.next_urn();
-        ouch50::TagSet tags;
+        ouch50::TagSet tags = tags_;
         if (io) tags.set_handle_inst(ouch50::HandleInst::ImbalanceOnly);
         std::vector<std::byte> msg = en::enter_msg(
             {.urn = urn,
@@ -1418,15 +1550,15 @@ class HaClientProc final : public Process {
     if (x < 10) {  // Mass Cancel: the session's orders, in one symbol or all
       const UserRefNum urn = entry_.next_urn();
       const std::string sym =
-          rng2_.below(2) == 0 ? std::string() : std::string(h_.day.symbols[rng2_.below(h_.day.symbols.size())].symbol.view());
-      std::vector<std::byte> msg = en::mass_cancel_msg(urn, "", sym);
+          rng2_.below(2) == 0 ? std::string() : std::string(h_.day.symbols[rng2_.below(h_.traded)].symbol.view());
+      std::vector<std::byte> msg = en::mass_cancel_msg(urn, "", sym, tags_);
       if (!entry_.send(msg, now)) return;
       ++L.mass_cancels;
       track(urn, 'X', msg);
       SIM_PROBE("exchange_ha.mass_cancel");
       return;
     }
-    const std::size_t si = static_cast<std::size_t>(rng_.below(h_.day.symbols.size()));
+    const std::size_t si = static_cast<std::size_t>(rng_.below(h_.traded));
     const std::string sym(h_.day.symbols[si].symbol.view());
     const std::int64_t ref = h_.day.symbols[si].prior_close;
     const std::uint64_t r = rng_.below(100);
@@ -1436,14 +1568,16 @@ class HaClientProc final : public Process {
       const bool ioc = market || (continuous && rng_.below(8) == 0);
       const UserRefNum urn = entry_.next_urn();
       const auto px = static_cast<std::uint64_t>(ref + kTick * (static_cast<std::int64_t>(rng_.below(11)) - 5));
-      std::vector<std::byte> msg =
-          en::enter_msg({.urn = urn,
-                         .side = rng_.below(2) == 0 ? ouch50::Side::Buy : ouch50::Side::Sell,
-                         .qty = static_cast<Qty>(100 * (1 + rng_.below(10))),
-                         .symbol = sym,
-                         .price = market ? ouch50::kMarketPrice : px,
-                         .tif = ioc ? ouch50::TimeInForce::Ioc : ouch50::TimeInForce::Day,
-                         .display = rng_.below(8) == 0 ? ouch50::Display::Hidden : ouch50::Display::Visible});
+      en::EnterArgs e{.urn = urn,
+                      .side = rng_.below(2) == 0 ? ouch50::Side::Buy : ouch50::Side::Sell,
+                      .qty = static_cast<Qty>(100 * (1 + rng_.below(10))),
+                      .symbol = sym,
+                      .price = market ? ouch50::kMarketPrice : px,
+                      .tif = ioc ? ouch50::TimeInForce::Ioc : ouch50::TimeInForce::Day,
+                      .display = rng_.below(8) == 0 ? ouch50::Display::Hidden : ouch50::Display::Visible};
+      ouch50::TagSet t = tags_;
+      if (!market) order_type(e, t);
+      std::vector<std::byte> msg = en::enter_msg(e, t);
       if (!entry_.send(msg, now)) return;  // the pending ring is full: not sent
       L.symbol_of[urn] = sym;
       L.side_of[urn] = static_cast<ouch50::Side>(msg[ouch50::layout::in::EnterOrder::kSideOff]);
@@ -1457,7 +1591,7 @@ class HaClientProc final : public Process {
       const Qty keep = rng_.below(2) == 0 || it->second <= 100
                            ? 0
                            : static_cast<Qty>(100 * rng_.below(static_cast<std::uint64_t>(it->second / 100)));
-      (void)entry_.send(en::cancel_msg(target, keep), now);  // refused when the pending ring is full
+      (void)entry_.send(en::cancel_msg(target, keep, tags_), now);  // refused when the pending ring is full
       return;
     }
     const auto sit = L.symbol_of.find(target);
@@ -1469,7 +1603,8 @@ class HaClientProc final : public Process {
         {.orig = target,
          .urn = urn,
          .qty = static_cast<Qty>(100 * (1 + rng_.below(10))),
-         .price = static_cast<std::uint64_t>(ref2 + kTick * (static_cast<std::int64_t>(rng_.below(11)) - 5))});
+         .price = static_cast<std::uint64_t>(ref2 + kTick * (static_cast<std::int64_t>(rng_.below(11)) - 5))},
+        tags_);
     if (!entry_.send(msg, now)) return;
     if (sit != L.symbol_of.end()) L.symbol_of[urn] = sit->second;
     if (const auto sd = L.side_of.find(target); sd != L.side_of.end()) L.side_of[urn] = sd->second;
@@ -1481,6 +1616,83 @@ class HaClientProc final : public Process {
     s.kind = kind;
     s.msg = msg;
     h_.clients[c_].sent[urn] = std::move(s);
+  }
+
+  // One Enter Order from rng3_: `away` rests 8 to 80 ticks off the reference on its own
+  // side (the near-reference flow does not reach it); otherwise as the regular flow.
+  bool enter3(Nanos now, bool away) {
+    HaLedger& L = h_.clients[c_];
+    const std::size_t si = static_cast<std::size_t>(rng3_.below(h_.traded));
+    const std::string sym(h_.day.symbols[si].symbol.view());
+    const std::int64_t ref = h_.day.symbols[si].prior_close;
+    const auto side = rng3_.below(2) == 0 ? ouch50::Side::Buy : ouch50::Side::Sell;
+    const std::int64_t off = away ? kTick * (8 + static_cast<std::int64_t>(rng3_.below(72)))
+                                  : kTick * (static_cast<std::int64_t>(rng3_.below(11)) - 5);
+    const std::int64_t px = std::max<std::int64_t>(kTick, side == ouch50::Side::Buy ? ref - off : ref + off);
+    const bool ioc = !away && now >= h_.open_at && rng3_.below(8) == 0;
+    const UserRefNum urn = entry_.next_urn();
+    en::EnterArgs e{.urn = urn,
+                    .side = side,
+                    .qty = static_cast<Qty>(100 * (1 + rng3_.below(away ? 5 : 10))),
+                    .symbol = sym,
+                    .price = static_cast<std::uint64_t>(px),
+                    .tif = ioc ? ouch50::TimeInForce::Ioc : ouch50::TimeInForce::Day,
+                    .display = rng3_.below(8) == 0 ? ouch50::Display::Hidden : ouch50::Display::Visible};
+    ouch50::TagSet t = tags_;
+    order_type(e, t);
+    std::vector<std::byte> msg = en::enter_msg(e, t);
+    if (!entry_.send(msg, now)) return false;  // the pending ring is full
+    L.symbol_of[urn] = sym;
+    L.side_of[urn] = side;
+    track(urn, 'O', msg);
+    return true;
+  }
+
+  // OUCH 5.0 order types on a third of the limit orders, from a stream of their own (as
+  // the engine fuzzer draws them): midpoint peg (the limit is its cap), reserve (MaxFloor),
+  // minimum quantity (IOC), post-only, GTT (expiring on the 1 Hz clock), GTX and
+  // after-hours, attributable, a group for mass cancels.
+  void order_type(en::EnterArgs& e, ouch50::TagSet& t) {
+    if (rng4_.below(3) != 0) return;
+    switch (rng4_.below(8)) {
+      case 0: t.set_price_type(ouch50::PriceType::MidpointPeg); break;
+      case 1: {
+        if (e.tif == ouch50::TimeInForce::Ioc) break;
+        const std::uint64_t lots = 2 + rng4_.below(9);
+        e.qty = static_cast<Qty>(100 * lots);
+        t.set_max_floor(static_cast<std::uint32_t>(100 * (1 + rng4_.below(lots - 1))));
+        break;
+      }
+      case 2:
+        if (e.tif != ouch50::TimeInForce::Ioc) break;
+        t.set_min_qty(static_cast<std::uint32_t>(100 * (1 + rng4_.below(e.qty / 100))));
+        break;
+      case 3: t.set_post_only(ouch50::PostOnly::PostOnly); break;
+      case 4:
+        e.tif = ouch50::TimeInForce::Gtt;
+        t.set_expire_time(static_cast<std::uint32_t>(9 * 3600 + 31 * 60 + rng4_.below(6 * 3600)));
+        break;
+      case 5: e.tif = rng4_.below(2) == 0 ? ouch50::TimeInForce::Gtx : ouch50::TimeInForce::AfterHours; break;
+      case 6: e.display = ouch50::Display::Attributable; break;
+      default: t.set_group_id(static_cast<std::uint16_t>(1 + rng4_.below(3))); break;
+    }
+  }
+
+  void bulk(Nanos now) {
+    const std::size_t n = std::min<std::size_t>(bulk_left_, 16 + rng3_.below(112));
+    std::size_t sent = 0;
+    while (sent < n && enter3(now, true)) ++sent;
+    bulk_left_ -= sent;
+    h_.bulk_orders += sent;
+    SIM_PROBE("exchange_ha.deep_book_batch");
+  }
+
+  void burst(Nanos now) {
+    const std::size_t n = 20 + static_cast<std::size_t>(rng3_.below(380));
+    std::size_t sent = 0;
+    while (sent < n && enter3(now, false)) ++sent;
+    ++h_.bursts;
+    SIM_PROBE("exchange_ha.order_burst");
   }
 
   bool disrupt(Nanos now) {
@@ -1503,7 +1715,9 @@ class HaClientProc final : public Process {
     if (r < 65) {
       ++L.bad;
       std::vector<std::byte> msg = en::enter_msg({.urn = entry_.next_urn(), .qty = 100, .symbol = "AAPL"});
-      const bool truncated = rng_.below(2) == 0;
+      // A message the engine cannot parse consumes its UserRefNum on channel 0 (its
+      // UserRefIdx is unreadable), so only a session on channel 0 sends one.
+      const bool truncated = rng_.below(2) == 0 && L.idx == 0;
       if (truncated) {
         msg.resize(msg.size() - 1 - rng_.below(8));  // truncated: fails validation, consumes the UserRefNum
       } else {
@@ -1513,7 +1727,7 @@ class HaClientProc final : public Process {
       SIM_PROBE("exchange_ha.malformed_ouch");
       return true;
     }
-    if (r < 85) {
+    if (r < 85 && L.idx == 0) {
       // Over-long, within the HA client's message bound: the gateway truncates it and
       // flags the record malformed; the engine rejects it.
       ++L.bad;
@@ -1575,6 +1789,9 @@ class HaClientProc final : public Process {
   StreamPort port_;
   Rng rng_;
   Rng rng2_;  // Account Query, Modify, Mass Cancel
+  Rng rng3_;  // deep-book batches and bursts
+  Rng rng4_;  // order types
+  ouch50::TagSet tags_;  // UserRefIdx on every message, when the session has a channel of its own
   client::HaOrderEntry entry_;
   std::optional<env::ConnId> conn_[2];
   View view_[2];
@@ -1584,6 +1801,10 @@ class HaClientProc final : public Process {
   Nanos send_mean_ = kMs;
   Nanos disrupt_mean_ = 100 * kMs;
   std::uint64_t takeovers_seen_ = 0;
+  bool disabled_ = false;  // this client sent Disable Order Entry (an Enable follows at enable_at_)
+  Nanos enable_at_ = 0;
+  std::size_t bulk_left_ = 0;  // deep-book orders still to post
+  Nanos rebulk_at_ = 0;        // 0: no second batch
   bool partial_seen_ = false;
   Stage stage_;
 };
@@ -1594,8 +1815,10 @@ class HaClientProc final : public Process {
 class HaSubProc final : public Process {
  public:
   using Feed = client::FeedHandler<>;
+  // `start_at` > 0: a late joiner, which joins the lines only then and recovers the day
+  // so far through re-requests and a GLIMPSE spin.
   HaSubProc(Node& n, Harness& h, std::size_t s, const client::FeedConfig& cfg, std::array<env::Endpoint, 2> rr,
-            std::array<env::Endpoint, 2> glimpse, sb::ClientConfig glimpse_login)
+            std::array<env::Endpoint, 2> glimpse, sb::ClientConfig glimpse_login, Nanos start_at)
       : node_(n),
         h_(h),
         s_(s),
@@ -1605,9 +1828,9 @@ class HaSubProc final : public Process {
         port_(n, kSubPort),
         snap_port_(n),
         feed_(std::make_unique<Feed>(cfg)),
+        start_at_(start_at),
         stage_{this} {
-    port_.join(kLine[0]);
-    port_.join(kLine[1]);
+    if (start_at_ == 0 && h.rolled) join_lines();
     n.add_stage(stage_, "subscriber");
   }
 
@@ -1615,6 +1838,12 @@ class HaSubProc final : public Process {
     bool did = false;
     const Nanos now = node_.clock().now_mono();
     now_ = now;
+    if (!joined_) {
+      if (!h_.rolled || now < start_at_) return false;  // the previous day has no subscribers
+      join_lines();
+      if (start_at_ != 0) SIM_PROBE("exchange_ha.late_subscriber");
+      did = true;
+    }
     port_.poll_rx([&](const env::RxDatagram& d) {
       did = true;
       mo::Source src;
@@ -1651,6 +1880,12 @@ class HaSubProc final : public Process {
     }
     flush_snapshot();
     return did;
+  }
+
+  void join_lines() {
+    port_.join(kLine[0]);
+    port_.join(kLine[1]);
+    joined_ = true;
   }
 
   // --- FeedHandler downstream ---
@@ -1819,6 +2054,8 @@ class HaSubProc final : public Process {
   std::optional<sb::ClientSession> snap_;
   std::size_t snap_node_ = 0;
   bool snap_wanted_ = false;
+  Nanos start_at_ = 0;
+  bool joined_ = false;
   bool snap_done_ = false;
   bool splicing_ = false;
   SeqNo splice_to_ = 0;
@@ -1830,14 +2067,17 @@ class HaSubProc final : public Process {
 // ---- the operator ------------------------------------------------------------------------
 class OperatorProc final : public Process {
  public:
-  OperatorProc(Node& n, Harness& h) : node_(n), h_(h), rng_(n.rng(0x0B5)), stage_{this} {
+  OperatorProc(Node& n, Harness& h) : node_(n), h_(h), rng_(n.rng(0x0B5)), rng2_(n.rng(0x0B6)), stage_{this} {
     next_ = h_.open_at +
             static_cast<Nanos>(rng_.below(static_cast<std::uint64_t>(std::max<Nanos>(1, h_.close_at - h_.open_at))));
+    next_control_ = h_.open_at + static_cast<Nanos>(rng2_.below(
+                                     static_cast<std::uint64_t>(std::max<Nanos>(1, (h_.close_at - h_.open_at) / 4))));
     n.add_stage(stage_, "operator");
   }
   [[nodiscard]] bool holding() const noexcept { return holding_; }
 
   bool poll() {
+    if (!h_.rolled) return rollover();
     const Nanos now = node_.clock().now_mono();
     if (!h_.w->faults_active() && now >= next_check_) {
       next_check_ = now + 10 * kMs;
@@ -1851,6 +2091,8 @@ class OperatorProc final : public Process {
         }
       }
     }
+    if (!follow_.empty() && now >= follow_.front().first && now < h_.close_at && follow_up()) return true;
+    if (now >= next_control_ && now < h_.close_at && control(now)) return true;
     if (now < next_ || now >= h_.close_at) return false;
     std::size_t pn = 0;
     ExchangeProc* x = h_.primary(&pn);
@@ -1867,7 +2109,7 @@ class OperatorProc final : public Process {
       }
       holding_ = false;
     }
-    const auto& sym = h_.day.symbols[static_cast<std::size_t>(rng_.below(h_.day.symbols.size()))];
+    const auto& sym = h_.day.symbols[static_cast<std::size_t>(rng_.below(h_.traded))];
     sq::AdminMsg a;
     a.operator_id = 900;
     en::AdminArgsBuilder args;
@@ -1905,10 +2147,219 @@ class OperatorProc final : public Process {
     OperatorProc* p;
     bool poll() { return p->poll(); }
   };
+  // Risk and market control through the primary's admin queue, at random times: a kill
+  // switch (always reset later), a risk limit, a quote-only period, LULD bands, a Reg SHO
+  // action or a cross-cancel permit. The commands are journaled and replicated like any
+  // record, so takeovers, rejoins and snapshot recovery carry the state they set.
+  bool control(Nanos now) {
+    std::size_t pn = 0;
+    ExchangeProc* x = h_.primary(&pn);
+    if (x == nullptr) {
+      next_control_ = now + kMs;
+      return false;
+    }
+    sq::AdminMsg a;
+    a.operator_id = 901;
+    en::AdminArgsBuilder args;
+    const auto& sym = h_.day.symbols[static_cast<std::size_t>(rng2_.below(h_.traded))];
+    const std::uint32_t account = h_.clients[static_cast<std::size_t>(rng2_.below(h_.clients.size()))].account;
+    const char* what = "";
+    std::uint32_t reset = 0;  // an account to reset (a kill switch is always reset later)
+    for (const auto& [acct, at] : killed_) {
+      if (now >= at) {
+        reset = acct;
+        break;
+      }
+    }
+    // Undone if the admin queue refuses the command.
+    const std::size_t follow0 = follow_.size();
+    const bool levels0 = mwcb_levels_, breached0 = mwcb_breached_, ipo0 = ipo_;
+    if (reset != 0) {
+      a.command = static_cast<std::uint16_t>(en::AdminCommand::KillReset);
+      args.u32(en::AdminTag::Account, reset);
+      what = "kill reset";
+    } else {
+      switch (rng2_.below(8)) {
+        case 0:
+          if (killed_.count(account) != 0) return false;
+          a.command = static_cast<std::uint16_t>(en::AdminCommand::KillSwitch);
+          args.u32(en::AdminTag::Account, account);
+          what = "kill switch";
+          break;
+        case 1:
+          a.command = static_cast<std::uint16_t>(en::AdminCommand::RiskLimit);
+          args.u32(en::AdminTag::Account, account)
+              .u16(en::AdminTag::Kind, static_cast<std::uint16_t>(en::RiskKind::MaxOrderQty))
+              .i64(en::AdminTag::Value, static_cast<std::int64_t>(300 + 100 * rng2_.below(10)));
+          what = "max order quantity";
+          break;
+        case 2:
+          a.command = static_cast<std::uint16_t>(en::AdminCommand::QuoteOnly);
+          args.symbol(sym.symbol).reason("T3");
+          what = "quote-only";
+          break;
+        case 3: {
+          const std::int64_t ref = sym.prior_close, w = ref / 20 + ref / 20 * static_cast<std::int64_t>(rng2_.below(3));
+          a.command = static_cast<std::uint16_t>(en::AdminCommand::LuldBands);
+          args.symbol(sym.symbol).i64(en::AdminTag::Lower, ref - w).i64(en::AdminTag::Upper, ref + w);
+          what = "LULD bands";
+          break;
+        }
+        case 4: {
+          const char act[] = {'0', '1', '2'};
+          a.command = static_cast<std::uint16_t>(en::AdminCommand::RegSho);
+          args.symbol(sym.symbol).u8(en::AdminTag::Action, static_cast<std::uint8_t>(act[rng2_.below(3)]));
+          what = "Reg SHO";
+          break;
+        }
+        case 5:
+          a.command = static_cast<std::uint16_t>(en::AdminCommand::CrossCancelPermit);
+          args.u32(en::AdminTag::Account, account);
+          what = "cross-cancel permit";
+          break;
+        case 6:
+          // Market-wide circuit breaker: the decline levels, then a breach. Level 1 or 2
+          // halts every symbol of the day (thousands on a many-symbol day) and reopens
+          // them through the 1 Hz clock; without the clock the operator resumes the
+          // traded ones later. Level 3 (rare) halts everything for the rest of the day.
+          if (!mwcb_levels_) {
+            a.command = static_cast<std::uint16_t>(en::AdminCommand::MwcbLevels);
+            args.i64(en::AdminTag::Level1, 3'720'00000000)
+                .i64(en::AdminTag::Level2, 3'480'00000000)
+                .i64(en::AdminTag::Level3, 3'200'00000000);
+            mwcb_levels_ = true;
+            what = "MWCB levels";
+          } else {
+            if (mwcb_breached_) return false;
+            const std::uint8_t level = rng2_.below(10) == 0 ? 3 : static_cast<std::uint8_t>(1 + rng2_.below(2));
+            a.command = static_cast<std::uint16_t>(en::AdminCommand::MwcbBreach);
+            args.u8(en::AdminTag::Level, level);
+            mwcb_breached_ = true;
+            what = "MWCB breach";
+            if (level != 3 && !h_.clock) {
+              const Nanos at = now + static_cast<Nanos>((h_.close_at - h_.open_at) / 10);
+              for (std::size_t i = 0; i < h_.traded; ++i)
+                follow_.emplace_back(at, admin_msg(en::AdminCommand::Resume, h_.day.symbols[i].symbol));
+            }
+          }
+          break;
+        default: {
+          // An IPO on a traded symbol: its quotation update and quoting period now, the
+          // underwriter's release later, then (as the 1 Hz clock would let the cross
+          // qualify only on a clock day) the operator's release.
+          if (ipo_) return false;
+          ipo_ = true;
+          a.command = static_cast<std::uint16_t>(en::AdminCommand::IpoSchedule);
+          args.symbol(sym.symbol)
+              .u32(en::AdminTag::Time, 10 * 3600)
+              .i64(en::AdminTag::Price, sym.prior_close)
+              .u8(en::AdminTag::Qualifier, static_cast<std::uint8_t>('A'));
+          what = "IPO schedule";
+          const Nanos step = (h_.close_at - h_.open_at) / 16;
+          follow_.emplace_back(now + step / 4, admin_msg(en::AdminCommand::IpoQuote, sym.symbol));
+          sq::AdminMsg r = admin_msg(en::AdminCommand::IpoRelease, sym.symbol);
+          en::AdminArgsBuilder ra;
+          ra.symbol(sym.symbol).i64(en::AdminTag::Band, sym.prior_close / 10);
+          r.len = static_cast<std::uint32_t>(ra.bytes().size());
+          std::memcpy(r.args, ra.bytes().data(), ra.bytes().size());
+          follow_.emplace_back(now + 2 * step, r);
+          follow_.emplace_back(now + 3 * step, admin_msg(en::AdminCommand::Resume, sym.symbol));
+          break;
+        }
+      }
+    }
+    a.len = static_cast<std::uint32_t>(args.bytes().size());
+    std::memcpy(a.args, args.bytes().data(), args.bytes().size());
+    if (!x->shared().admin.try_push(a)) {
+      follow_.resize(follow0);
+      mwcb_levels_ = levels0;
+      mwcb_breached_ = breached0;
+      ipo_ = ipo0;
+      next_control_ = now + kMs;
+      return false;
+    }
+    if (a.command == static_cast<std::uint16_t>(en::AdminCommand::KillSwitch)) {
+      killed_[account] = now + static_cast<Nanos>((h_.close_at - h_.open_at) / 16);
+      SIM_PROBE("exchange_ha.kill_switch");
+    } else if (a.command == static_cast<std::uint16_t>(en::AdminCommand::KillReset)) {
+      killed_.erase(reset);
+    } else if (a.command == static_cast<std::uint16_t>(en::AdminCommand::MwcbBreach)) {
+      SIM_PROBE("exchange_ha.mwcb_breach");
+    } else if (a.command == static_cast<std::uint16_t>(en::AdminCommand::IpoSchedule)) {
+      SIM_PROBE("exchange_ha.ipo");
+    }
+    h_.log("operator: %s on %s", what, pn == 0 ? "xa" : "xb");
+    ++h_.controls;
+    std::stable_sort(follow_.begin(), follow_.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
+    next_control_ = now + static_cast<Nanos>((h_.close_at - h_.open_at) / 12) + static_cast<Nanos>(rng2_.below(5 * kMs));
+    return true;
+  }
+
+  // Rollover (06 §10): once both nodes confirm the previous day's end (primary and
+  // backup in one epoch, everything sequenced applied, durable and handed on, the same
+  // DayEnd), the operator stops both exchanged, initializes the witness for the new day
+  // (exchange-node.md: witnessd --init --primary 0 --inc0 1 --inc1 1) and starts the day
+  // on the same disks: new journal, output-log and snapshot directories and session
+  // names; the previous day's files stay.
+  bool rollover() {
+    if (h_.w->now() < kPrevDayBudget) return false;
+    ExchangeProc* x[2] = {h_.node_proc(0), h_.node_proc(1)};
+    if (x[0] == nullptr || x[1] == nullptr) return false;
+    for (std::size_t n = 0; n < 2; ++n) {
+      if (!x[n]->settled() || x[n]->shared().day_end_index.load() == 0) return false;
+    }
+    if (x[0]->shared().day_end_index.load() != x[1]->shared().day_end_index.load() ||
+        x[0]->shared().epoch.load() != x[1]->shared().epoch.load())
+      return false;
+    h_.rolled = true;
+    h_.log("operator: %u ended at %llu on both nodes: rollover to %u", kPrevDay,
+           static_cast<unsigned long long>(x[0]->shared().day_end_index.load()), kDay);
+    for (std::size_t n = 0; n < 2; ++n) {
+      Node& nd = h_.w->node(kX[n]);
+      nd.crash(CrashKind::Process, false);
+      nd.restart_after(kRolloverGap);
+    }
+    Node& wn = h_.w->node(kW);
+    wn.crash(CrashKind::Process, false);
+    h_.witness_reinit = true;
+    wn.restart_after(kRolloverGap - kMs);
+    SIM_PROBE("exchange_ha.rollover");
+    return true;
+  }
+
+  // A command with one symbol argument.
+  static sq::AdminMsg admin_msg(en::AdminCommand c, const Symbol8& sym) {
+    sq::AdminMsg m;
+    m.operator_id = 901;
+    en::AdminArgsBuilder b;
+    b.symbol(sym);
+    m.command = static_cast<std::uint16_t>(c);
+    m.len = static_cast<std::uint32_t>(b.bytes().size());
+    std::memcpy(m.args, b.bytes().data(), b.bytes().size());
+    return m;
+  }
+
+  // The next scheduled follow-up command (MWCB resumes, IPO steps) on the current primary.
+  bool follow_up() {
+    std::size_t pn = 0;
+    ExchangeProc* x = h_.primary(&pn);
+    if (x == nullptr || !x->shared().admin.try_push(follow_.front().second)) return false;
+    h_.log("operator: admin command %u on %s", static_cast<unsigned>(follow_.front().second.command),
+           pn == 0 ? "xa" : "xb");
+    ++h_.controls;
+    follow_.erase(follow_.begin());
+    return true;
+  }
+
   Node& node_;
   Harness& h_;
   Rng rng_;
+  Rng rng2_;  // risk and market control
   Nanos next_ = 0;
+  Nanos next_control_ = 0;
+  std::vector<std::pair<Nanos, sq::AdminMsg>> follow_;  // (when, command), in time order
+  bool mwcb_levels_ = false, mwcb_breached_ = false, ipo_ = false;
+  std::map<std::uint32_t, Nanos> killed_;  // account -> when to reset its kill switch
   Nanos next_check_ = 0;
   bool halted_ = false;
   bool holding_ = false;
@@ -2004,6 +2455,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   h.o_replay = w.oracles().activate(kOReplay, "the nodes' engine state hashes agree at every checkpoint");
   h.o_book = w.oracles().activate(kOBook, "each subscriber's book at End of Session equals the final journal's");
   h.o_internal = w.oracles().activate("O-HA-INTERNAL", "neither replica raises an ALARM its failure model excludes");
+  h.o_snapshot = w.oracles().activate("O-SNAPSHOT", "every snapshot a node holds at the end is one of the final journal");
   for (std::size_t n = 0; n < 2; ++n)
     h.nodes[n].durable_tap = std::make_unique<ex::DurableTap>(w, h.nodes[n].durable_at);
 
@@ -2019,6 +2471,30 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     s.prior_close = refs[i];
     d.symbols.push_back(s);
   }
+  h.traded = nsym;
+  // One day in four lists many more symbols, as a real day does (thousands), that no one
+  // trades: the day start then emits thousands of directory messages from one record
+  // (more than a small egress ring holds), GLIMPSE spins and snapshots grow, and so do the
+  // config records the replicas exchange. A stream of its own keeps the draws above.
+  if (Rng sym_cfg = w.stream(Stream::Workload, 0xE92); sym_cfg.below(4) == 0) {
+    const std::size_t extra = 50 + static_cast<std::size_t>(sym_cfg.below(3000));
+    for (std::size_t i = 0; i < extra; ++i) {
+      en::SymbolEntry s;
+      s.symbol = Symbol8(std::format("Z{:05}", i));
+      s.prior_close = static_cast<std::int64_t>(10'000 + 100 * sym_cfg.below(50'000));
+      d.symbols.push_back(s);
+    }
+  }
+  // One day in four is a deep-book day: every client rests hundreds to thousands of
+  // orders away from the market, so snapshots, GLIMPSE spins, cancel-on-disconnect, kill
+  // switches and mass cancels work on large books. A stream of its own.
+  if (Rng book_cfg = w.stream(Stream::Workload, 0xE93); book_cfg.below(4) == 0)
+    h.deep = 200 + static_cast<std::size_t>(book_cfg.below(2800));
+  // One day in three, sessions share accounts in pairs (sessions 1 and 2 on the first
+  // one's account, 3 and 4, ...): a kill switch, a risk limit or a cross-cancel permit
+  // then spans two sessions, which can sit on different gateways.
+  Rng acct_cfg = w.stream(Stream::Workload, 0xE94);
+  const bool shared_accounts = acct_cfg.below(3) == 0;
   const std::size_t nsess = 3 + wl.below(4);
   const char* firms[] = {"FRMA", "FRMB", "FRMC", "FRMD", "FRME", "FRMF"};
   h.clients.resize(nsess);
@@ -2026,15 +2502,24 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     en::AccountEntry a;
     a.account_id = static_cast<std::uint32_t>(100 * (i + 1));
     a.firms[0] = Mpid4(firms[i]);
-    d.accounts.push_back(a);
+    if (shared_accounts && i % 2 == 1) {
+      a = d.accounts.back();
+    } else {
+      d.accounts.push_back(a);
+    }
     const bool cod = wl.below(3) != 0;
     en::SessionEntry se{static_cast<std::uint32_t>(i + 1), a.account_id};
     se.flags =
         static_cast<std::uint8_t>((cod ? en::SessionEntry::kCancelOnDisconnect : 0) | en::SessionEntry::kMarketOrders);
+    if (shared_accounts) {  // self-match prevention at the firm or account level, or none
+      const char aiq[] = {'N', 'Y', 'D', 'O', 'W', '0', '1', '2', '4'};
+      se.default_aiq = aiq[acct_cfg.below(sizeof aiq)];
+    }
     d.sessions.push_back(se);
     HaLedger& L = h.clients[i];
     L.session = se.session_id;
     L.account = a.account_id;
+    L.idx = shared_accounts && i % 2 == 1 ? 1 : 0;
     L.user = "U0" + std::to_string(i + 1);
     L.pass = "PW" + std::to_string(i + 1);
     L.gateway = static_cast<std::uint8_t>(i % 2);
@@ -2049,11 +2534,15 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     spec.cancel_on_disconnect = cod;
     d.specs.push_back(spec);
   }
+  // One seed in four starts with the previous trading day (built below), so this one
+  // starts after its budget and the rollover's gap. A stream of its own.
+  const bool rollover = w.stream(Stream::Workload, 0xE96).below(4) == 0;
+  const Nanos shift = rollover ? kPrevDayBudget + kRolloverGap : 0;
   h.t0 = hms_ns(9, 24, 0);
-  h.lead = 2 * kMs + static_cast<Nanos>(wl.below(8 * kMs));
+  h.lead = 2 * kMs + static_cast<Nanos>(wl.below(8 * kMs)) + shift;
   const Nanos close_target =
-      std::max<Nanos>(50 * kMs, static_cast<Nanos>(o.plan.safety_ns) / 2 +
-                                    static_cast<Nanos>(wl.below(static_cast<std::uint64_t>(o.plan.safety_ns))));
+      shift + std::max<Nanos>(50 * kMs, static_cast<Nanos>(o.plan.safety_ns) / 2 +
+                                            static_cast<Nanos>(wl.below(static_cast<std::uint64_t>(o.plan.safety_ns))));
   h.speed = std::max<std::int64_t>(1, (hms_ns(16, 0, 0) - h.t0) / std::max<Nanos>(1, close_target - h.lead));
   // One seed in 16 runs production's 1 Hz clock ([day] noii_clock, on by default):
   // a timer record every second from 04:00:01, about 19,000 of them overdue when the day
@@ -2070,6 +2559,28 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   h.open_at = h.virtual_of(hms_ns(9, 30, 0));
   h.close_at = h.virtual_of(hms_ns(16, 0, 0));
   if (auto r = d.build(); !r) std::fprintf(stderr, "exchange_ha world: %s\n", r.error().c_str());
+  // The previous trading day (rollover seeds): no clients, its local midnight a day
+  // earlier, so its whole schedule is overdue and it runs straight to its end; then the
+  // operator rolls over to this one on the same disks. A stream of its own.
+  if (rollover) {
+    auto pd = std::make_unique<ExchangeDay>();
+    pd->date = kPrevDay;
+    pd->local_midnight = d.local_midnight - 24 * 3600 * kNsPerSec;
+    pd->mold_session = "LLE0000000";
+    pd->soup_session = "LLE0000000";
+    pd->symbols = d.symbols;
+    pd->accounts = d.accounts;
+    pd->sessions = d.sessions;
+    pd->risk = d.risk;
+    pd->specs = d.specs;
+    for (en::ScheduleEntry e : en::standard_schedule(false, false)) {
+      if (e.timer_id != 0) e.time_ns = h.compressed(e.time_ns);
+      pd->schedule.push_back(e);
+    }
+    if (auto r = pd->build(); !r) std::fprintf(stderr, "exchange_ha world: the previous day: %s\n", r.error().c_str());
+    h.prev_day = std::move(pd);
+    h.rolled = false;
+  }
 
   // ---- the data nodes and the witness ----
   Node& xa = w.add_node("xa", NodeOptions{true, true});
@@ -2087,8 +2598,14 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   NodeParams base;
   base.segment_bytes = jr::kSegmentHeaderBytes + jr::kBatchBytes * (8 + wl.below(24));
   // L2 from 1 MiB (production: 1 GiB) so it fills and pushes back; it takes a day's
-  // configuration at once (about 0.93 MB with the 1 Hz clock).
+  // configuration at once (about 0.93 MB with the 1 Hz clock; more with many symbols),
+  // or exchanged refuses to start, so it is doubled until it holds the configuration
+  // with room for the records' headers, DayStart and EpochStart.
+  std::size_t config_bytes = 0;
+  for (const auto& b : d.day->config()) config_bytes += b.bytes.size();
+  const std::size_t config_need = config_bytes + config_bytes / 32 + (std::size_t{64} << 10);
   base.l2_bytes = std::size_t{1} << (20 + wl.below(3));
+  while (base.l2_bytes < config_need) base.l2_bytes <<= 1;
   base.egress_bytes = std::size_t{1} << (17 + wl.below(5));
   // Snapshots every 50 to 1,550 records, 32 times as far apart on a day with the 1 Hz
   // clock (some 30 times the records; each snapshot carries the 0.9 MB schedule).
@@ -2128,11 +2645,13 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // exchange_ha_split: the replica on its own stage ([ha] repl_thread), the sequencer on
   // the seq stage, through a tee from 64 KiB (above the largest record; the sequencer
   // meets its back-pressure) to production's 16 MiB; from 2 MiB when the day's
-  // configuration (the 1 Hz clock's schedule) needs it at once. Drawn only here, so the
+  // configuration (the 1 Hz clock's schedule) needs it at once, and doubled as L2 is
+  // when it does not hold the configuration (many symbols). Drawn only here, so the
   // exchange_ha world's workload stream stays as it was.
   if (split) {
     base.repl_thread = true;
     base.tee_bytes = h.clock ? std::size_t{1} << (21 + wl.below(4)) : std::size_t{1} << (16 + wl.below(9));
+    while (base.tee_bytes < config_need) base.tee_bytes <<= 1;
   }
   // State-hash checkpoints (10 §3): node.cpp's 65,536 records is more than a simulated
   // day holds, so most seeds checkpoint every 16 to 1,024 records. A stream of its own
@@ -2143,15 +2662,22 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // does): it outlives a process crash, and the next image journals what it held beyond
   // L3 before recovering (restore_l2).
   const bool l2_files = xs_cfg.below(2) == 0;
+  // On half the seeds that take snapshots, snapshotd runs as production runs it, in a
+  // process of its own beside each data node (added below): it outlives exchanged's
+  // crashes and follows the journal through a rejoin's truncation. On the others
+  // exchanged hosts the follower, which starts after the rejoin. A stream of its own.
+  h.snapd_apart = base.follower && w.stream(Stream::Workload, 0xE95).below(2) == 0;
   for (std::size_t n = 0; n < 2; ++n) {
     NodeParams& p = h.params[n];
     p = base;
+    if (h.snapd_apart) p.follower = false;
     p.node_id = static_cast<std::uint16_t>(n);
     p.gw[0] = env::Endpoint{xs[n]->ip(), kGwPort[0]};
     p.gw[1] = env::Endpoint{xs[n]->ip(), kGwPort[1]};
     p.ha_bind = env::Endpoint{xs[n]->ip(), kHaPort};
     p.ha_peer = env::Endpoint{xs[1 - n]->ip(), kHaPort};
     if (l2_files) p.l2_file = std::make_shared<ex::L2File>();
+    if (l2_files && h.prev_day) h.prev_l2_file[n] = std::make_shared<ex::L2File>();
     xs[n]->set_boot([&h, n](Node& nd, BootReason) { nd.emplace_process<NodeProc>(nd, h, n); });
   }
   {
@@ -2185,6 +2711,12 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   ac.request_max_count = static_cast<std::uint16_t>(8 + wl.below(57));
   ac.snapshot_gap_messages = wl.below(3) == 0 ? 0 : 100 + wl.below(2000);
   ac.max_gap_age = wl.below(2) == 0 ? 0 : log_uniform(wl, 50 * kMs, 500 * kMs);
+  // A many-symbol day's feed runs to a million messages and more: a subscriber whose
+  // snapshot lags the stream by most of the day must not be left to re-request it all
+  // (some 70 s at these rates, past the liveness bound), so a disabled gap threshold
+  // becomes production's default there.
+  if (h.traded != d.symbols.size() && ac.snapshot_gap_messages == 0)
+    ac.snapshot_gap_messages = mo::LineArbiterConfig{}.snapshot_gap_messages;
   const std::size_t nsub = 1 + wl.below(2);
   h.subs.resize(nsub);
   for (std::size_t s = 0; s < nsub; ++s) h.comparators.push_back(std::make_unique<mo::LineComparator>(std::size_t{1} << 16));
@@ -2193,10 +2725,16 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   sb::ClientConfig gl;
   gl.username = Alpha<sb::kUsernameLen>("GLIMPS");
   gl.password = Alpha<sb::kPasswordLen>(kGlimpsePassword);
+  Rng sub_cfg = w.stream(Stream::Workload, 0xE91);  // late joiners (a stream of their own)
   for (std::size_t s = 0; s < nsub; ++s) {
     Node& ns = w.add_node("s" + std::to_string(s + 1), NodeOptions{false, true});
-    ns.set_boot([&h, s, fc, rr, glimpse, gl](Node& nd, BootReason) {
-      nd.emplace_process<HaSubProc>(nd, h, s, fc, rr, glimpse, gl);
+    // One subscriber in three joins late, during trading: snapshot plus feed (09 §6).
+    const Nanos start_at = sub_cfg.below(3) == 0
+                               ? h.open_at + static_cast<Nanos>(sub_cfg.below(
+                                                 static_cast<std::uint64_t>(std::max<Nanos>(1, h.close_at - h.open_at))))
+                               : 0;
+    ns.set_boot([&h, s, fc, rr, glimpse, gl, start_at](Node& nd, BootReason) {
+      nd.emplace_process<HaSubProc>(nd, h, s, fc, rr, glimpse, gl, start_at);
     });
   }
   Node& op = w.add_node("op", NodeOptions{false, false});
@@ -2206,20 +2744,33 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   adv.set_boot([&h, client_nodes, &op, crashes](Node& nd, BootReason) {
     nd.emplace_process<AdversaryProc>(nd, h, client_nodes, &op, crashes);
   });
+  if (h.snapd_apart) {
+    for (std::size_t n = 0; n < 2; ++n) {
+      Node& sd = w.add_node(n == 0 ? "xa-snapd" : "xb-snapd", NodeOptions{true, true});
+      xs[n]->add_cohost(sd);
+      Node* host = xs[n];
+      sd.set_boot([&h, n, host](Node& nd, BootReason) {
+        nd.emplace_process<ex::SnapshotdProc>(nd, *host, h.day, h.params[n], snapd_hooks(h, n));
+      });
+    }
+  }
 
   h.log("day: speed %lld open at %.3f ms close at %.3f ms, %zu sessions, %zu symbols; t_d %.1f ms t_ack %.1f ms",
         static_cast<long long>(h.speed), static_cast<double>(h.open_at) / 1e6, static_cast<double>(h.close_at) / 1e6,
         nsess, nsym, static_cast<double>(t_d) / 1e6, static_cast<double>(t_ack) / 1e6);
   // Failures stay inside the failure model: crashes and I/O errors of a data node only
   // when the pair survives them, of W only while the pair is primary and backup.
+  // The previous day is not under test: the pair and W are not crashed before the
+  // rollover, and the data nodes get no I/O errors (their disk gates below).
   w.injector().set_crash_guard([&h](NodeId n) {
+    if (!h.rolled && (n == kX[0] || n == kX[1] || n == kW)) return false;
     const bool ok = n == kX[0] || n == kX[1] ? h.may_fail(n) : n == kW ? h.pair_up() : true;
     if (!ok) ++h.crashes_gated;
     return ok;
   });
   for (std::size_t n = 0; n < 2; ++n)
-    xs[n]->disk().set_fault_gate([&h, n] { return h.may_fail(n); }, [&h, n] { h.failing[n] = true; });
-  wn.disk().set_fault_gate([&h] { return h.pair_up(); });
+    xs[n]->disk().set_fault_gate([&h, n] { return h.rolled && h.may_fail(n); }, [&h, n] { h.failing[n] = true; });
+  wn.disk().set_fault_gate([&h] { return h.rolled && h.pair_up(); });
   for (std::size_t i = 0; i < w.node_count(); ++i) w.node(static_cast<NodeId>(i)).boot();
   w.oracles().add_final_check(h.o_stream, [&h] { h.final_checks(); });
 
@@ -2351,6 +2902,10 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                " snapshots=" + std::to_string(h.snapshots_written) +
                " dropped_at_close=" + std::to_string(h.dropped_at_close) +
                " operator_restarts=" + std::to_string(h.operator_restarts) +
+               " controls=" + std::to_string(h.controls) + " symbols=" + std::to_string(h.day.symbols.size()) +
+               " deep=" + std::to_string(h.deep) + " bulk_orders=" + std::to_string(h.bulk_orders) +
+               " bursts=" + std::to_string(h.bursts) + " snapd_apart=" + std::to_string(h.snapd_apart ? 1 : 0) +
+               " rollover=" + std::to_string(h.prev_day ? 1 : 0) +
                " gated=" + std::to_string(h.crashes_gated) + " hash_every=" +
                std::to_string(h.params[0].hash_interval) + " hash_checks=" + std::to_string(hash_checks) +
                " alarms=" + std::to_string(h.alarms);

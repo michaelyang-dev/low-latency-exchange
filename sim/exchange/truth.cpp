@@ -10,6 +10,8 @@
 #include "journal/segment.h"
 #include "proto/ouch50/ouch50.h"
 #include "sim/exchange/sim_storage.h"
+#include "snapshot/format.h"
+#include "snapshot/reader.h"
 
 namespace lle::sim::exch {
 
@@ -172,6 +174,7 @@ Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
       sink->idx = r.index();
       sink->ts = r.ts_ns();
       eng->apply(en::to_input(r), *sink);
+      if (r.type() == jr::RecordType::SnapshotMark) t->mark_hash[r.index()] = eng->state_hash();
       return true;
     }
   };
@@ -186,6 +189,24 @@ Truth regenerate(Node& n, const std::string& journal_prefix, std::uint32_t date,
   t.state_hash = eng.state_hash();
   t.ok = true;
   return t;
+}
+
+std::string check_snapshots(Node& n, const std::string& dir, const Truth& t) {
+  SimSnapStorage st(n);
+  for (const std::string& name : st.list(dir)) {
+    const auto idx = snap::parse_snapshot_file_name(name);
+    if (!idx || *idx > t.recs.size()) continue;
+    const std::string path = dir + "/" + name;
+    const auto loaded = snap::LoadedSnapshot::open(st, path);
+    if (!loaded || loaded->meta().index != *idx) continue;
+    const auto it = t.mark_hash.find(*idx);
+    if (it == t.mark_hash.end())
+      return n.name() + ": " + path + ": the final journal has no SnapshotMark at " + std::to_string(*idx);
+    if (loaded->meta().state_hash != it->second)
+      return n.name() + ": " + path + ": the snapshot's state differs from the final journal's at " +
+             std::to_string(*idx);
+  }
+  return {};
 }
 
 std::vector<std::uint32_t> canonical_crcs(Node& n, const std::string& journal_prefix, std::uint32_t date) {

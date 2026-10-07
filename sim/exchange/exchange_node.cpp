@@ -593,6 +593,46 @@ bool ExchangeProc::follow() {
   return true;
 }
 
+SnapshotdProc::SnapshotdProc(Node& self, Node& host, const ExchangeDay& day, const NodeParams& p, NodeHooks hooks)
+    : self_(self), host_(host), date_(day.date), p_(p), hooks_(std::move(hooks)) {
+  st_ = std::make_unique<SimSnapStorage>(host_);
+  start();
+  self_.add_stage(stage_, "snapshotd");
+}
+
+SnapshotdProc::~SnapshotdProc() = default;
+
+void SnapshotdProc::start() {
+  snapd::SnapshotterOptions so;
+  so.journal = p_.journal_prefix(date_);
+  so.snapshots = p_.snapshots_dir(date_);
+  so.day = date_;
+  so.build_id = ex::kBuildId;
+  so.follow = true;
+  so.keep = p_.follower_keep;
+  SimSnapIo io;
+  io.st = st_.get();
+  io.node = &host_;
+  io.out_fn = hooks_.log;
+  io.written_fn = hooks_.snapshot_written;
+  snap_ = std::make_unique<SimSnapshotter>(so, std::move(io));
+  failed_ = !snap_->start(~std::uint64_t{0});
+}
+
+bool SnapshotdProc::poll() {
+  const Nanos now = self_.clock().now_mono();
+  if (now < next_) return false;
+  next_ = now + p_.follower_poll;
+  if (failed_) {
+    // snapshotd exited (exit 1: a snapshot could not be written or loaded); its
+    // supervisor starts it again.
+    start();
+    return true;
+  }
+  if (!snap_->pass()) failed_ = true;
+  return true;
+}
+
 bool ExchangeProc::settled() const noexcept {
   if (!started_) return false;
   const std::uint64_t idx = sh_->sequenced.load();
