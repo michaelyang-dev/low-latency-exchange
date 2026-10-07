@@ -925,3 +925,46 @@ bugs:
       runs exchanged and fails without the fix (the output log holds the earlier start's
       messages and the new ones after them; a paired node becomes ready without its
       incarnation file).
+  - id: DST-020
+    title: "the gateway dropped session events: while its queue was full every reconnect still queued a Login, and a congested day's reconnects overflowed the backlog"
+    component: gateway
+    targets: [T05, T24]
+    category: production
+    found_utc: "2026-10-07T17:22:00Z"
+    campaign_id: 20261007T162059Z-839df0c5-44aa32c6f8652a58
+    sha_found: 839df0c543888dbe9341d2730a986ce11aa09552
+    seed: "0x44aa32c6f86534f0"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x93f341a28457fc48"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-SEQ
+    signature: "O-SEQ:29140381:0x5cf7b7d8f9beb968"
+    root_cause: >-
+      The gateway (src/gateway/gateway.h) queues a connection's session events (Login or
+      mirror attach, Logout, Disconnect) in the sequencer queue behind its orders, and
+      an event the full queue refuses waits in a backlog (session_event_backlog, 1,024).
+      While events waited, connections that were not logged in were still read, so
+      every reconnect logged in and queued its Login, and its drop a Disconnect: the
+      backlog grew without bound while the queue stayed full, and the events past its
+      end were dropped (events_dropped, which "must stay 0"). In the seed (a deep-book
+      day with two dozen sessions, whose clients drop and re-establish connections, the
+      queue full of bulk orders) xa's gateway 1 dropped 105 session events (O-SEQ). A
+      lost Disconnect leaves a cancel-on-disconnect session's orders resting; a lost
+      Login breaks the order of a session's events. Fix: a connection that is not logged
+      in waits, its input staged, while session events wait for the queue, so the
+      backlog grows by at most one event per connection and holds twice the connection
+      slots; after DayEnd, when nothing more is journaled, the waiting events are
+      dropped so that logins go on (without that the fix itself deadlocked a congested
+      day's last logins). The fix tag (dst/DST-020/fix) is the fix applied to the found
+      tree.
+    fix_sha: 6a1d2d6ed9a5a6a52d484fb254712ddca0ddad22
+    regression_test: tests/sim_regressions/DST-020_session_event_backlog
+    counted: true
+    count_reason: >-
+      production gateway code, found by exsim in a 6,000-seed exchange_ha campaign
+      (with two O-LINE/O-STREAM failures of DST-019) on a day combining two simulator
+      dimensions (many sessions, a deep book); reproduces from seed at the found tree and
+      passes with the fix applied to it; the mechanism was not predicted. Fixed with a
+      regression test that fails without the fix (165 events lost) and checks that a
+      login waiting at the day's end still gets End of Session.
