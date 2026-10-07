@@ -878,3 +878,50 @@ bugs:
       on a later truncation showing as a divergence, and the segment-switch case was
       identified from the seed's trace. Fixed with a seed-independent regression test
       that fails without the fix (41 records of the new history delivered).
+  - id: DST-019
+    title: "a node starting the day afresh numbered its output from the output log an earlier start had left, after serving without its incarnation file"
+    component: exchanged
+    targets: [T05, T24]
+    category: production
+    found_utc: "2026-10-07T06:39:00Z"
+    campaign_id: 20261007T045754Z-53ecbbcf-263470690ec264ac
+    sha_found: 4f1df7dcd23bc531880b12cd090bd6955ec8a937
+    seed: "0x263470690ec294ea"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x6e56f9e4e9328c0c"
+    platform: linux-aarch64
+    build: sim-RelWithDebInfo
+    oracle: O-LINE
+    signature: "O-LINE:417370:0x14871ab2af0dd206"
+    root_cause: >-
+      A node whose journal recovered empty started the day afresh (apps/exchanged/node.cpp)
+      but took its MoldUDP64 and SoupBinTCP positions from the day's output log, which an
+      earlier start of the day could have left, and a paired node ignored a failure to
+      write its incarnation file, the file that makes a restart rejoin instead of starting
+      the day again (DST-006). In the seed (a rollover seed) xb started the new day, could
+      not write its incarnation file (a disk error), served anyway (its md sent the day
+      start's messages 1..6 on line B) and stopped. Its restart found the day start
+      without an EpochStart and refused; the runbook (exchange-node.md §8) moved the
+      journal's segments aside, and with no incarnation file to keep xb started the day
+      afresh. Its output log still held messages 1..6: their count set the positions, the
+      new day start's messages went out as 7..12, and line B carried other bytes than line
+      A for sequence 7 (O-LINE). Fix: a fresh day start resets the day's output log, and a
+      paired node writes its incarnation file before it sequences or serves anything and
+      does not start if it cannot; the simulator's node does the same. The fix tag
+      (dst/DST-019/fix) is the fix applied to the found tree: later trees draw this seed
+      differently (a lazy-reader day), so the seed is checked against the fix in the world
+      it failed in. Seen again (the same mechanism, passing with the fix) in a 6,000-seed
+      campaign at 839df0c: 0x44aa32c6f8653bb6 (O-LINE) and 0x44aa32c6f8652a86 (O-STREAM:
+      the SoupBinTCP side, a session's messages numbered after the earlier start's).
+    fix_sha: 16f56ece621998fa7e1f315eeb3d8c722492654e
+    regression_test: tests/sim_regressions/DST-019_fresh_day_stale_outlog
+    counted: true
+    count_reason: >-
+      production code (exchanged's day start), found by exsim in a 15,000-seed
+      exchange_ha campaign (1 failure) on the VM; reproduces from seed at the found tree
+      and passes with the fix applied to it; the mechanism was not predicted: the seed's
+      line packets (the day start's messages resent under sequence 7) and an instrumented
+      run (the incarnation write failed) identified it. Fixed with a regression test that
+      runs exchanged and fails without the fix (the output log holds the earlier start's
+      messages and the new ones after them; a paired node becomes ready without its
+      incarnation file).
