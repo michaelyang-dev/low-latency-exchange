@@ -246,7 +246,10 @@ def verify_one(ctx: Ctx, bug: dict) -> dict:
                 ctx.log.append(f"$ cp -R {ctx.repo / REGRESSION_DIR} {dst}")
                 if not ctx.dry_run:
                     shutil.copytree(ctx.repo / REGRESSION_DIR, dst, dirs_exist_ok=True)
-                ok, err = configure_and_build(ctx, wt, wt / "build-regress", [], tests=True)
+                # Only this bug's regression targets: newer tests in the copied directory
+                # may use APIs the found tree does not have (each directory's target is
+                # named after it).
+                ok, err = configure_and_build(ctx, wt, wt / "build-regress", [p.name for p in mine], tests=True)
                 if not ok:
                     rec["steps"]["regression_at_found"] = "unbuildable"
                     rec["errors"].append(f"regression: unbuildable at sha_found ({err[:200]})")
