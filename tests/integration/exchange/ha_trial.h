@@ -712,20 +712,24 @@ class Prober {
       const auto now = std::chrono::steady_clock::now();
       if (now >= next) {
         if (c_.logged_in()) {
+          // A probe the client could not queue (the node stopped reading) is not sent:
+          // the next tick tries again with the same UserRefNum.
           if (resting_ == 0) {
             engine::EnterArgs e;
-            e.urn = ++urn_;
+            e.urn = urn_ + 1;
             e.side = ouch50::Side::Buy;
             e.qty = 100;
             e.symbol = "AAPL";
             e.price = kPrice;
-            c_.send(engine::enter_msg(e));
-            resting_ = urn_;
-          } else {
-            c_.send(engine::cancel_msg(resting_, 0));
+            if (c_.send(engine::enter_msg(e))) {
+              urn_ = e.urn;
+              resting_ = urn_;
+              ++sent_;
+            }
+          } else if (c_.send(engine::cancel_msg(resting_, 0))) {
             resting_ = 0;
+            ++sent_;
           }
-          ++sent_;
         }
         if (now - next > step) ++late_;
         next = (now - next > step ? now : next) + step;
@@ -1388,6 +1392,7 @@ class Trial {
       r_.num["probes_sent"] = static_cast<std::int64_t>(prober_.sent());
       r_.num["probes_late"] = static_cast<std::int64_t>(prober_.late());
       r_.num["probes_tx_waits"] = static_cast<std::int64_t>(prober_.client().tx_waits());
+      r_.num["probes_tx_refused"] = static_cast<std::int64_t>(prober_.client().tx_refused());
       r_.num["probes_accepted"] = static_cast<std::int64_t>(ld.accepted.size());
     }
 

@@ -431,30 +431,45 @@ class OuchClient {
     return 'X';
   }
 
-  // Queues `msg`. While the session's transmit buffer is full (the node reads slower than
-  // the test writes: a loaded host, a takeover) it polls, which flushes, until the message
-  // fits; a message dropped here would look like one the exchange never answered. A
-  // connection that closes meanwhile loses it, as it loses whatever it had not written.
-  void send(std::span<const std::byte> msg) {
-    ASSERT_TRUE(sess_ && logged_in_) << user_ << ": not logged in";
-    const auto end = std::chrono::steady_clock::now() + 30s;
+  // Queues `msg`; false if it could not. While the session's transmit buffer is full and
+  // the node keeps reading (a loaded host, a takeover) it polls, which flushes, until the
+  // message fits: a message dropped there looked like one the exchange never answered. A
+  // node that reads nothing for 3 s (a stopped process) gets no more: the send gives up,
+  // and later ones give up at once until the node reads again, as a client that finds
+  // its connection blocked. A connection that closes loses the message, as it loses
+  // whatever it had not written.
+  bool send(std::span<const std::byte> msg) {
+    if (!sess_ || !logged_in_) {
+      ADD_FAILURE() << user_ << ": not logged in";
+      return false;
+    }
+    auto progress_at = std::chrono::steady_clock::now();
+    std::uint64_t written = tx_written_;
     for (;;) {
       const soup::Actions& a = sess_->send_unsequenced(msg, mono());
       const bool queued = a.accepted;
       handle(a);
-      if (queued || fd_ < 0 || !sess_ || sess_->state() != soup::ClientSession::State::Active ||
-          msg.size() > soup::kMaxPayload)
-        return;
-      if (std::chrono::steady_clock::now() >= end) {
-        ADD_FAILURE() << user_ << ": the transmit buffer stayed full for 30 s";
-        return;
+      if (queued) return true;
+      if (fd_ < 0 || !sess_ || sess_->state() != soup::ClientSession::State::Active || msg.size() > soup::kMaxPayload)
+        return false;
+      const auto now = std::chrono::steady_clock::now();
+      if (tx_written_ != written) {
+        written = tx_written_;
+        progress_at = now;
+      }
+      if (tx_blocked_ || now - progress_at > 3s) {
+        tx_blocked_ = true;
+        ++tx_refused_;
+        return false;
       }
       ++tx_waits_;
       poll(1);
     }
   }
-  // Sends that waited for room in the transmit buffer.
+  // Sends that waited for room in the transmit buffer, and sends given up (a node that
+  // stopped reading).
   [[nodiscard]] std::uint64_t tx_waits() const noexcept { return tx_waits_; }
+  [[nodiscard]] std::uint64_t tx_refused() const noexcept { return tx_refused_; }
   void logout() {
     if (sess_ && fd_ >= 0) handle(sess_->logout(mono()));
     poll(20);
@@ -552,7 +567,11 @@ class OuchClient {
     }
     if (fd_ >= 0 && !a.write.empty()) {
       const ssize_t n = ::send(fd_, a.write.data(), a.write.size(), 0);
-      if (n > 0) sess_->consume_tx(static_cast<std::size_t>(n));
+      if (n > 0) {
+        sess_->consume_tx(static_cast<std::size_t>(n));
+        tx_written_ += static_cast<std::uint64_t>(n);
+        tx_blocked_ = false;
+      }
     }
     if (a.close) drop();
   }
@@ -571,6 +590,9 @@ class OuchClient {
   std::uint64_t duplicates_ = 0;
   std::uint64_t gaps_ = 0;
   std::uint64_t tx_waits_ = 0;
+  std::uint64_t tx_refused_ = 0;
+  std::uint64_t tx_written_ = 0;  // bytes the socket took
+  bool tx_blocked_ = false;       // a send gave up and the socket has taken nothing since
 };
 
 // ---- MoldUDP64 subscriber ------------------------------------------------------------------
