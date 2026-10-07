@@ -790,3 +790,45 @@ bugs:
       a 1 MiB and a 2 MiB L2 ring through exchanged's sequencer ring adapter with
       nothing consuming, then reserves an EpochStart as the replication stage does: at
       the found tree there is no room in either; at the fix there is.
+  - id: DST-017
+    title: "snapshotd resumed from a snapshot whose record a rejoin had since replaced, and wrote every later snapshot from the old history's state"
+    component: snapshotd
+    targets: [T05, T24]
+    category: production
+    found_utc: "2026-10-07T04:30:00Z"
+    campaign_id: 20261007T015425Z-23c128f3-9fbdfaf3657c5af
+    sha_found: 8b5afc812016cb2b789e363ef43e15a9dd73eda4
+    seed: "0x09fbdfaf3657e558"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x582f4dc2971f5e88"
+    platform: linux-aarch64
+    build: sim-RelWithDebInfo
+    oracle: O-SNAPSHOT
+    signature: "O-SNAPSHOT:8695122:0x54add19254e5dcb5"
+    root_cause: >-
+      A snapshot at P describes the history up to P, and a rejoining node truncates its
+      journal and writes its partner's records at the same indices. snapshotd
+      (apps/snapshotd/snapshotter.h), a process of its own, resumed from a snapshot by
+      seeking its follow cursor to P + 1 without the content crc of record P, so the
+      cursor could not tell that record P had been replaced. In the seed (snapshotd as a
+      process of its own, the only O-SNAPSHOT failure in 10,000 exchange_ha seeds at the
+      found tree) xa's snapshotd wrote a snapshot at 259 from xa's own records, failed
+      on a disk error and resumed from it; exchanged then rejoined, truncated the journal
+      to 108 (removing that snapshot file) and caught up from xb. snapshotd applied xb's
+      records on top of xa's state from 260 on, and every snapshot from 517 held a state
+      no replay of the final journal reaches (O-SNAPSHOT at 23995). Recovery or a
+      restarted snapshotd starting from such a snapshot would have taken that state.
+      Fix: the sidecar names record P by its content crc (LLEOUTD2). snapshotd removes a
+      snapshot whose record P the journal no longer holds, and when it resumes from a
+      snapshot the cursor checks record P, so a later truncation shows as a divergence.
+    fix_sha: 289f26ea42b6b493535f930022330d60f9ff5521
+    regression_test: tests/sim_regressions/DST-017_snapshotd_resume_record
+    counted: false
+    count_reason: >-
+      Not counted: the mechanism (resuming from a snapshot without record P's crc,
+      against a journal a rejoin rewrites) was predicted by reading snapshotter.h and
+      the follow cursor while snapshotd as a process of its own and the O-SNAPSHOT
+      oracle were added, before any campaign ran with them. exsim then reproduced it.
+      As with DST-014, rule 2 asks for a bug found by exsim, and here exsim confirmed a
+      bug that code reading had already found. The fix, the regression test, the
+      process model and the oracle are kept.
