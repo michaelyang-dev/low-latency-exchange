@@ -159,7 +159,8 @@ def configure_and_build(ctx: Ctx, src: Path, build: Path, targets: list[str], te
     cfg = [
         "cmake", "-S", str(src), "-B", str(build), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-DLLE_SIM=ON",
         f"-DLLE_BUILD_TESTS={'ON' if tests else 'OFF'}", "-DLLE_BUILD_BENCH=OFF", "-DLLE_BUILD_FUZZ=OFF",
-        "-DLLE_BUILD_APPS=OFF",
+        # A regression test may run the binaries (DST-019 runs exchanged); exsim alone needs none.
+        f"-DLLE_BUILD_APPS={'ON' if tests else 'OFF'}",
     ]
     if ctx.only:
         cfg.append(f"-DLLE_ONLY={ctx.only}")
@@ -173,6 +174,11 @@ def configure_and_build(ctx: Ctx, src: Path, build: Path, targets: list[str], te
     if r.returncode != 0:
         return False, f"build failed: {(r.stderr or r.stdout)[-2000:]}"
     return True, ""
+
+
+def tests_ran(r: subprocess.CompletedProcess) -> bool:
+    """ctest matched a test: it reports none on stderr and still exits 0."""
+    return "No tests were found" not in (r.stdout or "") + (r.stderr or "")
 
 
 def parse_exsim(stdout: str) -> dict:
@@ -246,7 +252,7 @@ def verify_one(ctx: Ctx, bug: dict) -> dict:
                     rec["errors"].append(f"regression: unbuildable at sha_found ({err[:200]})")
                 else:
                     r = sh(ctx, ["ctest", "--test-dir", str(wt / "build-regress"), "-R", f"^{bid}_"], wt, mounts=(wt,))
-                    ran = "No tests were found" not in r.stdout
+                    ran = tests_ran(r)
                     rec["steps"]["regression_at_found"] = "fails" if r.returncode != 0 else "passes"
                     if not ctx.dry_run and (r.returncode == 0 or not ran):
                         rec["errors"].append("regression: test does not fail at sha_found" if ran else
@@ -283,9 +289,11 @@ def verify_one(ctx: Ctx, bug: dict) -> dict:
             rec["errors"].append(f"regression: HEAD {err[:200]}")
         else:
             r = sh(ctx, ["ctest", "--test-dir", str(build), "-R", f"^{bid}_"], ctx.repo)
-            rec["steps"]["regression_at_head"] = "passes" if r.returncode == 0 else "fails"
-            if not ctx.dry_run and r.returncode != 0:
-                rec["errors"].append("regression: test fails at HEAD")
+            ran = tests_ran(r)
+            rec["steps"]["regression_at_head"] = ("passes" if r.returncode == 0 else "fails") if ran else "not registered"
+            if not ctx.dry_run and (r.returncode != 0 or not ran):
+                rec["errors"].append("regression: test fails at HEAD" if ran else
+                                     "regression: test not registered with ctest at HEAD")
     rec["verified"] = not rec["errors"]
     return rec
 
