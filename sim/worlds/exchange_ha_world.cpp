@@ -178,6 +178,7 @@ struct HaLedger {
   std::string user, pass;
   std::uint8_t gateway = 0;
   bool cod = false;
+  bool light = false;  // one of a many-session day's extra sessions: few orders, no deep book
   sb::SessionId soup_session;
   std::vector<std::vector<std::byte>> msgs;  // msgs[k-1]: SoupBinTCP message k (first copy, either instance)
   std::vector<Nanos> rx_at;                  // its first receipt
@@ -1237,8 +1238,12 @@ class HaClientProc final : public Process {
     send_mean_ = static_cast<Nanos>(100 * kUs + rng_.below(1900 * kUs));
     disrupt_mean_ = static_cast<Nanos>(20 * kMs + rng_.below(200 * kMs));
     if (h.clients[c].idx != 0) tags_.set_user_ref_idx(h.clients[c].idx);
-    bulk_left_ = h.deep;
-    if (h.deep != 0 && rng3_.below(2) == 0)
+    if (h.clients[c].light) {
+      send_mean_ *= 20;
+      disrupt_mean_ *= 4;
+    }
+    bulk_left_ = h.clients[c].light ? 0 : h.deep;
+    if (h.deep != 0 && !h.clients[c].light && rng3_.below(2) == 0)
       rebulk_at_ = h.open_at + static_cast<Nanos>(rng3_.below(
                                    static_cast<std::uint64_t>(std::max<Nanos>(1, h.close_at - h.open_at))));
     n.add_stage(stage_, "client");
@@ -2530,19 +2535,27 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // then spans two sessions, which can sit on different gateways.
   Rng acct_cfg = w.stream(Stream::Workload, 0xE94);
   const bool shared_accounts = acct_cfg.below(3) == 0;
-  const std::size_t nsess = 3 + wl.below(4);
+  const std::size_t nbase = 3 + wl.below(4);
+  // One day in eight adds 10 to 30 light sessions, as a real gateway carries dozens: the
+  // gateways' session tables and connection slots fill, and a host crash ends dozens of
+  // sessions at once (cancel-on-disconnect, InstanceDown). A stream of its own, which
+  // also draws the extra sessions' settings.
+  Rng sess_cfg = w.stream(Stream::Workload, 0xE97);
+  const std::size_t nsess = nbase + (sess_cfg.below(8) == 0 ? 10 + static_cast<std::size_t>(sess_cfg.below(21)) : 0);
   const char* firms[] = {"FRMA", "FRMB", "FRMC", "FRMD", "FRME", "FRMF"};
   h.clients.resize(nsess);
   for (std::size_t i = 0; i < nsess; ++i) {
+    const bool extra = i >= nbase;
+    Rng& draw = extra ? sess_cfg : wl;
     en::AccountEntry a;
     a.account_id = static_cast<std::uint32_t>(100 * (i + 1));
-    a.firms[0] = Mpid4(firms[i]);
+    a.firms[0] = i < std::size(firms) ? Mpid4(firms[i]) : Mpid4(std::format("F{:03}", i));
     if (shared_accounts && i % 2 == 1) {
       a = d.accounts.back();
     } else {
       d.accounts.push_back(a);
     }
-    const bool cod = wl.below(3) != 0;
+    const bool cod = draw.below(3) != 0;
     en::SessionEntry se{static_cast<std::uint32_t>(i + 1), a.account_id};
     se.flags =
         static_cast<std::uint8_t>((cod ? en::SessionEntry::kCancelOnDisconnect : 0) | en::SessionEntry::kMarketOrders);
@@ -2552,6 +2565,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     }
     d.sessions.push_back(se);
     HaLedger& L = h.clients[i];
+    L.light = extra;
     L.session = se.session_id;
     L.account = a.account_id;
     L.idx = shared_accounts && i % 2 == 1 ? 1 : 0;
@@ -2563,7 +2577,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     spec.session_id = se.session_id;
     spec.account = a.account_id;
     spec.username = L.user;
-    const std::uint8_t salt[4] = {static_cast<std::uint8_t>(wl.below(256)), static_cast<std::uint8_t>(i), 0x5A, 0xA5};
+    const std::uint8_t salt[4] = {static_cast<std::uint8_t>(draw.below(256)), static_cast<std::uint8_t>(i), 0x5A, 0xA5};
     spec.credential = gw::Credential::make(L.pass, salt);
     spec.gateway = L.gateway;
     spec.cancel_on_disconnect = cod;
@@ -2752,7 +2766,11 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // becomes production's default there.
   if (h.traded != d.symbols.size() && ac.snapshot_gap_messages == 0)
     ac.snapshot_gap_messages = mo::LineArbiterConfig{}.snapshot_gap_messages;
-  const std::size_t nsub = 1 + wl.below(2);
+  const std::size_t nsub_base = 1 + wl.below(2);
+  // One day in six adds 2 to 4 subscribers, most of them late joiners: several GLIMPSE
+  // spins and re-request streams at once. A stream of its own.
+  Rng subs_cfg = w.stream(Stream::Workload, 0xE98);
+  const std::size_t nsub = nsub_base + (subs_cfg.below(6) == 0 ? 2 + static_cast<std::size_t>(subs_cfg.below(3)) : 0);
   h.subs.resize(nsub);
   for (std::size_t s = 0; s < nsub; ++s) h.comparators.push_back(std::make_unique<mo::LineComparator>(std::size_t{1} << 16));
   const std::array<env::Endpoint, 2> rr{env::Endpoint{xa.ip(), kRerequestPort}, env::Endpoint{xb.ip(), kRerequestPort}};
@@ -2763,11 +2781,13 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   Rng sub_cfg = w.stream(Stream::Workload, 0xE91);  // late joiners (a stream of their own)
   for (std::size_t s = 0; s < nsub; ++s) {
     Node& ns = w.add_node("s" + std::to_string(s + 1), NodeOptions{false, true});
-    // One subscriber in three joins late, during trading: snapshot plus feed (09 §6).
-    const Nanos start_at = sub_cfg.below(3) == 0
-                               ? h.open_at + static_cast<Nanos>(sub_cfg.below(
-                                                 static_cast<std::uint64_t>(std::max<Nanos>(1, h.close_at - h.open_at))))
-                               : 0;
+    // One subscriber in three joins late, during trading: snapshot plus feed (09 §6); of
+    // the extra ones, two in three.
+    Rng& draw = s < nsub_base ? sub_cfg : subs_cfg;
+    const bool late = s < nsub_base ? draw.below(3) == 0 : draw.below(3) != 0;
+    const Nanos start_at = late ? h.open_at + static_cast<Nanos>(draw.below(
+                                                  static_cast<std::uint64_t>(std::max<Nanos>(1, h.close_at - h.open_at))))
+                                : 0;
     ns.set_boot([&h, s, fc, rr, glimpse, gl, start_at](Node& nd, BootReason) {
       nd.emplace_process<HaSubProc>(nd, h, s, fc, rr, glimpse, gl, start_at);
     });
