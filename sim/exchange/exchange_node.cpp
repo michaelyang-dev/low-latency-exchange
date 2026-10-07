@@ -223,6 +223,27 @@ void ExchangeProc::recover_or_start() {
     begin_rejoin();
     return;
   }
+  // Node::start: a fresh day start resets the day's output log and, paired, writes the
+  // incarnation file first or does not start (DST-019, DST-006).
+  if (recovered_index_ == 0) {
+    if (const std::uint64_t stale = ex::outlog_messages(ex::outlog_positions(*outlog_)); stale != 0 && hooks_.log)
+      hooks_.log(std::format("exchanged: day start: the output log holds {} messages of an earlier start of the day "
+                             "(its journal is gone): reset",
+                             stale));
+    SimRecoveryIo io;
+    io.st = snaps_.get();
+    io.node = &node_;
+    io.note_fn = hooks_.log;
+    if (auto r = ex::basic_reset_outlog(io, *outlog_, ex::RecoveryLayout{p_.outlog_root(), d_.date, d_.session_ids()});
+        !r) {
+      fail("day start: " + r.error());
+      return;
+    }
+    if (p_.paired && !rejoin_io_.write_incarnation(p_.journal_prefix(d_.date) + "incarnation", 1)) {
+      fail("day start: cannot write " + p_.journal_prefix(d_.date) + "incarnation");
+      return;
+    }
+  }
   {
     ex::OutlogPositions pos = ex::outlog_positions(*outlog_);
     soup_next_ = std::move(pos.soup_next);
@@ -242,7 +263,6 @@ void ExchangeProc::recover_or_start() {
       return;
     }
     sh_->sequenced.store(sequencer_->chain().last_index);
-    if (p_.paired) (void)rejoin_io_.write_incarnation(p_.journal_prefix(d_.date) + "incarnation", 1);
   } else {
     ex::continue_day(*sequencer_, clock_, *sh_, recovered_);
     if (hooks_.log) {
