@@ -452,6 +452,7 @@ void ExchangeProc::finish_boot() {
     gc.soup.heartbeat_interval = p_.soup_heartbeat;
     gc.soup.idle_timeout = p_.soup_idle_timeout;
     gc.soup.login_timeout = p_.soup_login_timeout;
+    gc.close_linger = p_.close_linger;
     gc.tcp.max_conns = p_.max_conns;
     gc.tcp.max_reads_per_poll = 4;
     gc.listen = p_.gw[i];
@@ -484,6 +485,7 @@ void ExchangeProc::finish_boot() {
     glc.soup.session = soup::SessionId::from(d_.soup_session);
     glc.soup.heartbeat_interval = p_.soup_heartbeat;
     glc.soup.idle_timeout = p_.soup_idle_timeout;
+    glc.close_linger = p_.close_linger;
     glc.tcp.max_conns = 16;
     glc.listen = env::Endpoint{n.ip(), p_.glimpse_port};
     glc.itch_log_path = mc.itch_log_path;

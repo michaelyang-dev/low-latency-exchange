@@ -410,6 +410,7 @@ std::expected<ExchangeConfig, std::string> parse_config(const std::string& text)
     else if (k == "gateway.heartbeat_ms") r = set_ms(c.soup_heartbeat);
     else if (k == "gateway.idle_timeout_ms") r = set_ms(c.soup_idle_timeout);
     else if (k == "gateway.login_timeout_ms") r = set_ms(c.soup_login_timeout);
+    else if (k == "gateway.close_linger_ms") r = set_ms(c.close_linger);
     else if (k == "gateway.max_conns") r = set_num(c.max_conns, 2, 4096);
     else if (k == "gateway.replay_ring_msgs") r = set_num(c.replay_ring_msgs, 16, std::uint64_t{1} << 26);
     else if (k == "gateway.replay_ring_mib") {

@@ -110,6 +110,7 @@ struct ExchangeConfig {
   Nanos soup_heartbeat = kNsPerSec;
   Nanos soup_idle_timeout = 15 * kNsPerSec;
   Nanos soup_login_timeout = 30 * kNsPerSec;
+  Nanos close_linger = kNsPerSec;  // a closing connection's flush bound (md::kDefaultCloseLinger)
   std::uint32_t max_conns = 64;
   std::size_t replay_ring_msgs = std::size_t{1} << 16;
   std::size_t replay_ring_bytes = std::size_t{8} << 20;

@@ -563,6 +563,7 @@ std::expected<void, std::string> Node::start_net() {
     gc[i].soup.heartbeat_interval = cfg_.soup_heartbeat;
     gc[i].soup.idle_timeout = cfg_.soup_idle_timeout;
     gc[i].soup.login_timeout = cfg_.soup_login_timeout;
+    gc[i].close_linger = cfg_.close_linger;
     gc[i].tcp.max_conns = cfg_.max_conns;
     gc[i].tcp.max_reads_per_poll = 4;
     gc[i].listen = cfg_.gw[i];
@@ -595,6 +596,7 @@ std::expected<void, std::string> Node::start_net() {
     glc.soup.session = soup::SessionId::from(cfg_.soup_session);
     glc.soup.heartbeat_interval = cfg_.soup_heartbeat;
     glc.soup.idle_timeout = cfg_.soup_idle_timeout;
+    glc.close_linger = cfg_.close_linger;
     glc.tcp.max_conns = 16;
     glc.listen = *cfg_.glimpse;
     glc.itch_log_path = mc.itch_log_path;

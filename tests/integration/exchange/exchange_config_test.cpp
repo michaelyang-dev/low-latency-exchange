@@ -12,6 +12,7 @@
 #include "exchanged/config.h"
 #include "exchanged/xsk_config.h"
 #include "gateway/credentials.h"
+#include "md/stream_linger.h"
 #include "repl/types.h"
 #include "sequencer/engine_day.h"
 
@@ -77,6 +78,20 @@ TEST(ExchangeConfig, HaRetransmissionDefaultsAreTheCoresAndCanBeSet) {
   const auto z = parse_config(base() + "[ha]\nrto_ms = 0\n");
   ASSERT_FALSE(z.has_value());
   EXPECT_NE(z.error().find("rto_ms"), std::string::npos) << z.error();
+}
+
+// [gateway] close_linger_ms: how long a closing connection (gateway and GLIMPSE) may take
+// to flush its last bytes; md::kDefaultCloseLinger unless set.
+TEST(ExchangeConfig, CloseLingerDefaultsToASecondAndCanBeSet) {
+  auto d = parse_config(base());
+  ASSERT_TRUE(d.has_value()) << d.error();
+  EXPECT_EQ(d->close_linger, md::kDefaultCloseLinger);
+  auto c = parse_config(base() + "[gateway]\nclose_linger_ms = 25\n");
+  ASSERT_TRUE(c.has_value()) << c.error();
+  EXPECT_EQ(c->close_linger, 25'000'000);
+  const auto z = parse_config(base() + "[gateway]\nclose_linger_ms = 0\n");
+  ASSERT_FALSE(z.has_value());
+  EXPECT_NE(z.error().find("close_linger_ms"), std::string::npos) << z.error();
 }
 
 // The keys a takeover trial needs (T25): the md heartbeat in microseconds (the later of
