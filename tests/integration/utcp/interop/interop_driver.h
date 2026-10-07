@@ -148,6 +148,7 @@ class Driver {
       return false;
     }
     if (echoed_ >= sent_) last_progress_ = now;
+    if (echoed_ < sent_ && now - last_progress_ > kProbeQuiet) probe_quiet_peer(now);
     if (mismatch_ != ~0ull) {
       err_ = "echo mismatch at byte " + std::to_string(mismatch_);
       return false;
@@ -210,6 +211,18 @@ class Driver {
     return true;
   }
 
+  // A peer that resets discards the tail of its echo, and its one RST can be lost on a
+  // lossy link. With nothing left to send, the connection then stays established, as a
+  // kernel TCP connection without keepalives would. An application probes a quiet peer:
+  // a byte sent to the closed socket brings another RST.
+  void probe_quiet_peer(Nanos now) {
+    if (o_.close_mode != "peer-rst" || closed_ || now - last_probe_ <= kProbeQuiet) return;
+    if (const Connection* c = st_.connection(conn_); c != nullptr && c->snd_una() == c->snd_max()) {
+      (void)write_some(1);
+      last_probe_ = now;
+    }
+  }
+
   bool teardown() {
     const Nanos t0 = clock_.now_mono();
     if (o_.close_mode == "utcp") {
@@ -217,6 +230,7 @@ class Driver {
     }
     while (clock_.now_mono() - t0 < 30'000'000'000) {
       poll();
+      if (clock_.now_mono() - t0 > kProbeQuiet) probe_quiet_peer(clock_.now_mono());
       if (mismatch_ != ~0ull) {
         err_ = "echo mismatch during teardown";
         return false;
@@ -314,6 +328,8 @@ class Driver {
   std::uint64_t mismatch_ = ~0ull;
   std::uint64_t stalls_ = 0;
   Nanos last_progress_ = 0;
+  Nanos last_probe_ = 0;
+  static constexpr Nanos kProbeQuiet = 2'000'000'000;
   Nanos max_gap_ = 0;
   std::vector<Nanos> rtts_;
   std::vector<std::byte> wbuf_ = std::vector<std::byte>(65536);
