@@ -15,9 +15,14 @@
 // Digest: FNV-1a 64 over, per message, its length as u16 big-endian then its bytes,
 // i.e. over the stream exactly as the output log stores it.
 //
+// The sidecar also names record P by its content crc (LLEOUTD2): a snapshot describes
+// the history up to P, and a rejoin can truncate that history and write other records
+// at the same indices; snapshotd continues from a snapshot only if the journal's record
+// P is still that record.
+//
 // Sidecar (little-endian):
-//    0  char[8] "LLEOUTD1"   8 u64 index P   16 u64 itch count   24 u64 itch digest
-//   32  u32 sessions         36 u32 0
+//    0  char[8] "LLEOUTD2"   8 u64 index P   16 u64 itch count   24 u64 itch digest
+//   32  u32 sessions         36 u32 record P's content crc ("LLEOUTD1": 0, not recorded)
 //   40  sessions x { u32 session_id, u32 0, u64 count, u64 digest }   (ascending id)
 //   ..  u32 crc32c of every byte before it, u32 0
 // Published like a snapshot: written to `.tmp`, fsync, rename, fsync of the directory.
@@ -60,6 +65,7 @@ struct StreamDigest {
 
 struct OutDigests {
   std::uint64_t index = 0;
+  std::optional<std::uint32_t> record_crc;  // record P's content crc (absent from LLEOUTD1 sidecars)
   StreamDigest itch;
   std::vector<std::pair<std::uint32_t, StreamDigest>> sessions;  // ascending session id
 
@@ -76,17 +82,19 @@ struct OutDigests {
   }
 };
 
-inline constexpr char kSidecarMagic[8] = {'L', 'L', 'E', 'O', 'U', 'T', 'D', '1'};
+inline constexpr char kSidecarMagic[8] = {'L', 'L', 'E', 'O', 'U', 'T', 'D', '2'};
+inline constexpr char kSidecarMagicV1[8] = {'L', 'L', 'E', 'O', 'U', 'T', 'D', '1'};
 
 [[nodiscard]] inline std::string sidecar_path(const std::string& snapshot_path) { return snapshot_path + ".out"; }
 
 [[nodiscard]] inline std::vector<std::byte> encode_sidecar(const OutDigests& d) {
   std::vector<std::byte> b(40 + 24 * d.sessions.size() + 8);
-  std::memcpy(b.data(), kSidecarMagic, 8);
+  std::memcpy(b.data(), d.record_crc ? kSidecarMagic : kSidecarMagicV1, 8);
   store_le64(b.data() + 8, d.index);
   store_le64(b.data() + 16, d.itch.count);
   store_le64(b.data() + 24, d.itch.digest);
   store_le32(b.data() + 32, static_cast<std::uint32_t>(d.sessions.size()));
+  store_le32(b.data() + 36, d.record_crc.value_or(0));
   std::size_t at = 40;
   for (const auto& [id, s] : d.sessions) {
     store_le32(b.data() + at, id);
@@ -99,13 +107,16 @@ inline constexpr char kSidecarMagic[8] = {'L', 'L', 'E', 'O', 'U', 'T', 'D', '1'
 }
 
 [[nodiscard]] inline std::optional<OutDigests> decode_sidecar(std::span<const std::byte> b) {
-  if (b.size() < 48 || std::memcmp(b.data(), kSidecarMagic, 8) != 0) return std::nullopt;
+  if (b.size() < 48) return std::nullopt;
+  const bool v2 = std::memcmp(b.data(), kSidecarMagic, 8) == 0;
+  if (!v2 && std::memcmp(b.data(), kSidecarMagicV1, 8) != 0) return std::nullopt;
   const std::uint32_t n = load_le32(b.data() + 32);
-  if (load_le32(b.data() + 36) != 0 || b.size() != 40 + 24 * std::size_t{n} + 8) return std::nullopt;
+  if ((!v2 && load_le32(b.data() + 36) != 0) || b.size() != 40 + 24 * std::size_t{n} + 8) return std::nullopt;
   const std::size_t at = 40 + 24 * std::size_t{n};
   if (load_le32(b.data() + at) != crc32c(b.data(), at) || load_le32(b.data() + at + 4) != 0) return std::nullopt;
   OutDigests d;
   d.index = load_le64(b.data() + 8);
+  if (v2) d.record_crc = load_le32(b.data() + 36);
   d.itch.count = load_le64(b.data() + 16);
   d.itch.digest = load_le64(b.data() + 24);
   for (std::uint32_t i = 0; i < n; ++i) {

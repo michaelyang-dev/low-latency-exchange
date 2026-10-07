@@ -69,17 +69,28 @@ class BasicSnapshotter {
   bool start(std::uint64_t max_index) {
     (void)engine_.restore({});  // an empty engine
     last_ = journal::ChainState{};
+    resume_crc_.reset();
     cursor_.reset();  // the next pass follows from the new position
     digests_ = OutDigests{};
     // The newest snapshot whose output digests are there too (they continue from it).
     std::optional<snap::SnapshotInfo> s;
     std::optional<OutDigests> d;
+    // ... and whose record P is still the journal's (a rejoin can truncate the history a
+    // snapshot describes and write other records at the same indices): a snapshot of a
+    // record that is gone is removed.
     for (std::uint64_t max = max_index; max != 0;) {
       s = io_.find_snapshot(o_.snapshots, max);
       if (!s) break;
       d = io_.read_sidecar(sidecar_path(s->path));
-      if (d && d->index == s->meta.index) break;
-      io_.out(std::format("snapshotd: {} has no output digests: not continued from", s->path));
+      if (d && d->index == s->meta.index) {
+        if (!d->record_crc || journal_holds(s->meta.index, *d->record_crc) != Held::kNo) break;
+        io_.out(std::format("snapshotd: {}: the journal no longer holds its record {} (a rejoin truncation): removed",
+                            s->path, s->meta.index));
+        io_.remove(sidecar_path(s->path));
+        io_.remove(s->path);
+      } else {
+        io_.out(std::format("snapshotd: {} has no output digests: not continued from", s->path));
+      }
       max = s->meta.index - 1;
       s.reset();
     }
@@ -97,6 +108,7 @@ class BasicSnapshotter {
       return false;
     }
     last_.last_index = s->meta.index;
+    resume_crc_ = d->record_crc;
     digests_ = *d;
     io_.out(std::format("snapshotd: continuing from {} (index {})", s->path, s->meta.index));
     return true;
@@ -112,7 +124,9 @@ class BasicSnapshotter {
       journal::FollowOptions fo;
       fo.day = o_.day;
       cursor_.emplace(JournalOpener{this}, fo);
-      cursor_->seek(last_.last_index + 1);
+      // From a snapshot: the cursor checks that record P is still the one it describes
+      // (a truncation after start() shows as a divergence).
+      cursor_->seek(last_.last_index + 1, resume_crc_);
     }
     ok_ = true;
     for (int spins = 0;; ++spins) {
@@ -174,6 +188,7 @@ class BasicSnapshotter {
       return false;
     }
     digests_.index = r.index();
+    digests_.record_crc = r.content();  // the content crc (the header's crc field is sealed per medium)
     if (!io_.write_sidecar(sidecar_path(*path), digests_)) {
       io_.err(std::format("snapshotd: output digests for {} failed", *path));
       return false;
@@ -203,6 +218,24 @@ class BasicSnapshotter {
       io_.remove(sidecar_path(p));
       io_.remove(p);
     }
+  }
+
+  // Whether the journal's record `index` has content crc `crc` (kUnknown: the journal
+  // cannot be read now; the cursor checks again when it walks the record).
+  enum class Held : std::uint8_t { kYes, kNo, kUnknown };
+  Held journal_holds(std::uint64_t index, std::uint32_t crc) {
+    auto dir = io_.open_journal(o_.journal);
+    if (!dir) return Held::kUnknown;
+    struct One {
+      std::uint64_t want;
+      std::optional<std::uint32_t> crc;
+      bool on_record(const journal::RecordView& r) {
+        if (r.index() == want) crc = r.content();
+        return r.index() < want;
+      }
+    } one{index, std::nullopt};
+    (void)journal::replay(*dir, journal::ReplayRange{index, index}, one, o_.day);
+    return one.crc && *one.crc == crc ? Held::kYes : Held::kNo;
   }
 
   template <class Dir>
@@ -244,6 +277,7 @@ class BasicSnapshotter {
   Io io_;
   engine::Engine engine_;
   journal::ChainState last_{};
+  std::optional<std::uint32_t> resume_crc_;  // record P's crc when continuing from a snapshot
   OutDigests digests_;
   std::optional<Cursor> cursor_;
   bool ok_ = true;
