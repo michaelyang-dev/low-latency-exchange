@@ -2241,7 +2241,10 @@ Report run_exchange(const Options& o) {
   p.gw[0] = env::Endpoint{x.ip(), kGwPort[0]};
   p.gw[1] = env::Endpoint{x.ip(), kGwPort[1]};
   // Lazy-reader days: 5 to 100 ms to flush a closing connection (see exchange_ha's).
-  if (h.lazy_day) p.close_linger = 5 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(95 * kMs));
+  if (h.lazy_day) {  // and smaller socket buffers (see exchange_ha's)
+    p.close_linger = 5 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(95 * kMs));
+    w.net().set_stream_ring_bytes(std::size_t{8} << (10 + w.stream(Stream::Workload, 0xE9D).below(4)));
+  }
   p.line_a = kLine[0];
   p.line_b = kLine[1];
   p.rerequest_port = kRerequestPort;

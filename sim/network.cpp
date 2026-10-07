@@ -415,7 +415,7 @@ std::uint32_t Network::alloc_conn() {
   }
   Conn& c = conns_[slot];
   for (Dir& d : c.dir) {
-    if (d.ring.empty()) d.ring.resize(kStreamRingBytes);
+    if (d.ring.size() != ring_bytes_) d.ring.assign(ring_bytes_, std::byte{0});
     d.written = d.sent = d.delivered = d.read = 0;
     d.last_arrival = 0;
     d.stall_until = 0;

@@ -82,6 +82,10 @@ class Network {
   // send order unless the reorder fault fires, as on a direct cable or a switched
   // LAN path. Same random draws either way, so other worlds' traces are unchanged.
   void set_fifo_datagrams(bool on) noexcept { fifo_dg_ = on; }
+  // Stream connections opened from now on buffer `bytes` a direction (sender's unsent,
+  // in flight and receiver's unread; kStreamRingBytes unless set): smaller socket
+  // buffers, so a peer that stops reading blocks its sender sooner.
+  void set_stream_ring_bytes(std::size_t bytes) noexcept { ring_bytes_ = bytes; }
 
   // --- link parameters (drawn lazily per directed link from its own stream) ---
   LinkParams& link_params(NodeId src, NodeId dst);
@@ -236,6 +240,7 @@ class Network {
   Nanos stall_max_ns_ = 0;
   Nanos reset_timeout_ns_ = 1'000'000'000;
   bool fifo_dg_ = false;
+  std::size_t ring_bytes_ = kStreamRingBytes;
 
   struct ActivePartition {
     std::uint64_t a = 0;

@@ -2801,8 +2801,12 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // Lazy-reader days: a closing connection gets 5 to 100 ms to flush its last bytes
   // ([gateway] close_linger_ms; production's second outlasts the compressed day), so a
   // peer that stopped reading can outlast it. A stream of its own.
-  if (h.lazy_day)
+  if (h.lazy_day) {
     base.close_linger = 5 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(95 * kMs));
+    // and smaller socket buffers (8 to 64 KiB a direction), so a lazy reader's ring fills
+    // and a closing connection can outlast its linger. A stream of its own.
+    w.net().set_stream_ring_bytes(std::size_t{8} << (10 + w.stream(Stream::Workload, 0xE9D).below(4)));
+  }
   base.paired = true;
   base.initial_primary = 0;
   base.witness = env::Endpoint{wn.ip(), kWitnessPort};
