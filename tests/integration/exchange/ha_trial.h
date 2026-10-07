@@ -682,6 +682,27 @@ class Prober {
   [[nodiscard]] std::uint64_t late() const { return late_; }
   // Probe orders entered: UserRefNums 1..entered().
   [[nodiscard]] std::uint32_t entered() const { return urn_; }
+  // After stop(): polls until every probe order has its answer (accepted or rejected)
+  // and the last cancel of an accepted order its Order Canceled, or `limit` passes;
+  // false if something is still unanswered. On a loaded host thousands of probes can be
+  // queued in the sockets and the gateway when the probing stops, and a quiet period
+  // alone (a node not scheduled for a while) ended the trial inside that backlog.
+  bool drain(std::chrono::milliseconds limit) {
+    const auto end = std::chrono::steady_clock::now() + limit;
+    const std::uint32_t cancelled = resting_ == 0 ? urn_ : 0;  // the last message was its cancel
+    for (;;) {
+      for (; scanned_ < c_.received().size(); ++scanned_) {
+        const Ouch m{c_.received()[scanned_].msg};
+        if (m.type() == 'A' || m.type() == 'J') answered_.insert(m.urn());
+        if (m.type() == 'A' && m.urn() == cancelled) cancel_due_ = true;
+        if (m.type() == 'C' && m.urn() == cancelled) cancel_answered_ = true;
+      }
+      const bool done = answered_.size() >= urn_ && (!cancel_due_ || cancel_answered_);
+      if (done) return true;
+      if (std::chrono::steady_clock::now() >= end || !c_.connected()) return false;
+      c_.poll(5);
+    }
+  }
 
  private:
   void loop(int interval_us) {
@@ -723,6 +744,10 @@ class Prober {
   std::uint32_t resting_ = 0;
   std::uint64_t sent_ = 0;
   std::uint64_t late_ = 0;
+  std::size_t scanned_ = 0;          // received() messages drain() has looked at
+  std::set<std::uint32_t> answered_;  // probe orders accepted or rejected
+  bool cancel_due_ = false;
+  bool cancel_answered_ = false;
 };
 
 namespace detail {
@@ -1049,7 +1074,7 @@ class Trial {
       // The probes measured F7; they stop, answered, before A dies (a probe lost with A's
       // process was never sequenced, and the prober does not re-send).
       if (o_.probe_us > 0) {
-        stop_probes();
+        stop_and_drain_probes();
         prober_.client().settle(300ms);
       }
       pump(1);  // some of them in flight when it dies
@@ -1078,7 +1103,7 @@ class Trial {
     }
     for (std::uint32_t k = next; k <= o_.phase1 + o_.phase2; ++k) send_order(k);
     const bool ok = wait_complete(o_.phase1 + o_.phase2, false, "phase 2 (after the fault)");
-    stop_probes();
+    stop_and_drain_probes();
     if (r_.cls == "F10") (void)lab_cmd("load.stop", "the background load");
     return ok;
   }
@@ -1161,7 +1186,7 @@ class Trial {
     // Plan 10 §7 also asks for an alarm within 10 ms: the replica has no witness liveness
     // check (it talks to W only to request an epoch), so there is nothing to alarm on.
     r_.notes.push_back("F8: no alarm criterion: the replica does not watch the witness between requests");
-    stop_probes();
+    stop_and_drain_probes();
     return ok;
   }
 
@@ -1250,6 +1275,9 @@ class Trial {
   // ---- the end of the trial and the oracles ------------------------------------------------
   void wrap_up() {
     const int backup = 1 - primary_;
+    // Every probe answered before the primary's counts are read: answers still queued
+    // add records (and ITCH) after them.
+    if (o_.probe_us > 0 && !prober_.drain(o_.step_timeout)) r_.notes.push_back("DELTA's probes did not all drain");
     const std::string s = ex(primary_).cmd("sync");
     if (s.rfind("ok", 0) != 0) fail("sync on the primary: " + s);
     const bool paired_end = o_.rejoin || r_.cls == "F8";
@@ -1359,6 +1387,7 @@ class Trial {
       if (!ld.executions.empty()) fail("O-LEDGER: DELTA's probes executed");
       r_.num["probes_sent"] = static_cast<std::int64_t>(prober_.sent());
       r_.num["probes_late"] = static_cast<std::int64_t>(prober_.late());
+      r_.num["probes_tx_waits"] = static_cast<std::int64_t>(prober_.client().tx_waits());
       r_.num["probes_accepted"] = static_cast<std::int64_t>(ld.accepted.size());
     }
 
@@ -1624,6 +1653,12 @@ class Trial {
   void stop_probes() {
     if (o_.probe_us > 0) prober_.stop();
   }
+  // Stops the probes and waits until the node has answered every one (Prober::drain).
+  void stop_and_drain_probes() {
+    if (o_.probe_us == 0) return;
+    prober_.stop();
+    if (!prober_.drain(o_.step_timeout)) r_.notes.push_back("DELTA's probes did not all drain");
+  }
   // F9: snapshotd following A's journal (here a child process; in the lab the
   // node.A.snapshotd_start / snapshotd_stop commands).
   bool snapshotd(bool on) {
@@ -1738,8 +1773,8 @@ class Trial {
 }  // namespace detail
 
 // A trial that never reached its paired start never tested a failover, and two causes
-// lie outside the exchange: a port free_port picked was taken by a test running in
-// parallel before the node bound it, or (a loaded sanitizer build) the backup came up
+// lie outside the exchange: a node's port was taken before it bound it (rare now that
+// free_port claims its ports), or (a loaded sanitizer build) the backup came up
 // more than T_ack after the primary, which went solo and deposed it. Such a trial is
 // repeated, in a fresh directory with new ports (at most twice); a start that fails
 // every time still fails the test.

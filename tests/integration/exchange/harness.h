@@ -18,6 +18,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -39,7 +40,9 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "admin/commands.h"
@@ -51,6 +54,7 @@
 #include "proto/moldudp64/moldudp64.h"
 #include "proto/ouch50/ouch50.h"
 #include "proto/soupbin/client_session.h"
+#include "proto/soupbin/packets.h"
 
 extern char** environ;
 
@@ -94,16 +98,41 @@ inline const bool kSigpipeIgnored = [] {
 
 // ---- small socket helpers --------------------------------------------------------------
 
+// A port for a node to bind, which nothing else takes first: it lies below the kernel's
+// ephemeral range (Linux 32768-60999, macOS 49152-65535), so no socket bound to port 0 or
+// sending unbound lands on it, and a lock file this process holds until it exits claims
+// it, so neither a test running in parallel nor a later call here hands it out again.
+// A port some service holds fails the trial bind and is skipped. 0 if none is left.
 inline std::uint16_t free_port(int type) {
-  const int s = ::socket(AF_INET, type, 0);
-  sockaddr_in a{};
-  a.sin_family = AF_INET;
-  a.sin_addr.s_addr = htonl(e2e_peer_host());
-  ::bind(s, reinterpret_cast<sockaddr*>(&a), sizeof a);
-  socklen_t len = sizeof a;
-  ::getsockname(s, reinterpret_cast<sockaddr*>(&a), &len);
-  ::close(s);
-  return ntohs(a.sin_port);
+  constexpr unsigned kFirst = 20000, kCount = 12000;
+  static std::vector<int> claims;  // the lock files' descriptors, open until exit
+  static unsigned next = static_cast<unsigned>(::getpid()) * 7919u;
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "lle-ports";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  for (unsigned tries = 0; tries < kCount; ++tries) {
+    const auto port = static_cast<std::uint16_t>(kFirst + next++ % kCount);
+    const int fd = ::open((dir / std::to_string(port)).c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0666);
+    if (fd < 0) continue;
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+      ::close(fd);
+      continue;
+    }
+    const int s = ::socket(AF_INET, type, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(e2e_peer_host());
+    const bool bound = ::bind(s, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0;
+    ::close(s);
+    if (!bound) {
+      ::close(fd);
+      continue;
+    }
+    claims.push_back(fd);
+    return port;
+  }
+  return 0;
 }
 
 inline int udp_bound(std::uint16_t port) {
@@ -402,10 +431,30 @@ class OuchClient {
     return 'X';
   }
 
+  // Queues `msg`. While the session's transmit buffer is full (the node reads slower than
+  // the test writes: a loaded host, a takeover) it polls, which flushes, until the message
+  // fits; a message dropped here would look like one the exchange never answered. A
+  // connection that closes meanwhile loses it, as it loses whatever it had not written.
   void send(std::span<const std::byte> msg) {
     ASSERT_TRUE(sess_ && logged_in_) << user_ << ": not logged in";
-    handle(sess_->send_unsequenced(msg, mono()));
+    const auto end = std::chrono::steady_clock::now() + 30s;
+    for (;;) {
+      const soup::Actions& a = sess_->send_unsequenced(msg, mono());
+      const bool queued = a.accepted;
+      handle(a);
+      if (queued || fd_ < 0 || !sess_ || sess_->state() != soup::ClientSession::State::Active ||
+          msg.size() > soup::kMaxPayload)
+        return;
+      if (std::chrono::steady_clock::now() >= end) {
+        ADD_FAILURE() << user_ << ": the transmit buffer stayed full for 30 s";
+        return;
+      }
+      ++tx_waits_;
+      poll(1);
+    }
   }
+  // Sends that waited for room in the transmit buffer.
+  [[nodiscard]] std::uint64_t tx_waits() const noexcept { return tx_waits_; }
   void logout() {
     if (sess_ && fd_ >= 0) handle(sess_->logout(mono()));
     poll(20);
@@ -521,6 +570,7 @@ class OuchClient {
   std::vector<Received> received_;
   std::uint64_t duplicates_ = 0;
   std::uint64_t gaps_ = 0;
+  std::uint64_t tx_waits_ = 0;
 };
 
 // ---- MoldUDP64 subscriber ------------------------------------------------------------------
@@ -680,9 +730,11 @@ class MoldSubscriber {
           ++replies_;
         }
         arb_->on_packet(src, pkt, mono(), sink_);
+        resume_if_signalled();
       }
     }
     arb_->on_timer(mono(), sink_);
+    resume_if_signalled();
   }
   bool wait_messages(std::uint64_t n, std::chrono::milliseconds timeout = 5s) {
     const auto end = std::chrono::steady_clock::now() + timeout;
@@ -712,7 +764,7 @@ class MoldSubscriber {
            "; partial overlaps A " + n(m.partial_overlaps[0]) + " B " + n(m.partial_overlaps[1]) + "; gaps " +
            n(m.gaps_opened) + " filled by A " + n(m.gaps_filled_by_line[0]) + " B " + n(m.gaps_filled_by_line[1]) +
            " re-request " + n(m.gaps_filled_by_rerequest) + "; requests " + n(sink_.requests) + " replies " +
-           n(replies_) + "; delivered " + n(messages_.size());
+           n(replies_) + "; snapshot signals " + n(m.snapshot_signals) + "; delivered " + n(messages_.size());
   }
   [[nodiscard]] SeqNo next_expected() const { return arb_->next_expected(); }
   [[nodiscard]] bool ended() const { return sink_.ended; }
@@ -810,9 +862,20 @@ class MoldSubscriber {
       ::sendto(s->rr_, req.data(), req.size(), 0, reinterpret_cast<sockaddr*>(&a), sizeof a);
       ++requests;
     }
-    void on_snapshot_needed(SeqNo, SeqNo) {}
+    // No snapshot service here: the subscriber resumes recovery where it stopped (a
+    // "snapshot" of what it holds), after the call that signalled returns.
+    void on_snapshot_needed(SeqNo next, SeqNo) { s->resume_at_ = next; }
     void on_end_of_session(SeqNo) { ended = true; }
   };
+
+  // The arbiter escalates to a snapshot when both re-request servers fail (one killed by
+  // the trial, the other's replies read late on a loaded host) or its reorder window
+  // overflows; this subscriber has no snapshot to take, so it re-requests instead.
+  void resume_if_signalled() {
+    if (resume_at_ == 0) return;
+    const SeqNo at = std::exchange(resume_at_, 0);
+    arb_->resume_from_snapshot(at, mono(), sink_);
+  }
 
   int line_a_;
   int line_b_;
@@ -822,6 +885,7 @@ class MoldSubscriber {
   std::uint16_t server_[2] = {0, 0};
   std::uint32_t server_host_[2] = {e2e_host(), e2e_host()};
   std::uint64_t replies_ = 0;
+  SeqNo resume_at_ = 0;
   SeqNo drop_seq_ = 0;
   std::uint64_t dropped_seq_packets_ = 0;
   bool record_ = false;
