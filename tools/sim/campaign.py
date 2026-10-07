@@ -4,7 +4,7 @@
     python3 tools/sim/campaign.py --exsim build/sim/sim/exsim --seeds 10000 [--jobs 16]
         [--seed-base commit|random|<u64|0xhex>] [--batch 50] [--mode swarm] [--disable net,...]
         [--world all] [--canary] [--check-determinism] [--timeout 600]
-        [--ledger-dir sim/ledger] [--campaign-id ID] [--require-probes]
+        [--ledger-dir sim/ledger] [--campaign-id ID] [--require-probes] [--budget-minutes M]
 
 Seeds base..base+N-1 are split into batches (one `exsim --seeds=K` process
 each) and run on --jobs workers. Practice from TigerBeetle's CFO:
@@ -162,6 +162,8 @@ def main() -> int:
     ap.add_argument("--ledger-dir", default=str(REPO / "sim" / "ledger"))
     ap.add_argument("--campaign-id")
     ap.add_argument("--require-probes", action="store_true")
+    ap.add_argument("--budget-minutes", type=float, default=0.0,
+                    help="start no batch after this many minutes (0: no budget); the record says how many seeds ran")
     a = ap.parse_args()
 
     sha, dirty = git_sha()
@@ -180,10 +182,23 @@ def main() -> int:
     seeds: list[dict] = []
     faults: collections.Counter = collections.Counter()
     probes: dict[str, dict] = {}
+    # A batch that would start after the budget is not run (None): a campaign fits its CI
+    # job's time limit however heavy the worlds have become, and says how far it got.
+    deadline = t0 + a.budget_minutes * 60 if a.budget_minutes > 0 else None
+
+    def guarded(s: int, n: int) -> dict | None:
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        return run_batch(a.exsim, s, n, args, a.timeout)
+
+    skipped = 0
     with cf.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool:
-        futs = [pool.submit(run_batch, a.exsim, s, n, args, a.timeout) for s, n in batches]
+        futs = [pool.submit(guarded, s, n) for s, n in batches]
         for f in cf.as_completed(futs):
             r = f.result()
+            if r is None:
+                skipped += 1
+                continue
             seeds += r["seeds"]
             faults.update(r["faults"])
             for name, p in r["probes"].items():
@@ -227,6 +242,9 @@ def main() -> int:
         "args": args,
         "seed_base": f"0x{base:016x}",
         "seeds_run": len(seeds),
+        "seeds_requested": a.seeds,
+        "budget_minutes": a.budget_minutes,
+        "stopped_by_budget": skipped != 0,
         "passed": len(seeds) - len(failures),
         "failed": len(failures),
         "determinism_mismatches": len(mismatches),
@@ -251,6 +269,8 @@ def main() -> int:
         print(f"  failures {cls}: {n} (kept {kept['seed']}{where}, {kept['events']} events)")
     if missing:
         print(f"  must-hit probes never hit: {', '.join(missing)}")
+    if skipped:
+        print(f"  budget: {a.budget_minutes:g} minutes ran {len(seeds)} of {a.seeds} seeds")
     if failures or mismatches:
         return 1
     if a.require_probes and missing:

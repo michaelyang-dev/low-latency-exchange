@@ -36,12 +36,16 @@ jobs:
         run: tools/ci/ctest.sh --test-dir build/sim --output-on-failure -LE fuzz -j 4
       - name: Swarm campaign
         run: |
+          # Time budgets: the exchange worlds' days have grown (deep books, rollovers, risk,
+          # LULD and lazy-reader days), and 20,000 seeds of every world no longer fit the
+          # job's 360 minutes. A campaign starts no batch after its budget and records how
+          # many seeds it ran; batches of 10 stay well inside the per-process timeout.
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            python3 tools/sim/campaign.py --exsim build/sim/sim/exsim --seeds 20000 --jobs 4 \
-              --seed-base random --check-determinism --require-probes --ledger-dir sim-ledger-out
+            python3 tools/sim/campaign.py --exsim build/sim/sim/exsim --seeds 20000 --jobs 4 --batch 10 \
+              --budget-minutes 270 --seed-base random --check-determinism --require-probes --ledger-dir sim-ledger-out
           else
-            python3 tools/sim/campaign.py --exsim build/sim/sim/exsim --seeds 1000 --jobs 4 \
-              --seed-base commit --check-determinism --ledger-dir sim-ledger-out
+            python3 tools/sim/campaign.py --exsim build/sim/sim/exsim --seeds 1000 --jobs 4 --batch 10 \
+              --budget-minutes 45 --seed-base commit --check-determinism --ledger-dir sim-ledger-out
           fi
       # Always kept: campaigns.jsonl is the accounting of simulation work done
       # (09 §10); failing_seeds.json appears only when a seed failed.
