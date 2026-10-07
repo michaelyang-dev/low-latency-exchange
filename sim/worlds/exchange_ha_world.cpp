@@ -193,6 +193,7 @@ struct HaLedger {
   std::uint64_t takeovers = 0, resent = 0;
   std::uint64_t queries = 0, modifies = 0, mass_cancels = 0;  // Account Query, Modify, Mass Cancel sent
   std::uint64_t auction_orders = 0;                             // on-open and on-close orders sent
+  std::uint64_t read_pauses = 0;                                // lazy reader: pauses taken
 };
 
 // What one data node did, across its incarnations.
@@ -247,6 +248,7 @@ struct Harness {
   std::uint64_t bulk_orders = 0, bursts = 0;
   bool snapd_apart = false;  // snapshotd runs in a process of its own beside each data node
   bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
+  bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
   // Rollover seeds: the pair runs the previous trading day first (no clients), then the
   // operator rolls it over to `day` on the same disks (06 §10 Rollover).
   std::unique_ptr<ExchangeDay> prev_day;
@@ -1237,6 +1239,7 @@ class HaClientProc final : public Process {
         rng3_(n.rng(0xC120)),
         rng4_(n.rng(0xC121)),
         rng5_(n.rng(0xC122)),
+        rng6_(n.rng(0xC123)),
         entry_(config(h.clients[c], heartbeat, idle)),
         stage_{this} {
     send_mean_ = static_cast<Nanos>(100 * kUs + rng_.below(1900 * kUs));
@@ -1250,6 +1253,10 @@ class HaClientProc final : public Process {
     if (h.deep != 0 && !h.clients[c].light && rng3_.below(2) == 0)
       rebulk_at_ = h.open_at + static_cast<Nanos>(rng3_.below(
                                    static_cast<std::uint64_t>(std::max<Nanos>(1, h.close_at - h.open_at))));
+    if (h.lazy_day && !h.clients[c].light && rng6_.below(2) == 0) {
+      lazy_ = true;
+      next_pause_ = static_cast<Nanos>(rng6_.below(100 * kMs));
+    }
     n.add_stage(stage_, "client");
   }
 
@@ -1257,11 +1264,22 @@ class HaClientProc final : public Process {
     if (!h_.rolled) return false;  // the previous day has no clients
     const Nanos now = node_.clock().now_mono();
     bool did = false;
-    port_.poll([&](const env::StreamEvent& ev) {
-      did = true;
-      on_event(ev, now);
-    });
     HaLedger& L = h_.clients[c_];
+    if (lazy_ && now >= next_pause_ && now >= read_at_) {
+      // Mostly 2 to 60 ms; one pause in eight 60 to 400 ms (a stalled consumer: the
+      // ring fills, a closing connection outlasts its linger, the idle timeout ends it).
+      read_at_ = now + (rng6_.below(8) == 0 ? 60 * kMs + static_cast<Nanos>(rng6_.below(340 * kMs))
+                                             : 2 * kMs + static_cast<Nanos>(rng6_.below(58 * kMs)));
+      next_pause_ = read_at_ + 10 * kMs + static_cast<Nanos>(rng6_.below(140 * kMs));
+      ++L.read_pauses;
+      SIM_PROBE("exchange_ha.client_read_pause");
+    }
+    if (now >= read_at_) {
+      port_.poll([&](const env::StreamEvent& ev) {
+        did = true;
+        on_event(ev, now);
+      });
+    }
     for (std::size_t i = 0; i < 2; ++i) {
       if (!conn_[i] && !L.got_eos && now >= next_try_[i]) {
         conn_[i] = port_.connect(gw_[i]);
@@ -1852,6 +1870,14 @@ class HaClientProc final : public Process {
   Rng rng3_;  // deep-book batches and bursts
   Rng rng4_;  // order types
   Rng rng5_;  // short sales (risk days)
+  Rng rng6_;  // read pauses (lazy-reader days)
+  // A lazy reader stops reading both connections now and then and keeps sending, as a
+  // slow consumer does: the stream ring (64 KiB a direction) fills, the gateway's sends
+  // block and its session waits for room; a takeover, logout or the end of the day can
+  // find bytes unsent, and a pause longer than the idle timeout ends the session.
+  bool lazy_ = false;
+  Nanos read_at_ = 0;     // the current pause ends
+  Nanos next_pause_ = 0;  // the next one starts
   ouch50::TagSet tags_;  // UserRefIdx on every message, when the session has a channel of its own
   client::HaOrderEntry entry_;
   std::optional<env::ConnId> conn_[2];
@@ -2627,6 +2653,9 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // stream of its own.
   Rng risk_cfg = w.stream(Stream::Workload, 0xE99);
   h.risk_day = risk_cfg.below(3) == 0;
+  // One day in four is a lazy-reader day: half the regular clients stop reading now and
+  // then while they keep sending (HaClientProc). A stream of its own.
+  h.lazy_day = w.stream(Stream::Workload, 0xE9B).below(4) == 0;
   if (h.risk_day) {
     for (std::size_t i = 0; i < h.traded; ++i)
       d.symbols[i].adv = static_cast<std::uint32_t>(20'000 + risk_cfg.below(400'000));
@@ -2762,6 +2791,11 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   base.soup_heartbeat = soup_hb;
   base.soup_idle_timeout = soup_idle;
   base.soup_login_timeout = 4 * soup_idle;
+  // Lazy-reader days: a closing connection gets 5 to 100 ms to flush its last bytes
+  // ([gateway] close_linger_ms; production's second outlasts the compressed day), so a
+  // peer that stopped reading can outlast it. A stream of its own.
+  if (h.lazy_day)
+    base.close_linger = 5 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(95 * kMs));
   base.paired = true;
   base.initial_primary = 0;
   base.witness = env::Endpoint{wn.ip(), kWitnessPort};
@@ -3019,8 +3053,9 @@ Report run_exchange_ha_world(const Options& o, bool split) {
         std::size_t eos = 0, ended = 0;
         for (const HaLedger& c : h.clients) eos += c.got_eos ? 1u : 0u;
         for (const SubTruth& t : h.subs) ended += t.ended ? 1u : 0u;
-        std::uint64_t compared = 0;
+        std::uint64_t compared = 0, read_pauses = 0;
         for (const auto& lc : h.comparators) compared += lc->stats().compared;
+        for (const HaLedger& c : h.clients) read_pauses += c.read_pauses;
         return nodes + " grants=P" + std::to_string(promotes) + "/S" + std::to_string(solos) + "/J" +
                std::to_string(joins) + "/R" + std::to_string(resumes) + " eos=" + std::to_string(eos) + "/" +
                std::to_string(h.clients.size()) + " sub_end=" + std::to_string(ended) + "/" +
@@ -3040,7 +3075,8 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                " controls=" + std::to_string(h.controls) + " symbols=" + std::to_string(h.day.symbols.size()) +
                " deep=" + std::to_string(h.deep) + " bulk_orders=" + std::to_string(h.bulk_orders) +
                " bursts=" + std::to_string(h.bursts) + " snapd_apart=" + std::to_string(h.snapd_apart ? 1 : 0) +
-               " rollover=" + std::to_string(h.prev_day ? 1 : 0) +
+               " rollover=" + std::to_string(h.prev_day ? 1 : 0) + " risk=" + std::to_string(h.risk_day ? 1 : 0) +
+               " luld=" + std::to_string(h.luld_day ? 1 : 0) + " read_pauses=" + std::to_string(read_pauses) +
                " gated=" + std::to_string(h.crashes_gated) + " hash_every=" +
                std::to_string(h.params[0].hash_interval) + " hash_checks=" + std::to_string(hash_checks) +
                " alarms=" + std::to_string(h.alarms);

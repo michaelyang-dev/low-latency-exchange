@@ -171,6 +171,7 @@ struct Ledger {
   bool got_eos = false;
   SeqNo eos_at = 0;
   std::uint64_t replays_checked = 0, earlier_logins = 0, drops = 0, logouts = 0, resends = 0, bad = 0;
+  std::uint64_t read_pauses = 0;  // lazy reader: pauses taken
 };
 
 // ---- harness ------------------------------------------------------------------------
@@ -213,6 +214,7 @@ struct Harness {
   std::uint64_t bulk_orders = 0, bursts = 0, controls = 0;
   bool snapd_apart = false;  // snapshotd runs in a process of its own beside the node
   bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
+  bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
   // Rollover seeds: the node runs the previous trading day first (no clients), then the
   // operator rolls it over to `day` on the same disk and L2 file (06 §10 Rollover).
   std::unique_ptr<ExchangeDay> prev_day;
@@ -934,7 +936,7 @@ class ClientProc final : public Process {
  public:
   ClientProc(Node& n, Harness& h, std::size_t c, env::Endpoint gw)
       : node_(n), h_(h), c_(c), gw_(gw), port_(n), rng_(n.rng(0xC11E)), rng3_(n.rng(0xC120)),
-        rng4_(n.rng(0xC121)), rng5_(n.rng(0xC122)), stage_{this} {
+        rng4_(n.rng(0xC121)), rng5_(n.rng(0xC122)), rng6_(n.rng(0xC123)), stage_{this} {
     const std::uint64_t mean = 100 * kUs + rng_.below(1900 * kUs);
     send_mean_ = static_cast<Nanos>(mean);
     disrupt_mean_ = static_cast<Nanos>(20 * kMs + rng_.below(200 * kMs));
@@ -947,6 +949,10 @@ class ClientProc final : public Process {
     if (h.deep != 0 && !h.clients[c].light && rng3_.below(2) == 0)
       rebulk_at_ = h.open_at + static_cast<Nanos>(rng3_.below(
                                    static_cast<std::uint64_t>(std::max<Nanos>(1, h.close_at - h.open_at))));
+    if (h.lazy_day && !h.clients[c].light && rng6_.below(2) == 0) {
+      lazy_ = true;
+      next_pause_ = static_cast<Nanos>(rng6_.below(100 * kMs));
+    }
     n.add_stage(stage_, "client");
   }
 
@@ -954,11 +960,22 @@ class ClientProc final : public Process {
     if (!h_.rolled) return false;  // the previous day has no clients
     const Nanos now = node_.clock().now_mono();
     bool did = false;
-    port_.poll([&](const env::StreamEvent& ev) {
-      did = true;
-      on_event(ev, now);
-    });
     Ledger& L = h_.clients[c_];
+    if (lazy_ && now >= next_pause_ && now >= read_at_) {  // a lazy reader (see exchange_ha's)
+      // Mostly 2 to 60 ms; one pause in eight 60 to 400 ms (a stalled consumer: the
+      // ring fills, a closing connection outlasts its linger, the idle timeout ends it).
+      read_at_ = now + (rng6_.below(8) == 0 ? 60 * kMs + static_cast<Nanos>(rng6_.below(340 * kMs))
+                                             : 2 * kMs + static_cast<Nanos>(rng6_.below(58 * kMs)));
+      next_pause_ = read_at_ + 10 * kMs + static_cast<Nanos>(rng6_.below(140 * kMs));
+      ++L.read_pauses;
+      SIM_PROBE("exchange.client_read_pause");
+    }
+    if (now >= read_at_) {
+      port_.poll([&](const env::StreamEvent& ev) {
+        did = true;
+        on_event(ev, now);
+      });
+    }
     if (!conn_ && !L.got_eos && now >= next_try_) {
       conn_ = port_.connect(gw_);
       Connection cn;
@@ -1444,6 +1461,10 @@ class ClientProc final : public Process {
   Rng rng3_;             // deep-book batches and bursts
   Rng rng4_;             // order types
   Rng rng5_;             // short sales (risk days)
+  Rng rng6_;             // read pauses (lazy-reader days)
+  bool lazy_ = false;    // stops reading now and then, keeps sending (see exchange_ha's)
+  Nanos read_at_ = 0;
+  Nanos next_pause_ = 0;
   ouch50::TagSet tags_;  // UserRefIdx on every message, when the session has a channel of its own
   std::size_t bulk_left_ = 0;
   Nanos rebulk_at_ = 0;
@@ -2093,6 +2114,7 @@ Report run_exchange(const Options& o) {
   // for the traded symbols, short sales on entry, intraday changes of every kind.
   Rng risk_cfg = w.stream(Stream::Workload, 0xE99);
   h.risk_day = risk_cfg.below(3) == 0;
+  h.lazy_day = w.stream(Stream::Workload, 0xE9B).below(4) == 0;  // lazy readers, as in exchange_ha
   if (h.risk_day) {
     for (std::size_t i = 0; i < h.traded; ++i)
       d.symbols[i].adv = static_cast<std::uint32_t>(20'000 + risk_cfg.below(400'000));
@@ -2211,6 +2233,8 @@ Report run_exchange(const Options& o) {
   if (h.snapd_apart) p.follower = false;
   p.gw[0] = env::Endpoint{x.ip(), kGwPort[0]};
   p.gw[1] = env::Endpoint{x.ip(), kGwPort[1]};
+  // Lazy-reader days: 5 to 100 ms to flush a closing connection (see exchange_ha's).
+  if (h.lazy_day) p.close_linger = 5 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(95 * kMs));
   p.line_a = kLine[0];
   p.line_b = kLine[1];
   p.rerequest_port = kRerequestPort;
