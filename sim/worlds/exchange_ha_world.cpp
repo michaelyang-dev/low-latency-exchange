@@ -101,6 +101,7 @@
 #include "sim/clock.h"
 #include "sim/dist.h"
 #include "sim/exchange/exchange_node.h"
+#include "sim/exchange/risk_workload.h"
 #include "sim/exchange/truth.h"
 #include "sim/exchange/witness_proc.h"
 #include "sim/network.h"
@@ -223,6 +224,7 @@ struct Harness {
   Nanos t0 = 0;
   std::int64_t speed = 1;
   bool clock = false;  // the 1 Hz clock is on
+  bool luld_day = false;  // LULD bands a few ticks wide, varied market parameters
   Nanos lead = 0;
   Nanos close_at = 0, open_at = 0;
   [[nodiscard]] Nanos compressed(Nanos t) const { return t <= t0 ? t : t0 + (t - t0) / speed; }
@@ -244,6 +246,7 @@ struct Harness {
   std::size_t deep = 0;    // resting orders each client posts away from the market (deep-book days)
   std::uint64_t bulk_orders = 0, bursts = 0;
   bool snapd_apart = false;  // snapshotd runs in a process of its own beside each data node
+  bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
   // Rollover seeds: the pair runs the previous trading day first (no clients), then the
   // operator rolls it over to `day` on the same disks (06 §10 Rollover).
   std::unique_ptr<ExchangeDay> prev_day;
@@ -1233,6 +1236,7 @@ class HaClientProc final : public Process {
         rng2_(n.rng(0xC11F)),
         rng3_(n.rng(0xC120)),
         rng4_(n.rng(0xC121)),
+        rng5_(n.rng(0xC122)),
         entry_(config(h.clients[c], heartbeat, idle)),
         stage_{this} {
     send_mean_ = static_cast<Nanos>(100 * kUs + rng_.below(1900 * kUs));
@@ -1616,6 +1620,7 @@ class HaClientProc final : public Process {
                       .display = rng_.below(8) == 0 ? ouch50::Display::Hidden : ouch50::Display::Visible};
       ouch50::TagSet t = tags_;
       if (!market) order_type(e, t);
+      mark_short(e, t);
       std::vector<std::byte> msg = en::enter_msg(e, t);
       if (!entry_.send(msg, now)) return;  // the pending ring is full: not sent
       L.symbol_of[urn] = sym;
@@ -1679,10 +1684,11 @@ class HaClientProc final : public Process {
                     .display = rng3_.below(8) == 0 ? ouch50::Display::Hidden : ouch50::Display::Visible};
     ouch50::TagSet t = tags_;
     order_type(e, t);
+    mark_short(e, t);
     std::vector<std::byte> msg = en::enter_msg(e, t);
     if (!entry_.send(msg, now)) return false;  // the pending ring is full
     L.symbol_of[urn] = sym;
-    L.side_of[urn] = side;
+    L.side_of[urn] = e.side;
     track(urn, 'O', msg);
     return true;
   }
@@ -1715,6 +1721,21 @@ class HaClientProc final : public Process {
       case 6: e.display = ouch50::Display::Attributable; break;
       default: t.set_group_id(static_cast<std::uint16_t>(1 + rng4_.below(3))); break;
     }
+  }
+
+  // Risk days: a sell is sometimes marked short or short exempt, with shares located,
+  // not located or unsaid (Reg SHO, hard-to-borrow symbols, permissions). A stream of
+  // its own, drawn only on risk days.
+  void mark_short(en::EnterArgs& e, ouch50::TagSet& t) {
+    if (!h_.risk_day || e.side != ouch50::Side::Sell) return;
+    switch (rng5_.below(8)) {
+      case 0:
+      case 1: e.side = ouch50::Side::SellShort; break;
+      case 2: e.side = ouch50::Side::SellShortExempt; break;
+      default: return;
+    }
+    if (rng5_.below(3) != 0)
+      t.set_shares_located(rng5_.below(3) == 0 ? ouch50::SharesLocated::No : ouch50::SharesLocated::Yes);
   }
 
   void bulk(Nanos now) {
@@ -1830,6 +1851,7 @@ class HaClientProc final : public Process {
   Rng rng2_;  // Account Query, Modify, Mass Cancel
   Rng rng3_;  // deep-book batches and bursts
   Rng rng4_;  // order types
+  Rng rng5_;  // short sales (risk days)
   ouch50::TagSet tags_;  // UserRefIdx on every message, when the session has a channel of its own
   client::HaOrderEntry entry_;
   std::optional<env::ConnId> conn_[2];
@@ -2218,7 +2240,9 @@ class OperatorProc final : public Process {
       args.u32(en::AdminTag::Account, reset);
       what = "kill reset";
     } else {
-      switch (rng2_.below(8)) {
+      std::uint64_t pick = rng2_.below(8);
+      if (h_.luld_day && pick < 3 && rng2_.below(2) == 0) pick = 3;  // LULD days: bands more often
+      switch (pick) {
         case 0:
           if (killed_.count(account) != 0) return false;
           a.command = static_cast<std::uint16_t>(en::AdminCommand::KillSwitch);
@@ -2227,6 +2251,16 @@ class OperatorProc final : public Process {
           break;
         case 1:
           a.command = static_cast<std::uint16_t>(en::AdminCommand::RiskLimit);
+          if (h_.risk_day) {  // any kind, set, changed or lifted (per symbol with its symbol)
+            const ex::RiskDraw r =
+                ex::draw_risk(rng2_, std::span<const en::SymbolEntry>(h_.day.symbols.data(), h_.traded), true);
+            args.u32(en::AdminTag::Account, account)
+                .u16(en::AdminTag::Kind, static_cast<std::uint16_t>(r.kind))
+                .i64(en::AdminTag::Value, r.value);
+            if (!r.symbol.blank()) args.symbol(r.symbol);
+            what = "risk limit";
+            break;
+          }
           args.u32(en::AdminTag::Account, account)
               .u16(en::AdminTag::Kind, static_cast<std::uint16_t>(en::RiskKind::MaxOrderQty))
               .i64(en::AdminTag::Value, static_cast<std::int64_t>(300 + 100 * rng2_.below(10)));
@@ -2238,7 +2272,11 @@ class OperatorProc final : public Process {
           what = "quote-only";
           break;
         case 3: {
-          const std::int64_t ref = sym.prior_close, w = ref / 20 + ref / 20 * static_cast<std::int64_t>(rng2_.below(3));
+          const std::int64_t ref = sym.prior_close;
+          std::int64_t w = ref / 20 + ref / 20 * static_cast<std::int64_t>(rng2_.below(3));
+          // LULD days: a few ticks, so the book reaches a band, a limit state lasts and the
+          // symbol pauses, then reopens through a halt cross within collars.
+          if (h_.luld_day && rng2_.below(4) != 0) w = kTick * (1 + static_cast<std::int64_t>(rng2_.below(6)));
           a.command = static_cast<std::uint16_t>(en::AdminCommand::LuldBands);
           args.symbol(sym.symbol).i64(en::AdminTag::Lower, ref - w).i64(en::AdminTag::Upper, ref + w);
           what = "LULD bands";
@@ -2583,6 +2621,24 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     spec.cancel_on_disconnect = cod;
     d.specs.push_back(spec);
   }
+  // One day in three is a risk day: half the accounts start with one to four limits of
+  // any kind (05 §7) in the day's table, the traded symbols get an ADV, sells are marked
+  // short now and then, and the operator's intraday limit changes draw every kind. A
+  // stream of its own.
+  Rng risk_cfg = w.stream(Stream::Workload, 0xE99);
+  h.risk_day = risk_cfg.below(3) == 0;
+  if (h.risk_day) {
+    for (std::size_t i = 0; i < h.traded; ++i)
+      d.symbols[i].adv = static_cast<std::uint32_t>(20'000 + risk_cfg.below(400'000));
+    const std::span<const en::SymbolEntry> traded(d.symbols.data(), h.traded);
+    for (const en::AccountEntry& a : d.accounts) {
+      if (risk_cfg.below(2) != 0) continue;
+      for (std::uint64_t k = 1 + risk_cfg.below(4); k > 0; --k) {
+        const ex::RiskDraw r = ex::draw_risk(risk_cfg, traded, false);
+        d.risk.push_back(en::RiskEntry{.account_id = a.account_id, .kind = r.kind, .value = r.value, .symbol = r.symbol});
+      }
+    }
+  }
   // One seed in four starts with the previous trading day (built below), so this one
   // starts after its budget and the rollover's gap. A stream of its own.
   const bool rollover = w.stream(Stream::Workload, 0xE96).below(4) == 0;
@@ -2600,9 +2656,33 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // other draws as they were.
   Rng day_cfg = w.stream(Stream::Workload, 0xE8E);
   h.clock = day_cfg.below(16) == 0;
+  // One day in eight is a LULD day: the 1 Hz clock runs (limit states and display periods
+  // count its ticks), the operator's LULD bands are mostly a few ticks wide (so limit
+  // states become Trading Pauses that reopen through halt crosses, collars and
+  // extensions), and the market parameters vary: shorter periods, other price tests and
+  // thresholds. A stream of its own.
+  Rng luld_cfg = w.stream(Stream::Workload, 0xE9A);
+  h.luld_day = luld_cfg.below(8) == 0;
+  h.clock = h.clock || h.luld_day;
   for (en::ScheduleEntry e : en::standard_schedule(false, h.clock)) {
     if (e.timer_id != 0) e.time_ns = h.compressed(e.time_ns);
     d.schedule.push_back(e);
+  }
+  if (h.luld_day) {
+    auto param = [&](en::Param p, std::int64_t v) {
+      if (luld_cfg.below(2) == 0)
+        d.schedule.push_back(en::ScheduleEntry{.timer_id = 0, .kind = static_cast<en::TimerKind>(0), .arg = static_cast<std::uint16_t>(p), .time_ns = v});
+    };
+    param(en::Param::LimitStateSec, static_cast<std::int64_t>(1 + luld_cfg.below(15)));
+    param(en::Param::LuldPauseSec, static_cast<std::int64_t>(5 + luld_cfg.below(300)));
+    param(en::Param::ExtensionSec, static_cast<std::int64_t>(5 + luld_cfg.below(300)));
+    param(en::Param::HaltPeriodSec, static_cast<std::int64_t>(5 + luld_cfg.below(300)));
+    param(en::Param::MwcbPeriodSec, static_cast<std::int64_t>(30 + luld_cfg.below(900)));
+    param(en::Param::PriceTests, static_cast<std::int64_t>(luld_cfg.below(8)));
+    param(en::Param::PriceTestBps, static_cast<std::int64_t>(1 + luld_cfg.below(2000)));
+    param(en::Param::PriceTestMin, kTick * static_cast<std::int64_t>(luld_cfg.below(100)));
+    param(en::Param::ThresholdBps, static_cast<std::int64_t>(luld_cfg.below(2000)));
+    param(en::Param::ThresholdMin, kTick * static_cast<std::int64_t>(luld_cfg.below(100)));
   }
   d.local_midnight = kSimEpochRealNs - (h.t0 - h.lead);
   h.open_at = h.virtual_of(hms_ns(9, 30, 0));
