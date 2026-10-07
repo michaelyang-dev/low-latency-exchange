@@ -832,3 +832,49 @@ bugs:
       As with DST-014, rule 2 asks for a bug found by exsim, and here exsim confirmed a
       bug that code reading had already found. The fix, the regression test, the
       process model and the oracle are kept.
+  - id: DST-018
+    title: "snapshotd's follow cursor, in a segment it had not read a record of, took a rejoin's records for its history after the segment was recycled"
+    component: journal
+    targets: [T05, T24]
+    category: production
+    found_utc: "2026-10-07T15:17:00Z"
+    campaign_id: 20261007T143605Z-0f8912e7-3c09b3d67f377146
+    sha_found: 0f8912e7eb76ac6faf1734e2795e141508672e9a
+    seed: "0x3c09b3d67f377726"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha"]
+    swarm_digest: "0x9aa3ef9be1c88f88"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-SNAPSHOT
+    signature: "O-SNAPSHOT:607507:0x699bf5002e628f34"
+    root_cause: >-
+      FollowCursor (src/journal/follow_cursor.h), which snapshotd follows the journal
+      with, positions again after a suspected divergence expecting the content crc of
+      the record it delivered last, but kept that expectation only when it had walked a
+      record of the segment it was in. In the seed (snapshotd as a process of its own)
+      xb's snapshotd had applied records up to 1262 and moved into the writer's next
+      segment, whose header the writer writes at the switch, before its first record.
+      exchanged on xb then died and rejoined: the truncation to 1208 recycled that
+      segment, and the catch-up wrote xa's records from 1209, from a new segment starting
+      at 1225. The cursor suspected a divergence (the segment it was reading was
+      recycled), positioned again at 1263 without an expectation, walked the new
+      segment's 1225..1262, took them for its history and delivered the new 1263, whose
+      prev crc names a record snapshotd never applied. snapshotd applied the new records
+      on top of the old 1209..1262, and its snapshot at 1289 held a state no replay of
+      the final journal reaches (O-SNAPSHOT). Recovery or a restarted snapshotd starting
+      from it would have taken that state. Fix: once the position is verified, the chain
+      state is the record delivered last in any segment, and a suspicion (or an I/O
+      failure) positions again expecting it, so the rewrite is a divergence and snapshotd
+      starts over from a snapshot the journal still holds.
+    fix_sha: 199053472e265ce3f5a9088eb9b89023d2882656
+    regression_test: tests/sim_regressions/DST-018_follow_cursor_segment_switch
+    counted: true
+    count_reason: >-
+      production journal code (the follow cursor snapshotd runs on), found by exsim in a
+      2,000-seed exchange_ha campaign (1 failure) on a seed that uses none of the
+      dimensions added at the found tree, so the defect predates them; reproduces from
+      seed at the found tree and at the fix's parent (the same trace hash), passes with
+      the fix; the mechanism was not predicted: DST-017's fix read the cursor and relied
+      on a later truncation showing as a divergence, and the segment-switch case was
+      identified from the seed's trace. Fixed with a seed-independent regression test
+      that fails without the fix (41 records of the new history delivered).
