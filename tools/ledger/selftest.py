@@ -215,8 +215,12 @@ def test_exsim(exsim: str) -> None:
         check("O-EXACTLY-ONCE" in per_sha, f"failing seed kept per signature class: {per_sha}")
         rec = json.loads((led / "campaigns.jsonl").read_text().splitlines()[-1])
         check(rec["seeds_run"] == 30 and rec["failed"] > 0, f"campaign record counts seeds: {rec}")
+        # One light world: this checks the campaign's accounting, and a day of the exchange
+        # worlds (a deep book: millions of events) run twice under a sanitizer outlasts
+        # the campaign's timeout; their determinism has tests of its own.
         r = py(str(REPO / "tools" / "sim" / "campaign.py"), "--exsim", exsim, "--seeds", "12", "--jobs", "3",
-               "--batch", "5", "--seed-base", "100", "--check-determinism", "--ledger-dir", str(led))
+               "--batch", "5", "--seed-base", "100", "--check-determinism", "--world", "pingpong",
+               "--ledger-dir", str(led))
         check(r.returncode == 0, f"clean campaign passes: {r.stdout}")
         rec = json.loads((led / "campaigns.jsonl").read_text().splitlines()[-1])
         check(rec["seeds_run"] == 12 and rec["failed"] == 0 and rec["determinism_mismatches"] == 0,
