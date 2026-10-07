@@ -423,6 +423,22 @@ std::expected<void, std::string> Node::recover_or_start() {
 
   if (rejoin_) return rejoin();
 
+  // A fresh day start (the journal recovered empty): the day's output log starts empty
+  // (outlog_messages, DST-019), and a paired node writes its incarnation file before it
+  // sequences or serves anything, or does not start: a restart that finds the file
+  // rejoins instead of starting the day again (DST-006).
+  if (recovered_index_ == 0) {
+    if (const std::uint64_t stale = outlog_messages(outlog_positions(*outlog_)); stale != 0) {
+      std::printf("exchanged: day start: the output log holds %" PRIu64
+                  " messages of an earlier start of the day (its journal is gone): reset\n",
+                  stale);
+      NLOG_WARN("day start: output log reset ({} messages of an earlier start of the day)", stale);
+    }
+    if (auto r = reset_outlog(*outlog_, cfg_); !r) return std::unexpected("day start: " + r.error());
+    if (cfg_.mode == NodeMode::Paired && !write_incarnation(cfg_.journal_dir() + "/incarnation", 1))
+      return std::unexpected("day start: cannot write " + cfg_.journal_dir() + "/incarnation");
+  }
+
   // Per-session SoupBinTCP and MoldUDP64 positions from the output log (regenerated).
   {
     OutlogPositions pos = outlog_positions(*outlog_);
@@ -444,7 +460,6 @@ std::expected<void, std::string> Node::recover_or_start() {
     if (!start_fresh_day(*sequencer_, *clock_, dp, day_->config()))
       return std::unexpected(std::string("day start: the L2 ring cannot hold the day's configuration"));
     sh_->sequenced.store(sequencer_->chain().last_index);
-    if (cfg_.mode == NodeMode::Paired) write_incarnation(cfg_.journal_dir() + "/incarnation", 1);
     std::printf("exchanged: day %u started (%" PRIu64 " records)\n", cfg_.date, sequencer_->chain().last_index);
     nodelog::day_started(cfg_.date, sequencer_->chain().last_index);
     return {};

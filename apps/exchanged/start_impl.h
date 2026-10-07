@@ -73,6 +73,15 @@ template <class OutDayT>
   p.itch_next = out.itch().count() + 1;
   return p;
 }
+// The messages an output log holds, all its files together. A fresh day start (the
+// journal recovered empty) finds none unless an earlier start of the day left them, its
+// journal since moved aside or lost; they derive from no record the journal holds, and
+// their count would number the new day start's messages (DST-019), so it resets them.
+[[nodiscard]] inline std::uint64_t outlog_messages(const OutlogPositions& p) noexcept {
+  std::uint64_t n = p.itch_next - 1;
+  for (const auto& [id, next] : p.soup_next) n += next - 1;
+  return n;
+}
 
 // MdConfig::republish_from: messages recovery regenerated into itch.bin may never have
 // been multicast (a solo restart, a RESUME): md sends them first. 0: nothing.
