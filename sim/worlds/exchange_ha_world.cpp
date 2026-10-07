@@ -1733,7 +1733,14 @@ class HaClientProc final : public Process {
       case 3: t.set_post_only(ouch50::PostOnly::PostOnly); break;
       case 4:
         e.tif = ouch50::TimeInForce::Gtt;
-        t.set_expire_time(static_cast<std::uint32_t>(9 * 3600 + 31 * 60 + rng4_.below(6 * 3600)));
+        // The day runs compressed into a second or two of engine time from 09:24:00, so
+        // on a day with the 1 Hz clock half the GTT orders expire within it (at 09:24:00
+        // or :01) and are cancelled on a tick (reason Timeout); the others name a time of
+        // the uncompressed day, which never comes.
+        if (h_.clock && rng4_.below(2) == 0)
+          t.set_expire_time(static_cast<std::uint32_t>(h_.t0 / kNsPerSec) + static_cast<std::uint32_t>(rng4_.below(2)));
+        else
+          t.set_expire_time(static_cast<std::uint32_t>(9 * 3600 + 31 * 60 + rng4_.below(6 * 3600)));
         break;
       case 5: e.tif = rng4_.below(2) == 0 ? ouch50::TimeInForce::Gtx : ouch50::TimeInForce::AfterHours; break;
       case 6: e.display = ouch50::Display::Attributable; break;
