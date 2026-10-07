@@ -197,9 +197,11 @@ class FollowCursor {
     detail_ = why;
     last_suspicion_ = why;
     ++st_.suspicions;
-    // Position again expecting the record walked last once the position was verified
-    // (otherwise the one seek() named).
-    if (verified_ && have_last_ && chain_.last_index + 1 == next_) want_crc_ = chain_.last_crc;
+    // Position again expecting the record delivered last once the position was verified
+    // (otherwise the one seek() named). That is the chain state, also in a segment the
+    // cursor moved into without walking a record yet (DST-018: a rejoin recycled it, and
+    // positioned without the expectation the cursor took the new history for its own).
+    if (verified_ && chain_.last_index + 1 == next_) want_crc_ = chain_.last_crc;
     drop();
     if (suspect_) {
       diverged_ = true;
@@ -215,7 +217,7 @@ class FollowCursor {
 
   FollowStatus io_failure() {
     detail_ = "device read failed";
-    if (verified_ && have_last_ && chain_.last_index + 1 == next_) want_crc_ = chain_.last_crc;
+    if (verified_ && chain_.last_index + 1 == next_) want_crc_ = chain_.last_crc;
     drop();
     return FollowStatus::IoError;
   }
