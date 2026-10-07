@@ -19,7 +19,8 @@
 //     events (05 §4 step 8), so a Disconnect must follow every order its connection sent
 //     before it, and a reconnect's Login precede that connection's orders (DST-004). An
 //     event the full queue refused waits in a backlog, and this gateway's later OUCH
-//     waits behind it. (The SessionQueue constructor argument is not used.)
+//     waits behind it, and so do logins, so the backlog stays within one event per
+//     connection (DST-020). (The SessionQueue constructor argument is not used.)
 //   - egress: OUCH outputs are taken from the egress ring (md/egress.h) only once their
 //     journal index is <= the release watermark (Output Rule, ADR-005). A released
 //     message is appended to the session's ReplayStore and sent if the session is
@@ -168,6 +169,9 @@ class Gateway {
       conns_[i].policy = Policy{this, i};
       conns_[i].backlog = std::make_unique<std::byte[]>(cfg_.rx_backlog_bytes);
     }
+    // While session events wait for the queue, logins wait too (feed()): the backlog then
+    // grows by at most one event per logged-in connection (its logout or disconnect).
+    cfg_.session_event_backlog = std::max(cfg_.session_event_backlog, 2 * std::size_t{n});
     events_.init(cfg_.session_event_backlog);
     // Stop reading the port while a blocked connection could not take one more poll's
     // worth of reads.
@@ -363,6 +367,14 @@ class Gateway {
   std::size_t feed(Conn& c, std::span<const std::byte> data, Nanos now) {
     std::size_t off = 0;
     while (off < data.size() && c.sess && !c.blocked && !c.closing) {
+      // A connection not logged in waits (its input staged) while session events wait
+      // for the queue: otherwise every reconnect queued a Login, and the disconnects and
+      // reconnects of a congested day overflowed the backlog and lost events (DST-020).
+      // retry_blocked() resumes it once the backlog is empty.
+      if (c.session < 0 && !events_.empty()) {
+        c.blocked = true;
+        break;
+      }
       const soup::Actions& a = c.sess->on_bytes(data.subspan(off), now);
       const std::size_t used = a.consumed;
       handle(c, a, now);
@@ -705,6 +717,9 @@ class Gateway {
   void end_day(Nanos now) {
     if (ended_) return;
     ended_ = true;
+    // Nothing more is journaled after DayEnd (06 §10): session events still waiting for
+    // the queue never will be, and logins no longer wait behind them (feed()).
+    events_.clear();
     NLOG_INFO("gw{} end of day: ending {} sessions", cfg_.index, sessions_.size());
     for (SessionState& s : sessions_) {
       if (s.conn < 0) continue;
