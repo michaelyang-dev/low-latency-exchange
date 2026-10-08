@@ -57,10 +57,6 @@ struct FakeHost {
   // applier: a record leaves L2 once applied, so at most l2_cap records past `applied`.
   std::size_t l2_cap = 0;
   bool refuse_appends = false;   // simulate a full L2 ring
-  // Records in memory (0: all). As exchanged's record log, which keeps its newest records
-  // in memory and reads older ones back from L3, a record outside the newest `arena` that
-  // is not durable yet cannot be read (DST-021).
-  std::size_t arena = 0;
   // ---- applier ----
   std::uint64_t applied = 0;
   std::uint64_t state = 0;
@@ -112,7 +108,6 @@ struct FakeHost {
   }
   std::uint32_t log_read(std::uint64_t idx, std::span<std::byte> out) const {
     if (idx == 0 || idx > log.size()) return 0;
-    if (arena != 0 && idx + arena <= log.size() && idx > durable) return 0;
     const Bytes& r = log[idx - 1];
     std::copy(r.begin(), r.end(), out.begin());
     return static_cast<std::uint32_t>(r.size());

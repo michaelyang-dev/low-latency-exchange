@@ -11,9 +11,15 @@
 // named 1188 the end of their common epoch. The backup could not read its record 1188
 // (out of memory, not in L3 yet), took the failed read for a mismatch, raised a
 // divergence alarm and threw its whole journal away (truncation to 0).
+//
+// One replica is driven by hand: the witness's answer to its RESUME names the primary,
+// and the primary's EPOCH_END names record 5 the end of their common epoch.
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
+#include <optional>
+#include <variant>
 #include <vector>
 
 #include "../../unit/repl/repl_harness.h"
@@ -21,47 +27,83 @@
 namespace lle::repl::test {
 namespace {
 
-constexpr NodeId kA = 0;
-constexpr NodeId kB = 1;
+constexpr NodeId kPrimary = 0;
+constexpr NodeId kSelf = 1;
+
+// exchanged's record log: the newest `arena` records are in memory, older ones are read
+// back from L3, so one outside the arena that is not durable yet cannot be read.
+struct ArenaHost : FakeHost {
+  std::size_t arena = 2;
+  std::uint32_t log_read(std::uint64_t idx, std::span<std::byte> out) const {
+    if (idx != 0 && idx + arena <= log.size() && idx > durable) return 0;
+    return FakeHost::log_read(idx, out);
+  }
+};
+
+std::optional<wire::EpochEndQuery> last_query(const ArenaHost& h) {
+  std::optional<wire::EpochEndQuery> q;
+  for (const Bytes& b : h.to_peer) {
+    const auto m = wire::decode(b);
+    if (m && std::holds_alternative<wire::EpochEndQuery>(*m)) q = std::get<wire::EpochEndQuery>(*m);
+  }
+  return q;
+}
 
 TEST(DST021, AnUnreadableTruncationPointIsAskedAgainNotTakenForADivergence) {
-  Cluster c;
-  c.sequence(kA, 4);  // 2..5
-  c.run(3 * kMs);
-  ASSERT_EQ(c.host(kB).log.size(), 5u);
-  // 6..9 are sequenced by A but never reach B, then A crashes (process: its L2 keeps them).
-  c.data_filter = [&](int dir, const Bytes&) { return dir != 0; };
-  c.sequence(kA, 4);
-  c.step();
-  ASSERT_EQ(c.host(kA).log.size(), 9u);
-  c.crash(kA);
-  c.data_filter = [](int, const Bytes&) { return true; };
-  ASSERT_TRUE(c.run_until([&] { return c.rep(kB).role() == Role::kSoloPrimary && c.rep(kB).sequencing_allowed(); },
-                          60 * kMs));
-  c.sequence(kB, 3);  // epoch 2 from 6: A's 6..9 diverge, the truncation point is 5
-  c.run(1 * kMs);
+  // Records 1..9 of epoch 1, durable only to 1: records 2..7 cannot be read back yet.
+  ArenaHost h;
+  day_start(h, kPrimary);
+  (void)h.sequence_n(1, 8);
+  ASSERT_EQ(h.log.size(), 9u);
+  h.flush_on_request = false;
+  h.durable = 1;
 
-  // A restarts with its journal durable only to 1 and its newest two records in memory:
-  // record 5 cannot be read back until the journal reaches it.
-  FakeHost& a = c.host(kA);
-  a.flush_on_request = false;
-  a.durable = 1;
-  a.arena = 2;
-  c.restart(kA);
-  c.run(30 * kMs);
-  EXPECT_FALSE(a.has_alarm(Alarm::kDiverged)) << "A took a record it could not read yet for a divergence";
-  EXPECT_TRUE(a.truncations.empty()) << "A truncated before it could check its truncation point";
-  EXPECT_EQ(c.rep(kA).role(), Role::kRecovering);
+  Nanos now = 0;
+  Replica<ArenaHost> rep(node_config(kSelf, 2), h);
+  rep.start_recovering(now);
+  // W's answer to the RESUME: the configuration has another primary, so hand-shake with it.
+  const witness::Encoded rej = witness::encode(witness::Reject{2, kPrimary, witness::member_bit(kPrimary),
+                                                               witness::MsgType::kResume, witness::RejectReason::kStaleEpoch,
+                                                               kSelf, 2, 1});
+  rep.on_witness(rej.span(), now);
+  const std::optional<wire::EpochEndQuery> q = last_query(h);
+  ASSERT_TRUE(q.has_value()) << "no EPOCH_END query after the witness named the primary";
 
-  // The journal catches up: record 5 can be read, and the rejoin goes on as it would have.
-  a.durable = a.log.size();
-  a.flush_on_request = true;
-  ASSERT_TRUE(c.run_until([&] { return c.n[kA].up && c.rep(kA).role() == Role::kBackup; }, 100 * kMs));
-  EXPECT_EQ(a.truncations, std::vector<std::uint64_t>{5});
-  EXPECT_FALSE(a.has_alarm(Alarm::kDiverged));
-  c.sequence(kB, 5);
-  c.run(5 * kMs);
-  EXPECT_EQ(a.log, c.host(kB).log);
+  // The primary: epoch 1 ends at record 5 in its history (6..9 never reached it).
+  wire::EpochEnd e;
+  e.from = kPrimary;
+  e.query_epoch = q->epoch;
+  e.query_id = q->query_id;
+  e.end_index = 5;
+  e.end_crc = h.crc_of(5);
+  e.end_epoch = 1;
+  e.primary_epoch = 2;
+  e.tail = 7;
+  e.start_index = 1;
+  e.start_crc = h.crc_of(1);
+  std::array<std::byte, wire::kMaxDatagram> buf{};
+  const std::size_t n = wire::encode(wire::Message{e}, buf);
+  ASSERT_NE(n, 0u);
+  rep.on_peer(std::span<const std::byte>(buf.data(), n), now);
+  EXPECT_FALSE(h.has_alarm(Alarm::kDiverged)) << "a record not readable yet was taken for a divergence";
+  EXPECT_TRUE(h.truncations.empty()) << "the replica truncated before it could check its truncation point";
+  EXPECT_EQ(rep.role(), Role::kRecovering);
+
+  // The journal catches up: record 5 can be read; the query goes out again and its answer
+  // now truncates the divergent tail, 6..9.
+  h.durable = h.log.size();
+  h.to_peer.clear();
+  for (int i = 0; i < 20 && !last_query(h); ++i) {
+    now += 1 * kMs;
+    (void)rep.poll(now);
+  }
+  const std::optional<wire::EpochEndQuery> again = last_query(h);
+  ASSERT_TRUE(again.has_value()) << "the replica did not ask again";
+  e.query_id = again->query_id;
+  const std::size_t n2 = wire::encode(wire::Message{e}, buf);
+  rep.on_peer(std::span<const std::byte>(buf.data(), n2), now);
+  EXPECT_EQ(h.truncations, std::vector<std::uint64_t>{5});
+  EXPECT_FALSE(h.has_alarm(Alarm::kDiverged));
 }
 
 }  // namespace
