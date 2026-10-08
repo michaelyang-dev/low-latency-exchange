@@ -17,26 +17,29 @@ namespace {
 using worlds::WorldKind;
 
 #if defined(__has_feature)
-#if __has_feature(memory_sanitizer)
-constexpr bool kMsan = true;
+#if __has_feature(memory_sanitizer) || __has_feature(thread_sanitizer)
+constexpr bool kSlowSanitizer = true;
 #else
-constexpr bool kMsan = false;
+constexpr bool kSlowSanitizer = false;
 #endif
+#elif defined(__SANITIZE_THREAD__)
+constexpr bool kSlowSanitizer = true;
 #else
-constexpr bool kMsan = false;
+constexpr bool kSlowSanitizer = false;
 #endif
 
 // The worlds of this build, except `ha`: it has its own seeded test
 // (tests/integration/repl) and generates its own fault schedule; and except
 // exchange_ha_split, which runs the exchange_ha world again in split mode and has its own
 // determinism test (sim_determinism_exchange_ha_split_8x2). Under MSan (a Debug build)
-// also except the exchange worlds: a day with a deep book takes minutes there, and the
-// MSan job runs them through exsim.
+// and TSan also except the exchange worlds: a day with a deep book takes minutes there,
+// the simulation runs on one thread (TSan finds nothing in it), and the MSan job runs
+// them through exsim.
 std::vector<WorldKind> test_worlds() {
   std::vector<WorldKind> v;
   for (const WorldKind w : worlds::built_worlds()) {
     if (w == WorldKind::Ha || w == WorldKind::ExchangeHaSplit) continue;
-    if (kMsan && (w == WorldKind::Exchange || w == WorldKind::ExchangeHa)) continue;
+    if (kSlowSanitizer && (w == WorldKind::Exchange || w == WorldKind::ExchangeHa)) continue;
     v.push_back(w);
   }
   return v;

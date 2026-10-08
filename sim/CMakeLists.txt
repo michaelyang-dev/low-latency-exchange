@@ -94,8 +94,10 @@ target_compile_definitions(lle_sim_worlds PUBLIC ${_lle_world_defs})
 lle_app(exsim SOURCES main.cpp DEPS lle_sim_worlds)
 
 # The exchange world runs a whole node per seed (about a second in Debug), so its
-# determinism double-run takes fewer seeds than sim_determinism_128x2.
-if(LLE_BUILD_TESTS AND TARGET lle_sim_exchange)
+# determinism double-run takes fewer seeds than sim_determinism_128x2. Not under TSan:
+# the simulation runs on one thread, so TSan finds nothing in it, and a day with a deep
+# book takes many minutes there (the macOS TSan job outgrew its time).
+if(LLE_BUILD_TESTS AND TARGET lle_sim_exchange AND NOT "thread" IN_LIST LLE_SANITIZE)
   add_test(NAME sim_determinism_exchange_16x2
     COMMAND exsim --world=exchange --seed=1000 --seeds=16 --check-determinism --quiet)
   set_tests_properties(sim_determinism_exchange_16x2 PROPERTIES LABELS "unit;sim" TIMEOUT ${LLE_SIM_SLOW_TEST_TIMEOUT})
