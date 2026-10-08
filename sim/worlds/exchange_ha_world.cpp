@@ -249,6 +249,7 @@ struct Harness {
   bool snapd_apart = false;  // snapshotd runs in a process of its own beside each data node
   bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
   bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
+  int lossy_link = -1;       // a lossy control link: src * 3 + dst (-1: none)
   Nanos close_linger = 0;    // lazy-reader days: a closing connection's flush bound
   std::size_t ring_bytes = 0;  // lazy-reader days: a stream direction's socket buffer
   // Rollover seeds: the pair runs the previous trading day first (no clients), then the
@@ -2820,6 +2821,17 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   Node& xb = w.add_node("xb", NodeOptions{true, true});
   Node& wn = w.add_node("w", NodeOptions{true, true});
   LLE_ASSERT(xa.id() == kX[0] && xb.id() == kX[1] && wn.id() == kW, "node ids");
+  // A lossy control link (one day in four): one directed link among the data nodes and W
+  // drops half to nine tenths of its datagrams while faults run (a failing NIC or
+  // cable), so grants, requests, heartbeats or replication are sent again and again. A
+  // stream of its own.
+  if (Rng lossy_cfg = w.stream(Stream::Workload, 0xE9E); lossy_cfg.below(4) == 0) {
+    const NodeId ends[3] = {kX[0], kX[1], kW};
+    const auto k = static_cast<std::size_t>(lossy_cfg.below(6));
+    const NodeId src = ends[k / 2], dst = ends[(k / 2 + 1 + k % 2) % 3];
+    w.net().link_params(src, dst).loss_ppm = static_cast<std::uint32_t>(500'000 + lossy_cfg.below(400'000));
+    h.lossy_link = static_cast<int>(src * 3 + dst);
+  }
   Node* xs[2] = {&xa, &xb};
   // Replication timing (ExchangeConfig [ha]), drawn per seed as the ha world does.
   const Nanos t_d = 10 * kMs + static_cast<Nanos>(wl.below(15 * kMs + 1));
@@ -3146,9 +3158,13 @@ Report run_exchange_ha_world(const Options& o, bool split) {
         for (const auto& lc : h.comparators) compared += lc->stats().compared;
         for (const HaLedger& c : h.clients) read_pauses += c.read_pauses;
         return nodes + " grants=P" + std::to_string(promotes) + "/S" + std::to_string(solos) + "/J" +
-               std::to_string(joins) + "/R" + std::to_string(resumes) + " eos=" + std::to_string(eos) + "/" +
-               std::to_string(h.clients.size()) + " sub_end=" + std::to_string(ended) + "/" +
-               std::to_string(h.subs.size()) + " ouch=" + std::to_string(msgs) + " copies=" + std::to_string(copies) +
+               std::to_string(joins) + "/R" + std::to_string(resumes) +
+               (h.lossy_link < 0
+                    ? std::string()
+                    : " lossy=" + std::to_string(h.lossy_link / 3) + ">" + std::to_string(h.lossy_link % 3)) +
+               " eos=" + std::to_string(eos) + "/" + std::to_string(h.clients.size()) +
+               " sub_end=" + std::to_string(ended) + "/" + std::to_string(h.subs.size()) +
+               " ouch=" + std::to_string(msgs) + " copies=" + std::to_string(copies) +
                " itch=" + std::to_string(h.subs.empty() ? 0 : h.subs[0].next - 1) +
                " ab_compared=" + std::to_string(compared) + " pushes=" + std::to_string(h.pushes.size()) +
                " client_takeovers=" + std::to_string(takeovers) + " resent=" + std::to_string(resent) +
@@ -3160,15 +3176,15 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                " cod_fills_before_down=" + std::to_string(h.cod_fills_before_down) +
                " snapshots=" + std::to_string(h.snapshots_written) +
                " dropped_at_close=" + std::to_string(h.dropped_at_close) +
-               " operator_restarts=" + std::to_string(h.operator_restarts) +
-               " controls=" + std::to_string(h.controls) + " symbols=" + std::to_string(h.day.symbols.size()) +
-               " deep=" + std::to_string(h.deep) + " bulk_orders=" + std::to_string(h.bulk_orders) +
-               " bursts=" + std::to_string(h.bursts) + " snapd_apart=" + std::to_string(h.snapd_apart ? 1 : 0) +
+               " operator_restarts=" + std::to_string(h.operator_restarts) + " controls=" + std::to_string(h.controls) +
+               " symbols=" + std::to_string(h.day.symbols.size()) + " deep=" + std::to_string(h.deep) +
+               " bulk_orders=" + std::to_string(h.bulk_orders) + " bursts=" + std::to_string(h.bursts) +
+               " snapd_apart=" + std::to_string(h.snapd_apart ? 1 : 0) +
                " rollover=" + std::to_string(h.prev_day ? 1 : 0) + " risk=" + std::to_string(h.risk_day ? 1 : 0) +
                " luld=" + std::to_string(h.luld_day ? 1 : 0) + " read_pauses=" + std::to_string(read_pauses) +
-               " gated=" + std::to_string(h.crashes_gated) + " hash_every=" +
-               std::to_string(h.params[0].hash_interval) + " hash_checks=" + std::to_string(hash_checks) +
-               " alarms=" + std::to_string(h.alarms);
+               " gated=" + std::to_string(h.crashes_gated) +
+               " hash_every=" + std::to_string(h.params[0].hash_interval) +
+               " hash_checks=" + std::to_string(hash_checks) + " alarms=" + std::to_string(h.alarms);
       });
 }
 }  // namespace
