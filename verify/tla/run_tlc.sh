@@ -9,7 +9,9 @@ jar="${1:?path to tla2tools.jar}"
 workers="${2:-auto}"
 safety_cfg="${3:-HotStandby.cfg}"
 cd "$(dirname "$0")"
-meta=$(mktemp -d)
+# TLC_METADIR: where TLC keeps its state queue and fingerprint set (default: a temporary
+# directory); the nightly full model needs a disk with room for both.
+meta=$(mktemp -d "${TLC_METADIR:-${TMPDIR:-/tmp}}/tlc.XXXXXX")
 trap 'rm -rf "$meta"' EXIT
 # TLC 1.8 builds write trace-explorer specs next to the model by default; 2.19
 # (release v1.7.4) has no such option and writes none.
