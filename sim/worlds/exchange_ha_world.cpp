@@ -2821,11 +2821,12 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   Node& xb = w.add_node("xb", NodeOptions{true, true});
   Node& wn = w.add_node("w", NodeOptions{true, true});
   LLE_ASSERT(xa.id() == kX[0] && xb.id() == kX[1] && wn.id() == kW, "node ids");
-  // A lossy control link (one day in four): one directed link among the data nodes and W
-  // drops half to nine tenths of its datagrams while faults run (a failing NIC or
-  // cable), so grants, requests, heartbeats or replication are sent again and again. A
-  // stream of its own.
-  if (Rng lossy_cfg = w.stream(Stream::Workload, 0xE9E); lossy_cfg.below(4) == 0) {
+  // A lossy control link (one day in four, when network faults are on): one directed link
+  // among the data nodes and W drops half to nine tenths of its datagrams while faults
+  // run (a failing NIC or cable), so grants, requests, heartbeats or replication are sent
+  // again and again. A stream of its own.
+  if (Rng lossy_cfg = w.stream(Stream::Workload, 0xE9E);
+      lossy_cfg.below(4) == 0 && w.faults().enabled(FaultClass::Net)) {
     const NodeId ends[3] = {kX[0], kX[1], kW};
     const auto k = static_cast<std::size_t>(lossy_cfg.below(6));
     const NodeId src = ends[k / 2], dst = ends[(k / 2 + 1 + k % 2) % 3];
