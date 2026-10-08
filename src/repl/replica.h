@@ -1070,8 +1070,16 @@ class Replica {
     std::uint64_t t = std::min(tail.last_index, e.end_index);
     if (t == e.end_index && t != 0) {
       // Verify the epoch-based truncation point: the record there must be the primary's.
+      // A record the log cannot read back yet is no evidence either way (exchanged's
+      // record log keeps its newest records in memory and reads older ones from L3, so
+      // one that left memory before it was durable cannot be read for a while): ask
+      // again (poll_recovering, rejoin_retry) until it can be read (DST-021).
       std::span<const std::byte> rec;
-      if (!read_record(t, rec) || load_le32(rec.data() + journal::hdr::kCrc) != e.end_crc) {
+      if (!read_record(t, rec)) {
+        SIM_PROBE("repl.rejoin_waits_to_read_its_truncation_point");
+        return;
+      }
+      if (load_le32(rec.data() + journal::hdr::kCrc) != e.end_crc) {
         alarm(Alarm::kDiverged, t);
         t = 0;
       }
