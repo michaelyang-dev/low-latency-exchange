@@ -192,6 +192,7 @@ def main() -> int:
         return run_batch(a.exsim, s, n, args, a.timeout)
 
     skipped = 0
+    early_failures = 0
     with cf.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool:
         futs = [pool.submit(guarded, s, n) for s, n in batches]
         for f in cf.as_completed(futs):
@@ -200,6 +201,13 @@ def main() -> int:
                 skipped += 1
                 continue
             seeds += r["seeds"]
+            # A failure is reported when its batch ends, not only in the summary: a long
+            # campaign's first failure can be triaged while it runs on (the first 100).
+            for s in r["seeds"]:
+                if s["result"] != "PASS":
+                    early_failures += 1
+                    if early_failures <= 100:
+                        print(f"  failed: 0x{s['seed']:016x} {s.get('world')} {s['signature']}", flush=True)
             faults.update(r["faults"])
             for name, p in r["probes"].items():
                 prev = probes.get(name, {"hits": 0, "status": p["status"], "rare": p["rare"]})
