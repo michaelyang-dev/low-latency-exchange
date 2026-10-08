@@ -968,3 +968,44 @@ bugs:
       passes with the fix applied to it; the mechanism was not predicted. Fixed with a
       regression test that fails without the fix (165 events lost) and checks that a
       login waiting at the day's end still gets End of Session.
+  - id: DST-021
+    title: "a rejoining replica took a record it could not read back yet at its truncation point for a divergence: it raised a divergence alarm and threw its whole journal away"
+    component: repl
+    targets: [T24, T26]
+    category: production
+    found_utc: "2026-10-08T10:04:00Z"
+    campaign_id: 20261008T072811Z-9579cb20-4e5345212730732c
+    sha_found: 9579cb208513821f8273377f20cfc96d524d08b4
+    seed: "0x4e5345212730a51b"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha_split"]
+    swarm_digest: "0xdd4fd5b96ae78c24"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-HA-INTERNAL
+    signature: "O-HA-INTERNAL:381907:0xc130de8454b8fc9f"
+    root_cause: >-
+      A rejoining replica (src/repl/replica.h, handle(EpochEnd)) verifies the
+      epoch-based truncation point t: its record t must carry the crc the primary named.
+      It treated a failed read of record t like a mismatch. exchanged's record log
+      (apps/exchanged/record_log.h) keeps its newest records in memory and reads older
+      ones back from L3, so a record that left memory before the journal made it
+      durable cannot be read for a while. In the seed (exchange_ha_split) xb, catching
+      up from xa, the solo primary of epoch 4, had copied records to 2172 while its own
+      journal was durable only to 696 (its memory held 1534 on). xa failed with 1188
+      durable (solo mode had released no more), restarted and resumed in epoch 5; on
+      xb's rejoin it named 1188 the end of epoch 4. xb could not read its record 1188,
+      raised a divergence alarm (O-HA-INTERNAL) and truncated its whole journal (to 0,
+      exiting to do it while running), to catch up again from the start of the day.
+      Fix: an unreadable record at the truncation point is no evidence either way; the
+      rejoin asks again on its retry timer until the record can be read, and a
+      mismatch still raises the alarm. The fix tag (dst/DST-021/fix) is the fix applied
+      to the found tree.
+    fix_sha: d64a99f485966c20dd1a3eb2b6d97d53acb3ef28
+    regression_test: tests/sim_regressions/DST-021_rejoin_unreadable_truncation_point
+    counted: true
+    count_reason: >-
+      production replication code, found by exsim in a 20,000-seed exchange_ha_split
+      campaign (one failure); reproduces from seed at the found tree and passes with the
+      fix applied to it; the mechanism was not predicted. Fixed with a regression test
+      that fails without the fix (a divergence alarm and a truncation before the record
+      could be read) and checks that the rejoin then truncates to the right point.
