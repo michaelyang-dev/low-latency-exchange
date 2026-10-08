@@ -215,6 +215,8 @@ struct Harness {
   bool snapd_apart = false;  // snapshotd runs in a process of its own beside the node
   bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
   bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
+  Nanos close_linger = 0;    // lazy-reader days: a closing connection's flush bound
+  std::size_t ring_bytes = 0;  // lazy-reader days: a stream direction's socket buffer
   // Rollover seeds: the node runs the previous trading day first (no clients), then the
   // operator rolls it over to `day` on the same disk and L2 file (06 §10 Rollover).
   std::unique_ptr<ExchangeDay> prev_day;
@@ -236,6 +238,11 @@ struct Harness {
   }
 
   [[nodiscard]] ExchangeProc* node_proc() const;
+  // The node sequenced DayEnd.
+  [[nodiscard]] bool day_ended() const {
+    const ExchangeProc* x = node_proc();
+    return x != nullptr && x->shared().day_end_index.load() != 0;
+  }
 
   // The sequencer takes no more input (06 §10): the day ended, or every timer of the
   // schedule is out and the seq stage is ending the day (SeqDriver: auto_end).
@@ -952,6 +959,10 @@ class ClientProc final : public Process {
     if (h.lazy_day && !h.clients[c].light && rng6_.below(2) == 0) {
       lazy_ = true;
       next_pause_ = static_cast<Nanos>(rng6_.below(100 * kMs));
+      if (rng6_.below(2) == 0) {
+        close_stall_ = CloseStall::Armed;
+        stall_lead_ = static_cast<Nanos>(rng6_.below(200 * kMs));
+      }
     }
     n.add_stage(stage_, "client");
   }
@@ -961,11 +972,31 @@ class ClientProc final : public Process {
     const Nanos now = node_.clock().now_mono();
     bool did = false;
     Ledger& L = h_.clients[c_];
+    if (close_stall_ == CloseStall::Armed && now >= h_.close_at - stall_lead_) {
+      close_stall_ = CloseStall::Stalled;
+      read_at_ = sb::kNever;
+      // Its last burst: resting Day orders, each answered by an Accepted and, after the
+      // closing cross, a Canceled (about 100 bytes), to fill the ring and a quarter of the
+      // session's transmit buffer, which End of Session still fits in (with the closing
+      // cancels of its earlier orders): the linger starts.
+      const std::size_t n = (h_.ring_bytes + 16 * 1024) / 100;
+      for (std::size_t i = 0; i < n && enter3(now, true); ++i) {
+      }
+    }
+    if (close_stall_ == CloseStall::Stalled && (h_.day_ended() || now >= h_.close_at + 4 * kNsPerSec)) {
+      close_stall_ = CloseStall::Done;
+      read_at_ =
+          now + h_.close_linger + static_cast<Nanos>(rng6_.below(static_cast<std::uint64_t>(2 * h_.close_linger)));
+      stall_end_ = read_at_;
+      SIM_PROBE("exchange.client_stalled_over_close");
+    }
     if (lazy_ && now >= next_pause_ && now >= read_at_) {  // a lazy reader (see exchange_ha's)
-      // Mostly 2 to 60 ms; one pause in eight 60 to 400 ms (a stalled consumer: the
-      // ring fills, a closing connection outlasts its linger, the idle timeout ends it).
-      read_at_ = now + (rng6_.below(8) == 0 ? 60 * kMs + static_cast<Nanos>(rng6_.below(340 * kMs))
-                                             : 2 * kMs + static_cast<Nanos>(rng6_.below(58 * kMs)));
+      // Mostly 2 to 60 ms; one pause in eight a stalled consumer, half to two and a half
+      // times the day's linger (the ring fills, a closing connection outlasts its linger,
+      // the idle timeout ends it).
+      const auto stall = static_cast<std::uint64_t>(2 * h_.close_linger);
+      read_at_ = now + (rng6_.below(8) == 0 ? h_.close_linger / 2 + static_cast<Nanos>(rng6_.below(stall))
+                                            : 2 * kMs + static_cast<Nanos>(rng6_.below(58 * kMs)));
       next_pause_ = read_at_ + 10 * kMs + static_cast<Nanos>(rng6_.below(140 * kMs));
       ++L.read_pauses;
       SIM_PROBE("exchange.client_read_pause");
@@ -988,7 +1019,7 @@ class ClientProc final : public Process {
         handle(session_->on_timer(now), now);
         did = true;
       }
-      if (session_ && session_->state() == sb::ClientSession::State::Active) did = act(now) || did;
+      if (session_ && session_->state() == sb::ClientSession::State::Active && !stalled(now)) did = act(now) || did;
       did = flush(now) || did;
     }
     return did;
@@ -1472,6 +1503,18 @@ class ClientProc final : public Process {
   bool lazy_ = false;    // stops reading now and then, keeps sending (see exchange_ha's)
   Nanos read_at_ = 0;
   Nanos next_pause_ = 0;
+  // A consumer stalled over the close (lazy days, one lazy reader in two): up to 200 ms
+  // before the close it sends a burst, then neither reads nor sends orders (its session
+  // still heartbeats), and reads again one to three lingers after the day ended, so the
+  // burst's responses and End of Session wait for a full ring, the gateway's linger
+  // runs out and the client logs in again for them.
+  enum class CloseStall : std::uint8_t { None, Armed, Stalled, Done };
+  CloseStall close_stall_ = CloseStall::None;
+  Nanos stall_lead_ = 0;
+  Nanos stall_end_ = 0;
+  [[nodiscard]] bool stalled(Nanos now) const {
+    return close_stall_ == CloseStall::Stalled || (close_stall_ == CloseStall::Done && now < stall_end_);
+  }
   ouch50::TagSet tags_;  // UserRefIdx on every message, when the session has a channel of its own
   std::size_t bulk_left_ = 0;
   Nanos rebulk_at_ = 0;
@@ -2240,10 +2283,12 @@ Report run_exchange(const Options& o) {
   if (h.snapd_apart) p.follower = false;
   p.gw[0] = env::Endpoint{x.ip(), kGwPort[0]};
   p.gw[1] = env::Endpoint{x.ip(), kGwPort[1]};
-  // Lazy-reader days: 5 to 100 ms to flush a closing connection (see exchange_ha's).
+  // Lazy-reader days: 50 to 500 ms to flush a closing connection (see exchange_ha's).
   if (h.lazy_day) {  // and smaller socket buffers (see exchange_ha's)
-    p.close_linger = 5 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(95 * kMs));
-    w.net().set_stream_ring_bytes(std::size_t{8} << (10 + w.stream(Stream::Workload, 0xE9D).below(4)));
+    p.close_linger = 50 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(450 * kMs));
+    h.close_linger = p.close_linger;
+    h.ring_bytes = std::size_t{8} << (10 + w.stream(Stream::Workload, 0xE9D).below(4));
+    w.net().set_stream_ring_bytes(h.ring_bytes);
   }
   p.line_a = kLine[0];
   p.line_b = kLine[1];

@@ -249,6 +249,8 @@ struct Harness {
   bool snapd_apart = false;  // snapshotd runs in a process of its own beside each data node
   bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
   bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
+  Nanos close_linger = 0;    // lazy-reader days: a closing connection's flush bound
+  std::size_t ring_bytes = 0;  // lazy-reader days: a stream direction's socket buffer
   // Rollover seeds: the pair runs the previous trading day first (no clients), then the
   // operator rolls it over to `day` on the same disks (06 §10 Rollover).
   std::unique_ptr<ExchangeDay> prev_day;
@@ -269,6 +271,14 @@ struct Harness {
   }
 
   [[nodiscard]] ExchangeProc* node_proc(std::size_t n) const;
+  // A node sequenced DayEnd.
+  [[nodiscard]] bool day_ended() const {
+    for (std::size_t n = 0; n < 2; ++n) {
+      const ExchangeProc* x = node_proc(n);
+      if (x != nullptr && x->shared().day_end_index.load() != 0) return true;
+    }
+    return false;
+  }
   // The started node that is primary in the highest epoch (nullptr: none).
   [[nodiscard]] ExchangeProc* primary(std::size_t* which = nullptr) const {
     ExchangeProc* best = nullptr;
@@ -1256,6 +1266,10 @@ class HaClientProc final : public Process {
     if (h.lazy_day && !h.clients[c].light && rng6_.below(2) == 0) {
       lazy_ = true;
       next_pause_ = static_cast<Nanos>(rng6_.below(100 * kMs));
+      if (rng6_.below(2) == 0) {
+        close_stall_ = CloseStall::Armed;
+        stall_lead_ = static_cast<Nanos>(rng6_.below(200 * kMs));
+      }
     }
     n.add_stage(stage_, "client");
   }
@@ -1265,11 +1279,31 @@ class HaClientProc final : public Process {
     const Nanos now = node_.clock().now_mono();
     bool did = false;
     HaLedger& L = h_.clients[c_];
+    if (close_stall_ == CloseStall::Armed && now >= h_.close_at - stall_lead_) {
+      close_stall_ = CloseStall::Stalled;
+      read_at_ = sb::kNever;
+      // Its last burst: resting Day orders, each answered by an Accepted and, after the
+      // closing cross, a Canceled (about 100 bytes), to fill the ring and a quarter of the
+      // session's transmit buffer, which End of Session still fits in (with the closing
+      // cancels of its earlier orders): the linger starts.
+      const std::size_t n = (h_.ring_bytes + 16 * 1024) / 100;
+      for (std::size_t i = 0; i < n && enter3(now, true); ++i) {
+      }
+    }
+    if (close_stall_ == CloseStall::Stalled && (h_.day_ended() || now >= h_.close_at + 4 * kNsPerSec)) {
+      close_stall_ = CloseStall::Done;
+      read_at_ =
+          now + h_.close_linger + static_cast<Nanos>(rng6_.below(static_cast<std::uint64_t>(2 * h_.close_linger)));
+      stall_end_ = read_at_;
+      SIM_PROBE("exchange_ha.client_stalled_over_close");
+    }
     if (lazy_ && now >= next_pause_ && now >= read_at_) {
-      // Mostly 2 to 60 ms; one pause in eight 60 to 400 ms (a stalled consumer: the
-      // ring fills, a closing connection outlasts its linger, the idle timeout ends it).
-      read_at_ = now + (rng6_.below(8) == 0 ? 60 * kMs + static_cast<Nanos>(rng6_.below(340 * kMs))
-                                             : 2 * kMs + static_cast<Nanos>(rng6_.below(58 * kMs)));
+      // Mostly 2 to 60 ms; one pause in eight a stalled consumer, half to two and a half
+      // times the day's linger (the ring fills, a closing connection outlasts its linger,
+      // the idle timeout ends it).
+      const auto stall = static_cast<std::uint64_t>(2 * h_.close_linger);
+      read_at_ = now + (rng6_.below(8) == 0 ? h_.close_linger / 2 + static_cast<Nanos>(rng6_.below(stall))
+                                            : 2 * kMs + static_cast<Nanos>(rng6_.below(58 * kMs)));
       next_pause_ = read_at_ + 10 * kMs + static_cast<Nanos>(rng6_.below(140 * kMs));
       ++L.read_pauses;
       SIM_PROBE("exchange_ha.client_read_pause");
@@ -1303,7 +1337,7 @@ class HaClientProc final : public Process {
       }
       did = true;
     }
-    if (entry_.active() >= 0) did = act(now) || did;
+    if (entry_.active() >= 0 && !stalled(now)) did = act(now) || did;
     did = flush(now) || did;
     L.takeovers = entry_.stats().takeovers;
     L.resent = entry_.stats().resent;
@@ -1879,12 +1913,25 @@ class HaClientProc final : public Process {
   Rng rng5_;  // short sales (risk days)
   Rng rng6_;  // read pauses (lazy-reader days)
   // A lazy reader stops reading both connections now and then and keeps sending, as a
-  // slow consumer does: the stream ring (64 KiB a direction) fills, the gateway's sends
+  // slow consumer does: the stream ring (8 to 64 KiB a direction) fills, the gateway's sends
   // block and its session waits for room; a takeover, logout or the end of the day can
   // find bytes unsent, and a pause longer than the idle timeout ends the session.
   bool lazy_ = false;
   Nanos read_at_ = 0;     // the current pause ends
   Nanos next_pause_ = 0;  // the next one starts
+  // A consumer stalled over the close (lazy days, one lazy reader in two): up to 200 ms
+  // before the close it sends a burst, then neither reads nor sends orders (its session
+  // still heartbeats), and reads again one to three lingers after the day ended, so the
+  // burst's responses and End of Session wait for a full ring and the gateway's linger
+  // runs out, or the client's idle timeout ends the connection first; it logs in again
+  // for them.
+  enum class CloseStall : std::uint8_t { None, Armed, Stalled, Done };
+  CloseStall close_stall_ = CloseStall::None;
+  Nanos stall_lead_ = 0;
+  Nanos stall_end_ = 0;
+  [[nodiscard]] bool stalled(Nanos now) const {
+    return close_stall_ == CloseStall::Stalled || (close_stall_ == CloseStall::Done && now < stall_end_);
+  }
   ouch50::TagSet tags_;  // UserRefIdx on every message, when the session has a channel of its own
   client::HaOrderEntry entry_;
   std::optional<env::ConnId> conn_[2];
@@ -2798,14 +2845,18 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   base.soup_heartbeat = soup_hb;
   base.soup_idle_timeout = soup_idle;
   base.soup_login_timeout = 4 * soup_idle;
-  // Lazy-reader days: a closing connection gets 5 to 100 ms to flush its last bytes
+  // Lazy-reader days: a closing connection gets 50 to 500 ms to flush its last bytes
   // ([gateway] close_linger_ms; production's second outlasts the compressed day), so a
-  // peer that stopped reading can outlast it. A stream of its own.
+  // peer that stopped reading can outlast it, while a GLIMPSE spin's last 64 KiB still
+  // gets through a small socket buffer in time (5 ms cut spins short on every try). A
+  // stream of its own.
   if (h.lazy_day) {
-    base.close_linger = 5 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(95 * kMs));
+    base.close_linger = 50 * kMs + static_cast<Nanos>(w.stream(Stream::Workload, 0xE9C).below(450 * kMs));
+    h.close_linger = base.close_linger;
     // and smaller socket buffers (8 to 64 KiB a direction), so a lazy reader's ring fills
     // and a closing connection can outlast its linger. A stream of its own.
-    w.net().set_stream_ring_bytes(std::size_t{8} << (10 + w.stream(Stream::Workload, 0xE9D).below(4)));
+    h.ring_bytes = std::size_t{8} << (10 + w.stream(Stream::Workload, 0xE9D).below(4));
+    w.net().set_stream_ring_bytes(h.ring_bytes);
   }
   base.paired = true;
   base.initial_primary = 0;
@@ -2903,6 +2954,12 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   sb::ClientConfig gl;
   gl.username = Alpha<sb::kUsernameLen>("GLIMPS");
   gl.password = Alpha<sb::kPasswordLen>(kGlimpsePassword);
+  // The servers' SoupBinTCP timing is scaled down (above); a snapshot client keeping the
+  // 1 s default heartbeat was ended by the idle timeout whenever a spin took longer than
+  // it to deliver (thousands of symbols through small socket buffers), on every try.
+  gl.heartbeat_interval = soup_hb;
+  gl.idle_timeout = soup_idle;
+  gl.login_timeout = 4 * soup_idle;
   Rng sub_cfg = w.stream(Stream::Workload, 0xE91);  // late joiners (a stream of their own)
   for (std::size_t s = 0; s < nsub; ++s) {
     Node& ns = w.add_node("s" + std::to_string(s + 1), NodeOptions{false, true});
