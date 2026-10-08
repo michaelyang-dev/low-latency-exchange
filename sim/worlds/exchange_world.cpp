@@ -1555,6 +1555,7 @@ class SubProc final : public Process {
         snap_port_(n),
         feed_(std::make_unique<Feed>(cfg)),
         start_at_(start_at),
+        rng_(n.rng(0x5B1)),
         stage_{this} {
     if (start_at_ == 0 && h.rolled) join_lines();
     n.add_stage(stage_, "subscriber");
@@ -1604,10 +1605,12 @@ class SubProc final : public Process {
       feed_->on_timer(now, *this);
       did = true;
     }
-    snap_port_.poll([&](const env::StreamEvent& ev) {
-      did = true;
-      on_stream(ev, now);
-    });
+    if (now >= snap_read_at_) {
+      snap_port_.poll([&](const env::StreamEvent& ev) {
+        did = true;
+        on_stream(ev, now);
+      });
+    }
     if (snap_ && now >= snap_->actions().deadline) absorb(snap_->on_timer(now), now);
     if (snap_wanted_ && !snap_ && !snap_conn_ && now >= snap_retry_at_) {
       snap_conn_ = snap_port_.connect(glimpse_);
@@ -1695,6 +1698,11 @@ class SubProc final : public Process {
           if (used == 0) break;
           in = in.subspan(used);
         }
+        if (snap_lazy_ && rng_.below(64) == 0) {
+          snap_read_at_ =
+              now + h_.close_linger + static_cast<Nanos>(rng_.below(static_cast<std::uint64_t>(2 * h_.close_linger)));
+          SIM_PROBE("exchange_world.snapshot_reader_stalls");
+        }
         break;
       }
       case env::StreamEventKind::Closed:
@@ -1711,8 +1719,11 @@ class SubProc final : public Process {
   }
 
   void absorb(const sb::Actions& a, Nanos now) {
-    for (const sb::Event& e : a.events)
-      if (e.kind == sb::EventKind::LoggedIn) feed_->begin_snapshot();
+    for (const sb::Event& e : a.events) {
+      if (e.kind != sb::EventKind::LoggedIn) continue;
+      feed_->begin_snapshot();
+      snap_lazy_ = h_.lazy_day && rng_.below(3) == 0;
+    }
     for (const sb::Delivered& d : a.delivered) {
       if (d.seq == 0 || snap_done_) continue;
       const bool eos = !d.data.empty() && static_cast<char>(d.data[0]) == glimpse::kEndOfSnapshotType;
@@ -1759,6 +1770,8 @@ class SubProc final : public Process {
     h_.log("subscriber %zu snapshot session failed", s_);
     ++h_.subs[s_].snapshot_failures;
     feed_->abort_snapshot();
+    snap_read_at_ = 0;
+    snap_lazy_ = false;
     snap_wanted_ = feed_->arbiter().state() == mo::LineArbiter::State::AwaitingSnapshot;
   }
 
@@ -1791,6 +1804,9 @@ class SubProc final : public Process {
   bool splicing_ = false;
   SeqNo splice_to_ = 0;
   Nanos snap_retry_at_ = 0;
+  Rng rng_;
+  bool snap_lazy_ = false;  // lazy-reader days: a slow snapshot reader (see exchange_ha's)
+  Nanos snap_read_at_ = 0;
   Nanos now_ = 0;
   Stage stage_;
 };

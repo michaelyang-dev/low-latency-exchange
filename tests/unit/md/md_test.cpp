@@ -480,11 +480,8 @@ struct GlimpseEnv {
   using Clock = testnet::FakeClock;
 };
 
-// GLIMPSE: the login spins the state of itch.bin (S, R, H, the resting orders, End of
-// Snapshot G), then End of Session; the port is closed only once all of it is out,
-// including bytes the port stages until a SEND completes (io_uring: close() cancels).
-TEST(GlimpseServer, SpinAndEndOfSessionAreFlushedBeforeTheClose) {
-  const auto root = std::filesystem::temp_directory_path() / ("lle-md-glimpse-" + std::to_string(::getpid()));
+// The GLIMPSE tests' itch.bin: S, R and H for AAPL, then three resting orders.
+void write_glimpse_day(const std::filesystem::path& root) {
   std::filesystem::remove_all(root);
   const std::uint32_t ids[] = {1};
   outlog::OutlogDay day;
@@ -508,7 +505,9 @@ TEST(GlimpseServer, SpinAndEndOfSessionAreFlushedBeforeTheClose) {
   put(h);
   for (std::uint64_t i = 1; i <= 3; ++i) ASSERT_TRUE(day.itch().append(itch_add(i, 100, static_cast<std::uint32_t>(1'500'000 - i * 1000))));
   ASSERT_TRUE(day.flush_all());
+}
 
+GlimpseConfig glimpse_config(const std::filesystem::path& root) {
   GlimpseConfig c;
   c.soup.session = soup::SessionId::from("GLIMPSE001");
   c.tcp.max_conns = 4;
@@ -517,8 +516,30 @@ TEST(GlimpseServer, SpinAndEndOfSessionAreFlushedBeforeTheClose) {
   c.credential = gw::Credential::make("glimpse-pw", std::vector<std::uint8_t>{1, 2, 3});
   c.refresh_interval = 0;
   c.locates = 2;
+  return c;
+}
+
+// A client connected to the GLIMPSE port, its Login Request sent.
+soup::ClientSession glimpse_login(testnet::FakeStreamPort& port, env::ConnId conn, Nanos now) {
+  soup::ClientConfig cc;
+  cc.username = Alpha<soup::kUsernameLen>("glimps");
+  cc.password = Alpha<soup::kPasswordLen>("glimpse-pw");
+  cc.sequence = 1;
+  soup::ClientSession client(cc);
+  const soup::Actions& a = client.connect(now);
+  port.data(conn, a.write);
+  client.consume_tx(a.write.size());
+  return client;
+}
+
+// GLIMPSE: the login spins the state of itch.bin (S, R, H, the resting orders, End of
+// Snapshot G), then End of Session; the port is closed only once all of it is out,
+// including bytes the port stages until a SEND completes (io_uring: close() cancels).
+TEST(GlimpseServer, SpinAndEndOfSessionAreFlushedBeforeTheClose) {
+  const auto root = std::filesystem::temp_directory_path() / ("lle-md-glimpse-" + std::to_string(::getpid()));
+  write_glimpse_day(root);
   testnet::FakeClock clock;
-  GlimpseServer<GlimpseEnv> g(c, clock);
+  GlimpseServer<GlimpseEnv> g(glimpse_config(root), clock);
   ASSERT_TRUE(g.start());
   for (int i = 0; i < 3; ++i) (void)g.poll();
   EXPECT_EQ(g.stats().applied, 6u);
@@ -526,15 +547,8 @@ TEST(GlimpseServer, SpinAndEndOfSessionAreFlushedBeforeTheClose) {
   testnet::FakeStreamPort& port = g.port();
   port.write_budget = 11;  // a few bytes per write, staged until completed
   port.stage_tx = true;
-  soup::ClientConfig cc;
-  cc.username = Alpha<soup::kUsernameLen>("glimps");
-  cc.password = Alpha<soup::kPasswordLen>("glimpse-pw");
-  cc.sequence = 1;
-  soup::ClientSession client(cc);
   const env::ConnId conn = port.accept();
-  const soup::Actions& a = client.connect(clock.mono);
-  port.data(conn, a.write);
-  client.consume_tx(a.write.size());
+  soup::ClientSession client = glimpse_login(port, conn, clock.mono);
   int polls = 0;
   for (; polls < 1000 && port.closed_by_stage.count(conn) == 0; ++polls) {
     (void)g.poll();
@@ -562,6 +576,42 @@ TEST(GlimpseServer, SpinAndEndOfSessionAreFlushedBeforeTheClose) {
   EXPECT_EQ(std::string(types.begin(), types.end()), "SRHAAAG");
   EXPECT_TRUE(ended) << "End of Session lost";
   EXPECT_EQ(g.stats().spins, 1u);
+  std::filesystem::remove_all(root);
+}
+
+// A peer that stops reading cannot hold a closing GLIMPSE connection: after
+// close_linger the port is closed with the spin's tail unsent, and the slot serves the
+// next login.
+TEST(GlimpseServer, ALingeringCloseIsBounded) {
+  const auto root = std::filesystem::temp_directory_path() / ("lle-md-glimpse-linger-" + std::to_string(::getpid()));
+  write_glimpse_day(root);
+  testnet::FakeClock clock;
+  GlimpseServer<GlimpseEnv> g(glimpse_config(root), clock);
+  ASSERT_TRUE(g.start());
+  for (int i = 0; i < 3; ++i) (void)g.poll();
+
+  testnet::FakeStreamPort& port = g.port();
+  port.write_budget = 0;  // the peer reads nothing
+  const env::ConnId conn = port.accept();
+  soup::ClientSession client = glimpse_login(port, conn, clock.mono);
+  for (int i = 0; i < 5; ++i) (void)g.poll();
+  EXPECT_EQ(g.stats().spins, 1u);
+  EXPECT_EQ(port.closed_by_stage.count(conn), 0u) << "closed with the spin unsent";
+  clock.mono += kDefaultCloseLinger - 1;
+  (void)g.poll();
+  EXPECT_EQ(port.closed_by_stage.count(conn), 0u);
+  clock.mono += 2;
+  (void)g.poll();
+  EXPECT_EQ(port.closed_by_stage.count(conn), 1u);
+  EXPECT_EQ(g.stats().linger_timeouts, 1u);
+
+  port.write_budget = ~std::size_t{0};
+  const env::ConnId next = port.accept();
+  soup::ClientSession again = glimpse_login(port, next, clock.mono);
+  for (int i = 0; i < 5 && port.closed_by_stage.count(next) == 0; ++i) (void)g.poll();
+  EXPECT_EQ(port.closed_by_stage.count(next), 1u) << "the next login was not served to its end";
+  EXPECT_EQ(g.stats().spins, 2u);
+  EXPECT_EQ(g.stats().linger_timeouts, 1u);
   std::filesystem::remove_all(root);
 }
 
