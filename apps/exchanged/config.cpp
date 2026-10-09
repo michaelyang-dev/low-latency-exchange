@@ -512,6 +512,10 @@ std::expected<ExchangeConfig, std::string> parse_config(const std::string& text)
   if (c.mode == NodeMode::Paired && (c.ha_peer.port == 0 || c.witness.port == 0 || c.ha_bind.port == 0))
     return std::unexpected(std::string("config: paired mode needs ha.bind, ha.peer and ha.witness"));
   if (c.t_ack >= c.t_d) return std::unexpected(std::string("config: ha.t_ack_ms must be below ha.t_d_ms (10 §4)"));
+  // The primary takes a backup it has not heard from for T_ack for lost (10 §4): heard
+  // only every heartbeat, a backup that is fine would be lost between two of them.
+  if (c.ha_heartbeat >= c.t_ack)
+    return std::unexpected(std::string("config: ha.heartbeat_ms must be below ha.t_ack_ms (10 §4)"));
   if (c.backend == net::BackendKind::Xsk) {
     const XskStage* st[] = {&c.xsk.gw[0], &c.xsk.gw[1], &c.xsk.md};
     for (const XskStage* s : st)

@@ -80,6 +80,18 @@ TEST(ExchangeConfig, HaRetransmissionDefaultsAreTheCoresAndCanBeSet) {
   EXPECT_NE(z.error().find("rto_ms"), std::string::npos) << z.error();
 }
 
+// The primary takes a backup it has not heard from for T_ack for lost, so a heartbeat
+// that is not below T_ack would lose a backup that is fine between two heartbeats.
+TEST(ExchangeConfig, TheHaHeartbeatMustBeBelowTAck) {
+  auto c = parse_config(base() + "[ha]\nheartbeat_ms = 2\nt_ack_ms = 5\n");
+  ASSERT_TRUE(c.has_value()) << c.error();
+  for (const char* hb : {"5", "8"}) {
+    const auto z = parse_config(base() + "[ha]\nheartbeat_ms = " + hb + "\nt_ack_ms = 5\n");
+    ASSERT_FALSE(z.has_value()) << hb;
+    EXPECT_NE(z.error().find("heartbeat_ms"), std::string::npos) << z.error();
+  }
+}
+
 // [gateway] close_linger_ms: how long a closing connection (gateway and GLIMPSE) may take
 // to flush its last bytes; md::kDefaultCloseLinger unless set.
 TEST(ExchangeConfig, CloseLingerDefaultsToASecondAndCanBeSet) {
