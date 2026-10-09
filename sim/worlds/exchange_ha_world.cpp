@@ -2560,10 +2560,31 @@ class AdversaryProc final : public Process {
     if (!crashes) budget_ = 0;                  // the run has no process crashes (--mode, --disable)
     partial_ = rng_.below(3) != 0;
     halt_ = rng_.below(2) == 0;
+    // One run in three: the primary also dies around the close, as its DayEnd is
+    // sequenced or up to 200 ms after 16:00 (a takeover across the day's end).
+    close_ = crashes && rng_.below(3) == 0;
+    at_day_end_ = rng_.below(2) == 0;
+    close_after_ = static_cast<Nanos>(rng_.below(200 * kMs));
     n.add_stage(stage_, "adversary");
   }
   bool poll() {
     const Nanos now = node_.clock().now_mono();
+    if (close_ && h_.w->faults_active() && now >= h_.close_at &&
+        (at_day_end_ ? h_.day_ended() : now >= h_.close_at + close_after_)) {
+      close_ = false;
+      std::size_t pn = 0;
+      if (h_.primary(&pn) == nullptr) return false;
+      if (!h_.may_fail(pn)) {
+        ++h_.crashes_gated;
+        return false;
+      }
+      ++h_.targeted;
+      h_.log("adversary: the primary %s dies at the close (%s)", pn == 0 ? "xa" : "xb",
+             at_day_end_ ? "its DayEnd sequenced" : "after 16:00");
+      SIM_PROBE("exchange_ha.takeover_at_the_close");
+      h_.w->node(kX[pn]).request_crash();
+      return true;
+    }
     if (budget_ <= 0 || !h_.w->faults_active() || now < next_ || now >= h_.close_at) return false;
     next_ = now + kMs / 4;
     bool partial = false;
@@ -2604,6 +2625,9 @@ class AdversaryProc final : public Process {
   int budget_ = 0;
   bool partial_ = false;
   bool halt_ = false;
+  bool close_ = false;       // a takeover around the close is still due
+  bool at_day_end_ = false;  // as DayEnd is sequenced, else close_after_ after 16:00
+  Nanos close_after_ = 0;
   Nanos next_ = 0;
   Stage stage_;
 };
