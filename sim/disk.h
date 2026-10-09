@@ -111,6 +111,15 @@ class Disk {
     atlas_replica_ = replica;
     atlas_replicas_ = replicas;
   }
+  // A bad region under some files (a world's dimension, outside the atlas): while faults
+  // run, each write to a file whose name `filter` accepts (when it is opened) flips one
+  // bit with probability `flip_ppm`. The draws come from `rng`, so the disk's other
+  // faults keep their stream. Set before the files are opened.
+  void set_corruption(std::function<bool(std::string_view)> filter, std::uint32_t flip_ppm, Prng rng) {
+    corrupt_filter_ = std::move(filter);
+    corrupt_ppm_ = flip_ppm;
+    corrupt_rng_ = rng;
+  }
   [[nodiscard]] const DiskParams& params() const noexcept { return p_; }
   // Opt-in gate on injected I/O errors (a world keeping its failures inside a failure
   // model): an EIO drawn while the gate says no is not applied. The draw itself is made
@@ -163,6 +172,7 @@ class Disk {
   struct File {
     std::string name;
     std::uint64_t key = 0;
+    bool corrupt = false;  // under a bad region (set_corruption)
     std::vector<std::byte> durable;
     std::vector<std::byte> cache;
     std::vector<Op> inflight;
@@ -198,6 +208,9 @@ class Disk {
   std::uint32_t atlas_replica_ = 0;
   std::uint32_t atlas_replicas_ = 1;
   std::vector<std::byte> now_scratch_;  // write_now: a corrupted copy of the data
+  std::function<bool(std::string_view)> corrupt_filter_;
+  std::uint32_t corrupt_ppm_ = 0;
+  Prng corrupt_rng_;
   std::vector<std::unique_ptr<File>> files_;
   std::vector<std::vector<std::byte>> bufs_;
   std::vector<std::uint32_t> free_bufs_;

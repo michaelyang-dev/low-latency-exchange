@@ -30,6 +30,7 @@ std::uint32_t Disk::open(std::string_view name) {
   auto f = std::make_unique<File>();
   f->name = std::string(name);
   f->key = FaultAtlas::file_key(name.data(), name.size());
+  f->corrupt = corrupt_filter_ && corrupt_filter_(name);
   const auto idx = static_cast<std::uint32_t>(files_.size());
   files_.push_back(std::move(f));
   by_name_.emplace(std::string(name), idx);
@@ -198,6 +199,13 @@ std::int32_t Disk::write_now(std::uint32_t fi, std::uint64_t off, std::span<cons
       }
     }
   }
+  if (f.corrupt && w_.faults_active() && !data.empty() && chance_ppm(corrupt_rng_, corrupt_ppm_)) {
+    if (data.data() != now_scratch_.data()) now_scratch_.assign(data.begin(), data.end());
+    now_scratch_[static_cast<std::size_t>(corrupt_rng_.next_u64() % now_scratch_.size())] ^=
+        static_cast<std::byte>(1u << corrupt_rng_.below(8));
+    data = now_scratch_;
+    ++w_.stats().disk_bitflip;
+  }
   write_image(f.cache, off, data);
   if (dsync) {
     write_image(f.durable, off, data);
@@ -317,6 +325,11 @@ Dispatch Disk::handle(const Event& ev) {
           data[static_cast<std::size_t>(flip_at % data.size())] ^= static_cast<std::byte>(1u << flip_bit);
           ++w_.stats().disk_bitflip;
         }
+      }
+      if (f.corrupt && w_.faults_active() && !data.empty() && chance_ppm(corrupt_rng_, corrupt_ppm_)) {
+        data[static_cast<std::size_t>(corrupt_rng_.next_u64() % data.size())] ^=
+            static_cast<std::byte>(1u << corrupt_rng_.below(8));
+        ++w_.stats().disk_bitflip;
       }
       write_image(f.cache, off, data);
       if (op.dsync) {

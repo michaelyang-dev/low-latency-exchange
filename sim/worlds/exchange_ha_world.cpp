@@ -250,6 +250,7 @@ struct Harness {
   bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
   bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
   int lossy_link = -1;       // a lossy control link: src * 3 + dst (-1: none)
+  int bad_snapshots = -1;    // the node whose snapshot files are on a bad region (-1: none)
   Nanos close_linger = 0;    // lazy-reader days: a closing connection's flush bound
   std::size_t ring_bytes = 0;  // lazy-reader days: a stream direction's socket buffer
   // Rollover seeds: the pair runs the previous trading day first (no clients), then the
@@ -3041,6 +3042,20 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   });
   for (std::size_t n = 0; n < 2; ++n)
     xs[n]->disk().set_fault_gate([&h, n] { return h.rolled && h.may_fail(n); }, [&h, n] { h.failing[n] = true; });
+  // A bad region under one node's snapshots (one day in four, when disk faults are on):
+  // 2 to 22% of its writes to snapshot files flip a bit. Recovery and snapshotd check
+  // every snapshot and fall back to an older one or to the journal; the other node's
+  // snapshots stay clean. The journal and the output log are left alone (a corrupt
+  // journal stops the node for its operator; the output log carries no checksums). A
+  // stream of its own.
+  if (Rng bad_cfg = w.stream(Stream::Workload, 0xE9F); bad_cfg.below(4) == 0 && w.faults().enabled(FaultClass::Disk)) {
+    const auto n = static_cast<std::size_t>(bad_cfg.below(2));
+    const auto ppm = static_cast<std::uint32_t>(20'000 + bad_cfg.below(200'000));
+    xs[n]->disk().set_corruption(
+        [](std::string_view name) { return name.find("snapshots/") != std::string_view::npos; }, ppm,
+        Rng(bad_cfg.next_u64()));
+    h.bad_snapshots = static_cast<int>(n);
+  }
   wn.disk().set_fault_gate([&h] { return h.rolled && h.pair_up(); });
   for (std::size_t i = 0; i < w.node_count(); ++i) w.node(static_cast<NodeId>(i)).boot();
   w.oracles().add_final_check(h.o_stream, [&h] { h.final_checks(); });
@@ -3163,6 +3178,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                (h.lossy_link < 0
                     ? std::string()
                     : " lossy=" + std::to_string(h.lossy_link / 3) + ">" + std::to_string(h.lossy_link % 3)) +
+               (h.bad_snapshots < 0 ? std::string() : " bad_snapshots=" + std::to_string(h.bad_snapshots)) +
                " eos=" + std::to_string(eos) + "/" + std::to_string(h.clients.size()) +
                " sub_end=" + std::to_string(ended) + "/" + std::to_string(h.subs.size()) +
                " ouch=" + std::to_string(msgs) + " copies=" + std::to_string(copies) +
