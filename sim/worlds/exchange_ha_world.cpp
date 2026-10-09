@@ -2901,6 +2901,14 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   base.t_ack = t_ack;
   base.ha_rto = rto;
   base.rejoin_retry = 5 * kMs;
+  // Production knobs at their defaults half the time, else drawn (a stream of their own):
+  // [journal] spares (0: every segment is prepared on the write path), the HA heartbeat
+  // (up to a third of T_d) and the rejoin's retransmission interval.
+  if (Rng knobs = w.stream(Stream::Workload, 0xEA0); knobs.below(2) == 0) {
+    base.spares = static_cast<std::size_t>(knobs.below(4));
+    base.ha_heartbeat = 500 * kUs + static_cast<Nanos>(knobs.below(static_cast<std::uint64_t>(t_d / 3 - 500 * kUs)));
+    base.rejoin_retry = kMs + static_cast<Nanos>(knobs.below(29 * kMs));
+  }
   base.repl_log_bytes = std::size_t{1} << (16 + wl.below(8));  // small arenas read older records back from L3
   // exchange_ha_split: the replica on its own stage ([ha] repl_thread), the sequencer on
   // the seq stage, through a tee from 64 KiB (above the largest record; the sequencer
