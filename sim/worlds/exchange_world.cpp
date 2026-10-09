@@ -215,6 +215,7 @@ struct Harness {
   bool snapd_apart = false;  // snapshotd runs in a process of its own beside the node
   bool risk_day = false;     // limits of every kind (05 §7), short sales on entry
   bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
+  bool bad_snapshots = false;  // the node's snapshot files are on a bad region
   Nanos close_linger = 0;    // lazy-reader days: a closing connection's flush bound
   std::size_t ring_bytes = 0;  // lazy-reader days: a stream direction's socket buffer
   // Rollover seeds: the node runs the previous trading day first (no clients), then the
@@ -2296,6 +2297,10 @@ Report run_exchange(const Options& o) {
   // exchanged crashes and recovers, and a new image writes the segments it is reading.
   // A stream of its own.
   h.snapd_apart = p.follower && w.stream(Stream::Workload, 0xE95).below(2) == 0;
+  // [journal] spares at its default half the time, else 0 to 3 (0: every segment is
+  // prepared on the write path), as in exchange_ha. A stream of its own.
+  if (Rng knobs = w.stream(Stream::Workload, 0xEA0); knobs.below(2) == 0)
+    p.spares = static_cast<std::size_t>(knobs.below(4));
   if (h.snapd_apart) p.follower = false;
   p.gw[0] = env::Endpoint{x.ip(), kGwPort[0]};
   p.gw[1] = env::Endpoint{x.ip(), kGwPort[1]};
@@ -2394,6 +2399,15 @@ Report run_exchange(const Options& o) {
   // error before the rollover.
   w.injector().set_crash_guard([&h](NodeId n) { return n != 0 || h.rolled; });
   x.disk().set_fault_gate([&h] { return h.rolled; });
+  // A bad region under the node's snapshots (one day in four, when disk faults are on),
+  // as in exchange_ha: 2 to 22% of its writes to snapshot files flip a bit, and recovery
+  // and snapshotd skip what fails its checks. A stream of its own.
+  if (Rng bad_cfg = w.stream(Stream::Workload, 0xE9F); bad_cfg.below(4) == 0 && w.faults().enabled(FaultClass::Disk)) {
+    const auto ppm = static_cast<std::uint32_t>(20'000 + bad_cfg.below(200'000));
+    x.disk().set_corruption([](std::string_view name) { return name.find("snapshots/") != std::string_view::npos; },
+                            ppm, Rng(bad_cfg.next_u64()));
+    h.bad_snapshots = true;
+  }
   for (std::size_t i = 0; i < w.node_count(); ++i) w.node(static_cast<NodeId>(i)).boot();
   w.oracles().add_final_check(h.o_stream, [&h] { h.final_checks(); });
 
@@ -2509,7 +2523,7 @@ Report run_exchange(const Options& o) {
                " controls=" + std::to_string(h.controls) + " symbols=" + std::to_string(h.day.symbols.size()) +
                " deep=" + std::to_string(h.deep) + " bulk_orders=" + std::to_string(h.bulk_orders) +
                " bursts=" + std::to_string(h.bursts) + " snapd_apart=" + std::to_string(h.snapd_apart ? 1 : 0) +
-               " rollover=" + std::to_string(h.prev_day ? 1 : 0);
+               (h.bad_snapshots ? " bad_snapshots=1" : "") + " rollover=" + std::to_string(h.prev_day ? 1 : 0);
       });
 }
 
