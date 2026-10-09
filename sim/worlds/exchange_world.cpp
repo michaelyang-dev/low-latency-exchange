@@ -2034,6 +2034,7 @@ class OperatorProc final : public Process {
     Node& n = h_.w->node(0);
     n.crash(CrashKind::Process, false);
     n.restart_after(kRolloverGap);
+    h_.w->net().drop_datagrams_in_flight();  // the rollover stands for a night (see exchange_ha's)
     SIM_PROBE("exchange_world.rollover");
     return true;
   }

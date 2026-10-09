@@ -2504,6 +2504,10 @@ class OperatorProc final : public Process {
     wn.crash(CrashKind::Process, false);
     h_.witness_reinit = true;
     wn.restart_after(kRolloverGap - kMs);
+    // The rollover stands for a night: no datagram of the previous day reaches the new
+    // one (a heartbeat of the old day's backup, delayed past the witness's restart, took
+    // the new witness for a newer incarnation of it and refused its PROMOTE).
+    h_.w->net().drop_datagrams_in_flight();
     SIM_PROBE("exchange_ha.rollover");
     return true;
   }

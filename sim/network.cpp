@@ -312,6 +312,7 @@ void Network::dg_deliver_one(std::uint32_t src_port, NodeId dst_node, std::uint6
     p.dst = dst;
     p.src_node = sn;
     p.link_seq = seq;
+    p.era = dg_era_;
     w_.schedule(at, handler_, multicast ? kDgMulticast : kDgUnicast, dst_node, idx, target, h.value());
   }
 }
@@ -333,6 +334,7 @@ Dispatch Network::on_dg_arrival(const Event& ev, bool multicast) {
     }
   }
   if (ok && dg_ports_[port].node != ev.node) ok = false;
+  if (ok && p.era != dg_era_) ok = false;  // sent before drop_datagrams_in_flight()
   if (ok && p.src_node != ev.node) {
     Link& l = link(p.src_node, ev.node);
     if (l.blocked > 0) {

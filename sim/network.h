@@ -77,6 +77,9 @@ class Network {
   void unblock(NodeId src, NodeId dst);
   [[nodiscard]] bool blocked(NodeId src, NodeId dst) const;
   void heal_all();
+  // A long pause compressed into a moment (a world's overnight rollover): every datagram
+  // in flight would have arrived or been lost long before, so none is delivered.
+  void drop_datagrams_in_flight() noexcept { ++dg_era_; }
 
   // FIFO datagram links (off by default): datagrams on a directed link arrive in
   // send order unless the reorder fault fires, as on a direct cable or a switched
@@ -135,6 +138,7 @@ class Network {
     env::Endpoint dst;
     NodeId src_node = kNoNode;
     std::uint64_t link_seq = 0;
+    std::uint32_t era = 0;  // dg_era_ when sent (drop_datagrams_in_flight)
   };
   struct DgPort {
     DatagramPort* owner = nullptr;
@@ -235,6 +239,7 @@ class Network {
   std::vector<std::uint32_t> free_conns_;
   std::map<std::uint64_t, std::uint32_t> listeners_;  // endpoint key -> stream port
   std::uint16_t next_ephemeral_ = 40000;
+  std::uint32_t dg_era_ = 0;
   std::uint32_t seg_ppm_ = 0;
   std::uint32_t stall_ppm_ = 0;
   Nanos stall_max_ns_ = 0;
