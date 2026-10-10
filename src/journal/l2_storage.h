@@ -55,10 +55,18 @@ class L2Storage {
   [[nodiscard]] std::uint64_t nonce() const noexcept { return nonce_; }
   // True if an existing ring with a valid control block was reopened (restart).
   [[nodiscard]] bool reopened() const noexcept { return reopened_; }
+  // A fresh nonce, written to the control block: nothing the ring holds validates again.
+  // A restart calls it once what the ring held beyond L3 is journaled, so no later start
+  // restores those records again into a journal that was moved aside or cut back since.
+  template <env::RngLike Rng>
+  void renew(Rng& rng) noexcept {
+    renew_with([](void* ctx) { return static_cast<Rng*>(ctx)->next_u64(); }, &rng);
+  }
 
  private:
   static std::expected<L2Storage, std::string> open_with(const L2StorageOptions& opts, std::uint64_t (*gen)(void*),
                                                          void* ctx);
+  void renew_with(std::uint64_t (*gen)(void*), void* ctx) noexcept;
   void release() noexcept;
 
   void* map_ = nullptr;

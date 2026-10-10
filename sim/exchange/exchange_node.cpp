@@ -150,7 +150,8 @@ void ExchangeProc::open_journal() {
 
 // Node::restore_l2 (06 §5): the previous image's L2 may hold records beyond L3, e.g. ones
 // a backup acknowledged. They are journaled now, before anything else reads the journal;
-// then the ring starts over (its bytes stay: only a chain from durable + 1 validates).
+// then the ring starts over with a fresh nonce (L2Storage::renew), so nothing it held is
+// journaled again by a later start (DST-023).
 // The writer's drain runs inside this event, its I/O applied at once (the directory's
 // at-once mode), as it spins inside start-up in production.
 bool ExchangeProc::restore_l2(journal::RecoveryResult& rr) {
@@ -188,7 +189,12 @@ bool ExchangeProc::restore_l2(journal::RecoveryResult& rr) {
                              res.chain.last_index - res.records + 1, res.chain.last_index));
     if (hooks_.l2_restored) hooks_.l2_restored(res.records, res.chain.last_index);
   }
-  sh_->l2.init(reinterpret_cast<std::byte*>(p_.l2_file->mem.get()), p_.l2_bytes, p_.l2_file->nonce);
+  std::uint64_t nonce = 0;
+  do {
+    nonce = rng_.next_u64();
+  } while (!journal::usable_nonce(nonce) || nonce == p_.l2_file->nonce);
+  p_.l2_file->nonce = nonce;
+  sh_->l2.init(reinterpret_cast<std::byte*>(p_.l2_file->mem.get()), p_.l2_bytes, nonce);
   sh_->durable.store(rr.chain.last_index);
   return true;
 }

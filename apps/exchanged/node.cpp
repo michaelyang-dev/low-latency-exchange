@@ -394,7 +394,11 @@ std::expected<journal::RecoveryResult, std::string> Node::restore_l2(journal::Re
                 res.records, res.chain.last_index - res.records + 1, res.chain.last_index);
     nodelog::l2_restored(res.records, res.chain.last_index);
   }
-  // Positions start over (the bytes stay: only a chain from durable + 1 ever validates).
+  // What the ring held beyond L3 is journaled now, and a fresh nonce retires it: else a
+  // later start journals the same records again into a journal moved aside since (the
+  // runbook for an incomplete day start moves it), and refuses at every start (DST-023).
+  // Positions start over.
+  l2_storage_->renew(rng_);
   sh_->l2.init(l2_storage_->data(), l2_storage_->capacity(), l2_storage_->nonce());
   sh_->durable.store(rr.chain.last_index);
   return rr;

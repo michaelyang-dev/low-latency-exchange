@@ -237,5 +237,49 @@ TEST(L2Storage, FileBackedRingSurvivesProcessRestart) {
   std::filesystem::remove_all(dir);
 }
 
+// A restart that journaled what the ring held renews its nonce (exchanged's restore_l2,
+// DST-023): the next open reopens the ring with the new nonce, and none of the records
+// the restore re-published validates, even from index 1.
+TEST(L2Storage, RenewRetiresTheRingsRecords) {
+  const auto dir = std::filesystem::temp_directory_path() / ("lle_l2_renew_" + std::to_string(::getpid()));
+  std::filesystem::create_directories(dir);
+  L2StorageOptions o;
+  o.path = (dir / "l2.ring").string();
+  o.capacity = kCap;
+  o.day = 20260930;
+  Prng rng(11);
+  std::uint64_t renewed = 0;
+  {
+    auto s = L2Storage::open(o, rng);
+    ASSERT_TRUE(s.has_value()) << s.error();
+    L2Ring<3> ring;
+    ring.init(s->data(), s->capacity(), s->nonce());
+    RecordBuilder b(ring.sealer());
+    ASSERT_TRUE(append(ring, b, rng, 40, nullptr));
+  }
+  {
+    auto s = L2Storage::open(o, rng);
+    ASSERT_TRUE(s.has_value());
+    ASSERT_TRUE(s->reopened());
+    const std::uint64_t before = s->nonce();
+    L2Ring<3> ring;
+    ring.init(s->data(), s->capacity(), s->nonce());
+    ASSERT_EQ(ring.restore(1, std::nullopt).chain.last_index, 40u);  // re-published from position 0
+    s->renew(rng);
+    EXPECT_NE(s->nonce(), before);
+    renewed = s->nonce();
+  }
+  {
+    auto s = L2Storage::open(o, rng);
+    ASSERT_TRUE(s.has_value());
+    EXPECT_TRUE(s->reopened());
+    EXPECT_EQ(s->nonce(), renewed);
+    L2Ring<3> ring;
+    ring.init(s->data(), s->capacity(), s->nonce());
+    EXPECT_FALSE(ring.restore(1, std::nullopt).found);
+  }
+  std::filesystem::remove_all(dir);
+}
+
 }  // namespace
 }  // namespace lle::journal

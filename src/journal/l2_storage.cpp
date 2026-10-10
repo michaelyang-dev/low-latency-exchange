@@ -142,4 +142,17 @@ std::expected<L2Storage, std::string> L2Storage::open_with(const L2StorageOption
   return s;
 }
 
+void L2Storage::renew_with(std::uint64_t (*gen)(void*), void* ctx) noexcept {
+  std::uint64_t nonce = 0;
+  do {
+    nonce = gen(ctx);
+  } while (!usable_nonce(nonce) || nonce == nonce_);
+  // A process killed between the two stores leaves a control block that fails its crc:
+  // the next open starts a new ring, which retires the old one as well.
+  auto* c = static_cast<std::byte*>(map_);
+  store_le64(c + 32, nonce);
+  store_le32(c + kCrcOff, crc32c(c, kCrcOff));
+  nonce_ = nonce;
+}
+
 }  // namespace lle::journal
