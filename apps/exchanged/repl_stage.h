@@ -514,13 +514,22 @@ class BasicReplStage {
       out = repl::EpochEndInfo{marks_upto_, marks_upto_crc_, marks_last_epoch_};
     }
 #ifndef NDEBUG
+    // A scan from record 1 checks the index when it can decide: the record log cannot read
+    // a record that left its arena before L3 held it (DST-021), and its scan stops there.
+    const std::uint64_t tail = log_->tail().last_index;
     repl::EpochEndInfo scan;
+    bool decided = tail == 0;  // the scan reached a record of a later epoch, or the tail
     log_->scan(1, [&](const journal::RecordView& v) {
-      if (v.epoch() > e) return false;
+      if (v.epoch() > e) {
+        decided = true;
+        return false;
+      }
       scan = repl::EpochEndInfo{v.index(), v.crc(), v.epoch()};
+      decided = v.index() == tail;
       return true;
     });
-    LLE_ASSERT(scan.index == out.index && scan.crc == out.crc && scan.epoch == out.epoch, "epoch index: end");
+    LLE_ASSERT(!decided || (scan.index == out.index && scan.crc == out.crc && scan.epoch == out.epoch),
+               "epoch index: end");
 #endif
     return out;
   }
@@ -533,13 +542,20 @@ class BasicReplStage {
       break;
     }
 #ifndef NDEBUG
+    const std::uint64_t tail = log_->tail().last_index;
     repl::EpochEndInfo scan;
+    bool decided = tail == 0;  // as epoch_end's check
     log_->scan(1, [&](const journal::RecordView& v) {
-      if (v.epoch() < e) return true;
+      if (v.epoch() < e) {
+        decided = v.index() == tail;
+        return true;
+      }
       if (v.epoch() == e) scan = repl::EpochEndInfo{v.index(), v.crc(), v.epoch()};
+      decided = true;
       return false;
     });
-    LLE_ASSERT(scan.index == out.index && scan.crc == out.crc && scan.epoch == out.epoch, "epoch index: start");
+    LLE_ASSERT(!decided || (scan.index == out.index && scan.crc == out.crc && scan.epoch == out.epoch),
+               "epoch index: start");
 #endif
     return out;
   }
