@@ -314,8 +314,8 @@ struct Harness {
   // {primary, joiner}, even after the process that relayed it died (the datagram outlives
   // it): then the other node must also be alive as the incarnation that grant records
   // (the primary goes solo; the joiner takes over), or both recorded incarnations could
-  // be dead and only a manual witness repair could continue. W may fail while the pair
-  // is primary and backup. As the ha world's gate (sim/ha/ha_world.cpp).
+  // be dead and only a manual witness repair could continue. As the ha world's gate
+  // (sim/ha/ha_world.cpp); W's is witness_may_fail.
   [[nodiscard]] bool allowed_under(const wit::State& s, std::size_t x) const {
     const std::size_t y = 1 - x;
     const auto xi = static_cast<wit::NodeId>(x), yi = static_cast<wit::NodeId>(y);
@@ -336,28 +336,19 @@ struct Harness {
     }
     return ok;
   }
-  [[nodiscard]] bool joining() const {
-    for (std::size_t n = 0; n < 2; ++n) {
-      const ExchangeProc* x = node_proc(n);
-      if (x != nullptr && x->repl() != nullptr && (x->repl()->replica().joining() || x->repl()->replica().join_window()))
-        return true;
-    }
-    return false;
-  }
   [[nodiscard]] bool may_fail(std::size_t x) const {
     if (witness == nullptr || witness->core() == nullptr || failing[1 - x]) return false;
     return allowed_under(witness->core()->state(), x) && allowed_under(witness->durable_state(), x);
   }
-  [[nodiscard]] bool pair_up() const {
-    const ExchangeProc* a = node_proc(0);
-    const ExchangeProc* b = node_proc(1);
-    if (a == nullptr || b == nullptr || a->repl() == nullptr || b->repl() == nullptr || joining() || failing[0] ||
-        failing[1])
-      return false;
-    const auto ra = a->repl()->replica().role(), rb = b->repl()->replica().role();
-    const bool pb = (ra == repl::Role::kPrimary && rb == repl::Role::kBackup) ||
-                    (rb == repl::Role::kPrimary && ra == repl::Role::kBackup);
-    return pb && a->repl()->replica().epoch() == b->repl()->replica().epoch();
+  // W may fail (crash, or an I/O error that stops it) while both data nodes run and
+  // neither is failing, in any configuration: 01 §9 leaves out only W and a data node
+  // failing at once, and a data node may fail only while W runs (may_fail).
+  [[nodiscard]] bool witness_may_fail() const {
+    for (std::size_t n = 0; n < 2; ++n) {
+      const ExchangeProc* x = node_proc(n);
+      if (x == nullptr || x->repl() == nullptr || failing[n]) return false;
+    }
+    return true;
   }
   [[nodiscard]] bool day_closed(std::size_t n) const {
     const ExchangeProc* x = node_proc(n);
@@ -3159,12 +3150,12 @@ Report run_exchange_ha_world(const Options& o, bool split) {
         static_cast<long long>(h.speed), static_cast<double>(h.open_at) / 1e6, static_cast<double>(h.close_at) / 1e6,
         nsess, nsym, static_cast<double>(t_d) / 1e6, static_cast<double>(t_ack) / 1e6);
   // Failures stay inside the failure model: crashes and I/O errors of a data node only
-  // when the pair survives them, of W only while the pair is primary and backup.
+  // when the pair survives them, of W only while both data nodes run.
   // The previous day is not under test: the pair and W are not crashed before the
   // rollover, and the data nodes get no I/O errors (their disk gates below).
   w.injector().set_crash_guard([&h](NodeId n) {
     if (!h.rolled && (n == kX[0] || n == kX[1] || n == kW)) return false;
-    const bool ok = n == kX[0] || n == kX[1] ? h.may_fail(n) : n == kW ? h.pair_up() : true;
+    const bool ok = n == kX[0] || n == kX[1] ? h.may_fail(n) : n == kW ? h.witness_may_fail() : true;
     if (!ok) ++h.crashes_gated;
     return ok;
   });
@@ -3184,7 +3175,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
         Rng(bad_cfg.next_u64()));
     h.bad_snapshots = static_cast<int>(n);
   }
-  wn.disk().set_fault_gate([&h] { return h.rolled && h.pair_up(); });
+  wn.disk().set_fault_gate([&h] { return h.rolled && h.witness_may_fail(); });
   for (std::size_t i = 0; i < w.node_count(); ++i) w.node(static_cast<NodeId>(i)).boot();
   w.oracles().add_final_check(h.o_stream, [&h] { h.final_checks(); });
   // One run in four keeps its faults on two to four times as long, the day as long as
@@ -3327,6 +3318,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                " partials=" + std::to_string(partials) + " halts=" + std::to_string(h.halts) +
                " held_halts=" + std::to_string(h.held_halts) + " targeted=" + std::to_string(h.targeted) +
                " join_adv=" + std::to_string(h.join_crashes) + "/" + std::to_string(h.join_cuts) +
+               " w_starts=" + std::to_string(h.witness_starts) +
                " partial_takeovers=" + std::to_string(h.partial_takeovers) +
                " halt_spans=" + std::to_string(h.halt_spans) +
                " cod_fills_before_down=" + std::to_string(h.cod_fills_before_down) +
