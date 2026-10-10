@@ -665,28 +665,41 @@ void Harness::match_pushes(const Truth& t) {
     const std::vector<std::size_t>& P = queue[key];
     const std::vector<std::uint64_t>& R = records[key];
     const std::size_t np = P.size(), nr = R.size();
-    // F[i][j]: records i.. embed into pushes j..; row-major (nr+1) x (np+1).
-    std::vector<char> F((nr + 1) * (np + 1), 0);
-    auto f = [&](std::size_t i, std::size_t j) -> char& { return F[i * (np + 1) + j]; };
-    {
-      // No record left: the remaining pushes are excused by the close, or each by its
-      // incarnation.
-      bool all = true;
-      for (std::size_t j = np + 1; j-- > 0;) {
-        if (j < np && !excusable(pushes[P[j]])) all = false;
-        f(nr, j) = closed || all ? 1 : 0;
-      }
+    // f(i, j): records i.. embed into pushes j.., skipping only excusable pushes. From
+    // (0, 0) only i <= j <= i + E is reachable, E the number of excusable pushes (only a
+    // skip moves j ahead of i), so each row keeps the band d = j - i in [0, E], one bit a
+    // cell: a full table of a long session's records by its pushes took gigabytes.
+    std::vector<char> exc(np, 0);
+    std::size_t E = 0;
+    for (std::size_t j = 0; j < np; ++j) {
+      exc[j] = excusable(pushes[P[j]]) ? 1 : 0;
+      E += static_cast<std::size_t>(exc[j]);
+    }
+    std::vector<char> rest_excused(np + 1, 1);  // every push from j on is excusable
+    for (std::size_t j = np; j-- > 0;) rest_excused[j] = static_cast<char>(rest_excused[j + 1] != 0 && exc[j] != 0);
+    const std::size_t words = (E + 1 + 63) / 64;
+    std::vector<std::uint64_t> band((nr + 1) * words, 0);
+    auto get = [&](std::size_t i, std::size_t d) {
+      return d <= E && ((band[i * words + d / 64] >> (d % 64)) & 1) != 0;
+    };
+    auto put = [&](std::size_t i, std::size_t d) { band[i * words + d / 64] |= std::uint64_t{1} << (d % 64); };
+    auto f = [&](std::size_t i, std::size_t j) { return j >= i && get(i, j - i); };
+    // No record left: the remaining pushes are excused by the close, or each by its
+    // incarnation.
+    for (std::size_t d = 0; d <= E; ++d) {
+      const std::size_t j = nr + d;
+      if (j <= np && (closed || rest_excused[j] != 0)) put(nr, d);
     }
     for (std::size_t i = nr; i-- > 0;) {
-      f(i, np) = 0;
-      for (std::size_t j = np; j-- > 0;) {
-        const Push& p = pushes[P[j]];
-        const bool take = same(p, R[i]) && f(i + 1, j + 1) != 0;
-        const bool skip = excusable(p) && f(i, j + 1) != 0;
-        f(i, j) = take || skip ? 1 : 0;
+      for (std::size_t d = E + 1; d-- > 0;) {
+        const std::size_t j = i + d;
+        if (j >= np) continue;
+        const bool take = get(i + 1, d) && same(pushes[P[j]], R[i]);
+        const bool skip = exc[j] != 0 && get(i, d + 1);
+        if (take || skip) put(i, d);
       }
     }
-    if (f(0, 0) == 0) {
+    if (!f(0, 0)) {
       // Diagnose with a plain greedy walk: the first record that matches no later push,
       // or the first push left out though its incarnation lives on.
       std::size_t j = 0;
@@ -730,7 +743,7 @@ void Harness::match_pushes(const Truth& t) {
     std::size_t i = 0, j = 0;
     while (i < nr && j < np) {
       const Push& p = pushes[P[j]];
-      if (same(p, R[i]) && f(i + 1, j + 1) != 0) {
+      if (same(p, R[i]) && f(i + 1, j + 1)) {
         pushes[P[j]].index = R[i];
         ++i;
       } else if (!excusable(p)) {
