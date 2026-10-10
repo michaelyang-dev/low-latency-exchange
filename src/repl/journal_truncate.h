@@ -19,7 +19,10 @@
 //      Forwards, a stop left zeros right after t and valid records beyond the in-flight
 //      window, which recovery must refuse as corruption, at every start (DST-012).
 // Stopped anywhere, the journal is valid and still ends at or after t; the rejoining
-// node then simply truncates again. A crash never leaves a chain break.
+// node then simply truncates again. A crash never leaves a chain break. A failed write
+// leaves its zeros readable but maybe not durable (fsyncgate): the node exits, and the
+// recovery at its next start rewrites the window after the tail, which holds that
+// chunk, before this runs again (DST-022).
 //
 // This belongs next to journal recovery; it lives in lle::repl until the journal owner
 // adopts it (docs/design/replication.md, "Shared requests").

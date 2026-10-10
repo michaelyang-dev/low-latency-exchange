@@ -21,6 +21,10 @@
 //     Only the last segment can have a torn tail: the writer drains every write of a
 //     segment before assigning the next one, so a non-last segment that has a sealed
 //     record after its end of data is corruption too.
+//     Repair also zeroes a window that already reads as zeros, and rewrites the window
+//     before x and every segment header: what reads return may be in the page cache
+//     only (a killed process, or a failed write whose pages the kernel marked clean),
+//     and the verdict must hold after a power cut (DST-002, DST-022).
 //  Steps 4-5 (newest snapshot <= the last valid index, replay with output suppressed,
 //  rejoin truncation) belong to the node startup sequence (snap::find_latest, 10 §5).
 //
@@ -377,10 +381,16 @@ RecoveryResult recover(Dir& dir, const RecoveryOptions& opts = {}) {
     // A file shorter than its header says is damaged: never append to it again.
     if (limit < h.segment_bytes) resume = h.segment_bytes;
     r.resume_offset = resume;
-    if (opts.repair && r.torn_tail) {
+    if (opts.repair) {
       // Zero first, then close the block: a crash in between leaves zeros after x,
-      // which the next recovery handles the same way.
-      if (inside.nonzero && !detail::zero_range(dev, x, window_end, limit)) return io_error("zeroing torn tail");
+      // which the next recovery handles the same way. The window is zeroed even when
+      // it reads as zeros (DST-022): they can be in the page cache only, from a zeroing
+      // whose write failed (fsyncgate, as for repersist below) over records that a power
+      // cut brings back. A rejoin truncation's failed chunk always lies inside it
+      // (repl/journal_truncate.h); after a later truncation it would lie beyond.
+      if (!detail::zero_range(dev, x, window_end, limit)) return io_error("zeroing the window after the tail");
+    }
+    if (opts.repair && r.torn_tail) {
       if (pad_len != 0 && !detail::write_pad(dev, x, pad_len, chain, *sealer)) return io_error("writing pad");
       if (sync_device(dev) != 0) return io_error("sync after repair");
       r.repaired = true;
