@@ -25,12 +25,14 @@
 //            sometimes holding a halt until a takeover; restarts a node whose output
 //            log failed, after healing.
 //   adv      targeted takeovers: the primary dies right after a partial fill reached
-//            a client, or while a halt is held.
+//            a client, or while a halt is held; around JOINs, while W decides, the
+//            joiner or the primary dies, or W's grant to the primary is lost.
 //
 // The day is the exchange world's (standard schedule without the 1 Hz clock,
 // compressed from 09:24); the run converges when the pair is primary and backup in one
 // epoch with equal journals, the day has ended, and every client and subscriber has
-// End of Session.
+// End of Session. Faults run for the plan's safety phase, two to four times as long one
+// run in four (past the close, through rejoins under faults).
 //
 // Truth is the final journal (the primary's at the end), replayed through a fresh
 // engine. Oracles:
@@ -73,6 +75,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "client/feed_handler.h"
@@ -251,6 +254,7 @@ struct Harness {
   bool lazy_day = false;     // some clients stop reading now and then (slow consumers)
   int lossy_link = -1;       // a lossy control link: src * 3 + dst (-1: none)
   int bad_snapshots = -1;    // the node whose snapshot files are on a bad region (-1: none)
+  Nanos long_faults = 0;     // a longer fault phase (0: the plan's)
   Nanos close_linger = 0;    // lazy-reader days: a closing connection's flush bound
   std::size_t ring_bytes = 0;  // lazy-reader days: a stream direction's socket buffer
   // Rollover seeds: the pair runs the previous trading day first (no clients), then the
@@ -259,8 +263,12 @@ struct Harness {
   std::shared_ptr<ex::L2File> prev_l2_file[2];  // the previous day's L2 files
   bool rolled = true;  // the nodes run `day` (else still `prev_day`)
   bool witness_reinit = false;  // W's next image starts from a fresh state file (rollover)
+  // The JOINs a primary sent W this day, recorded as they left (the network's datagram
+  // tap), once each: W may still grant one after the process that relayed it died.
+  std::vector<wit::Join> joins_sent;
   Nanos day_start_at = 0;       // rollover: the new day's images start no earlier (the quiet gap)
   std::uint64_t targeted = 0, targeted_partial = 0, targeted_halt = 0;
+  std::uint64_t join_crashes = 0, join_cuts = 0;  // the adversary around JOINs
   std::uint64_t cod_fills_before_down = 0, partial_takeovers = 0, halt_spans = 0;
   std::uint64_t snapshots_written = 0, auction_snapshots = 0, dropped_at_close = 0;
 
@@ -302,18 +310,31 @@ struct Harness {
   // (crash, or an I/O error that stops it) only while the pair can survive it, under W's
   // current and durable state: x is not a member, or x is the solo primary of record (it
   // RESUMEs), or the other node runs as primary or backup in W's epoch with the
-  // incarnation W recorded; never while a JOIN is in flight. W may fail while the pair is
-  // primary and backup. As the ha world's gate (sim/ha/ha_world.cpp).
+  // incarnation W recorded. A JOIN relayed in W's epoch may still make the configuration
+  // {primary, joiner}, even after the process that relayed it died (the datagram outlives
+  // it): then the other node must also be alive as the incarnation that grant records
+  // (the primary goes solo; the joiner takes over), or both recorded incarnations could
+  // be dead and only a manual witness repair could continue. W may fail while the pair
+  // is primary and backup. As the ha world's gate (sim/ha/ha_world.cpp).
   [[nodiscard]] bool allowed_under(const wit::State& s, std::size_t x) const {
     const std::size_t y = 1 - x;
     const auto xi = static_cast<wit::NodeId>(x), yi = static_cast<wit::NodeId>(y);
-    if (!wit::is_member(s.members, xi)) return true;
-    if (s.members == wit::member_bit(xi) && s.primary == xi) return true;
     const ExchangeProc* other = node_proc(y);
-    if (other == nullptr || other->repl() == nullptr || !wit::is_member(s.members, yi)) return false;
-    const auto& r = other->repl()->replica();
-    return (r.role() == repl::Role::kPrimary || r.role() == repl::Role::kBackup) && r.epoch() == s.epoch &&
+    bool ok = false;
+    if (!wit::is_member(s.members, xi) || (s.members == wit::member_bit(xi) && s.primary == xi)) {
+      ok = true;
+    } else if (other != nullptr && other->repl() != nullptr && wit::is_member(s.members, yi)) {
+      const auto& r = other->repl()->replica();
+      ok = (r.role() == repl::Role::kPrimary || r.role() == repl::Role::kBackup) && r.epoch() == s.epoch &&
            s.inc[y] == r.incarnation();
+    }
+    for (const wit::Join& j : joins_sent) {
+      if (!ok) break;
+      if (j.from_epoch != s.epoch) continue;
+      const std::uint64_t need = x == j.primary ? j.node_incarnation : j.primary_incarnation;
+      ok = other != nullptr && other->repl() != nullptr && other->repl()->replica().incarnation() == need;
+    }
+    return ok;
   }
   [[nodiscard]] bool joining() const {
     for (std::size_t n = 0; n < 2; ++n) {
@@ -324,7 +345,7 @@ struct Harness {
     return false;
   }
   [[nodiscard]] bool may_fail(std::size_t x) const {
-    if (witness == nullptr || witness->core() == nullptr || joining() || failing[1 - x]) return false;
+    if (witness == nullptr || witness->core() == nullptr || failing[1 - x]) return false;
     return allowed_under(witness->core()->state(), x) && allowed_under(witness->durable_state(), x);
   }
   [[nodiscard]] bool pair_up() const {
@@ -2492,6 +2513,7 @@ class OperatorProc final : public Process {
         x[0]->shared().epoch.load() != x[1]->shared().epoch.load())
       return false;
     h_.rolled = true;
+    h_.joins_sent.clear();
     h_.day_start_at = h_.w->now() + kRolloverGap - kMs;
     h_.log("operator: %u ended at %llu on both nodes: rollover to %u", kPrevDay,
            static_cast<unsigned long long>(x[0]->shared().day_end_index.load()), kDay);
@@ -2558,8 +2580,8 @@ class OperatorProc final : public Process {
 // ---- targeted takeovers ------------------------------------------------------------------
 class AdversaryProc final : public Process {
  public:
-  AdversaryProc(Node& n, Harness& h, std::vector<Node*> clients, Node* op, bool crashes)
-      : node_(n), h_(h), clients_(std::move(clients)), op_(op), rng_(n.rng(0xAD5)), stage_{this} {
+  AdversaryProc(Node& n, Harness& h, std::vector<Node*> clients, Node* op, bool crashes, bool net)
+      : node_(n), h_(h), clients_(std::move(clients)), op_(op), rng_(n.rng(0xAD5)), jrng_(n.rng(0xAD6)), stage_{this} {
     budget_ = static_cast<int>(rng_.below(4));  // 0..3 targeted takeovers per run
     if (!crashes) budget_ = 0;                  // the run has no process crashes (--mode, --disable)
     partial_ = rng_.below(3) != 0;
@@ -2569,10 +2591,20 @@ class AdversaryProc final : public Process {
     close_ = crashes && rng_.below(3) == 0;
     at_day_end_ = rng_.below(2) == 0;
     close_after_ = static_cast<Nanos>(rng_.below(200 * kMs));
+    // One run in three: around up to three JOINs (10 §5 step 5), while W decides, the
+    // joiner or the primary dies, or W's grant to the primary is lost (W to the primary
+    // cut for 1 to 30 ms; with or without the joiner dying), so the pair must learn of
+    // W's decision from W's retransmissions or from each other, and a restarted joiner's
+    // new JOIN can meet the old one's. Crashes pass the failure-model gate when they
+    // fire. A stream of its own.
+    join_crashes_ = crashes;
+    join_net_ = net;
+    if ((crashes || net) && jrng_.below(3) == 0) join_budget_ = 1 + static_cast<int>(jrng_.below(3));
     n.add_stage(stage_, "adversary");
   }
   bool poll() {
     const Nanos now = node_.clock().now_mono();
+    if (poll_joins(now)) return true;
     if (close_ && h_.w->faults_active() && now >= h_.close_at &&
         (at_day_end_ ? h_.day_ended() : now >= h_.close_at + close_after_)) {
       close_ = false;
@@ -2617,6 +2649,47 @@ class AdversaryProc final : public Process {
   }
 
  private:
+  // A JOIN left for W (Harness::joins_sent): maybe act on it.
+  bool poll_joins(Nanos now) {
+    bool did = false;
+    while (join_seen_ < h_.joins_sent.size()) {
+      const wit::Join j = h_.joins_sent[join_seen_++];
+      if (join_budget_ <= 0 || join_due_ != 0 || !h_.w->faults_active() || jrng_.below(2) != 0) continue;
+      --join_budget_;
+      join_ = j;
+      // 0: the joiner dies; 1: the primary dies; 2: W's grant to the primary is lost;
+      // 3: both 2 and 0.
+      join_kind_ = !join_net_       ? static_cast<int>(jrng_.below(2))
+                   : !join_crashes_ ? 2
+                                    : static_cast<int>(jrng_.below(4));
+      join_due_ = now + 1 + static_cast<Nanos>(jrng_.below(3 * kMs));
+      if (join_kind_ >= 2) {
+        const Nanos cut = kMs + static_cast<Nanos>(jrng_.below(29 * kMs));
+        h_.w->net().partition(std::uint64_t{1} << kW, std::uint64_t{1} << kX[j.primary], /*symmetric=*/false, cut);
+        ++h_.join_cuts;
+        h_.log("adversary: W to %s cut for %.1f ms as its JOIN for %s (incarnation %llu) leaves",
+               j.primary == 0 ? "xa" : "xb", static_cast<double>(cut) / 1e6, j.node == 0 ? "xa" : "xb",
+               static_cast<unsigned long long>(j.node_incarnation));
+        SIM_PROBE("exchange_ha.join_grant_cut");
+        did = true;
+      }
+      if (join_kind_ == 2) join_due_ = 0;
+    }
+    if (join_due_ == 0 || now < join_due_) return did;
+    join_due_ = 0;
+    const std::size_t x = join_kind_ == 1 ? join_.primary : join_.node;
+    if (!h_.may_fail(x)) {
+      ++h_.crashes_gated;
+      return did;
+    }
+    ++h_.join_crashes;
+    h_.log("adversary: %s dies while W decides on the JOIN of %s (incarnation %llu)", x == 0 ? "xa" : "xb",
+           join_.node == 0 ? "xa" : "xb", static_cast<unsigned long long>(join_.node_incarnation));
+    SIM_PROBE("exchange_ha.join_window_crash");
+    h_.w->node(kX[x]).request_crash();
+    return true;
+  }
+
   struct Stage {
     AdversaryProc* p;
     bool poll() { return p->poll(); }
@@ -2626,6 +2699,14 @@ class AdversaryProc final : public Process {
   std::vector<Node*> clients_;
   Node* op_;
   Rng rng_;
+  Rng jrng_;                   // the JOIN adversary's draws
+  bool join_crashes_ = false;  // the run has process crashes
+  bool join_net_ = false;      // and network faults
+  int join_budget_ = 0;        // JOINs still to act on
+  std::size_t join_seen_ = 0;  // Harness::joins_sent looked at
+  wit::Join join_;             // the JOIN acted on
+  int join_kind_ = 0;
+  Nanos join_due_ = 0;  // its crash (0: none due)
   int budget_ = 0;
   bool partial_ = false;
   bool halt_ = false;
@@ -2862,6 +2943,15 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     w.net().link_params(src, dst).loss_ppm = static_cast<std::uint32_t>(500'000 + lossy_cfg.below(400'000));
     h.lossy_link = static_cast<int>(src * 3 + dst);
   }
+  // JOINs on their way to W, for the failure-model gate (Harness::allowed_under).
+  w.net().set_datagram_tap([&h, wip = wn.ip()](NodeId src, env::Endpoint dst, std::span<const std::byte> data) {
+    if (!h.rolled || (src != kX[0] && src != kX[1]) || dst.ipv4 != wip || dst.port != kWitnessPort) return;
+    const auto m = wit::decode(data);
+    if (!m || !std::holds_alternative<wit::Join>(*m)) return;
+    const wit::Join& j = std::get<wit::Join>(*m);
+    if (j.primary > 1 || j.node > 1) return;
+    if (std::find(h.joins_sent.begin(), h.joins_sent.end(), j) == h.joins_sent.end()) h.joins_sent.push_back(j);
+  });
   Node* xs[2] = {&xa, &xb};
   // Replication timing (ExchangeConfig [ha]), drawn per seed as the ha world does.
   const Nanos t_d = 10 * kMs + static_cast<Nanos>(wl.below(15 * kMs + 1));
@@ -3050,8 +3140,9 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   op.set_boot([&h](Node& nd, BootReason) { nd.emplace_process<OperatorProc>(nd, h); });
   Node& adv = w.add_node("adv", NodeOptions{false, false});
   const bool crashes = o.faults.enabled(FaultClass::Crash);
-  adv.set_boot([&h, client_nodes, &op, crashes](Node& nd, BootReason) {
-    nd.emplace_process<AdversaryProc>(nd, h, client_nodes, &op, crashes);
+  const bool net = o.faults.enabled(FaultClass::Net);
+  adv.set_boot([&h, client_nodes, &op, crashes, net](Node& nd, BootReason) {
+    nd.emplace_process<AdversaryProc>(nd, h, client_nodes, &op, crashes, net);
   });
   if (h.snapd_apart) {
     for (std::size_t n = 0; n < 2; ++n) {
@@ -3096,9 +3187,18 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   wn.disk().set_fault_gate([&h] { return h.rolled && h.pair_up(); });
   for (std::size_t i = 0; i < w.node_count(); ++i) w.node(static_cast<NodeId>(i)).boot();
   w.oracles().add_final_check(h.o_stream, [&h] { h.final_checks(); });
+  // One run in four keeps its faults on two to four times as long, the day as long as
+  // before: crashes, partitions and I/O errors go on past the close while the nodes
+  // rejoin, catch up and JOIN, which otherwise happens almost only after healing. A
+  // stream of its own.
+  Options fo = o;
+  if (Rng long_cfg = w.stream(Stream::Workload, 0xEA1); long_cfg.below(4) == 0) {
+    fo.plan.safety_ns = o.plan.safety_ns * static_cast<Nanos>(2 + long_cfg.below(3));
+    h.long_faults = fo.plan.safety_ns;
+  }
 
   return finish(
-      w, split ? WorldKind::ExchangeHaSplit : WorldKind::ExchangeHa, o,
+      w, split ? WorldKind::ExchangeHaSplit : WorldKind::ExchangeHa, fo,
       [&h] {
         ExchangeProc* x[2] = {h.node_proc(0), h.node_proc(1)};
         if (x[0] == nullptr || x[1] == nullptr) return false;
@@ -3216,6 +3316,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                     ? std::string()
                     : " lossy=" + std::to_string(h.lossy_link / 3) + ">" + std::to_string(h.lossy_link % 3)) +
                (h.bad_snapshots < 0 ? std::string() : " bad_snapshots=" + std::to_string(h.bad_snapshots)) +
+               (h.long_faults == 0 ? std::string() : " long_faults_ms=" + std::to_string(h.long_faults / kMs)) +
                " eos=" + std::to_string(eos) + "/" + std::to_string(h.clients.size()) +
                " sub_end=" + std::to_string(ended) + "/" + std::to_string(h.subs.size()) +
                " ouch=" + std::to_string(msgs) + " copies=" + std::to_string(copies) +
@@ -3225,6 +3326,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                " drops=" + std::to_string(drops) + " bad=" + std::to_string(bad) +
                " partials=" + std::to_string(partials) + " halts=" + std::to_string(h.halts) +
                " held_halts=" + std::to_string(h.held_halts) + " targeted=" + std::to_string(h.targeted) +
+               " join_adv=" + std::to_string(h.join_crashes) + "/" + std::to_string(h.join_cuts) +
                " partial_takeovers=" + std::to_string(h.partial_takeovers) +
                " halt_spans=" + std::to_string(h.halt_spans) +
                " cod_fills_before_down=" + std::to_string(h.cod_fills_before_down) +

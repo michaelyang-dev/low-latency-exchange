@@ -257,6 +257,7 @@ bool Network::dg_send(std::uint32_t port, env::Endpoint dst, std::span<const std
   if (data.size() > kMaxDatagram) return false;
   if (!dg_ports_[port].used) return false;
   ++w_.stats().net_sent;
+  if (dg_tap_) dg_tap_(dg_ports_[port].node, dst, data);
   if (is_multicast(dst)) {
     const auto it = groups_.find(endpoint_key(dst));
     if (it == groups_.end()) return true;

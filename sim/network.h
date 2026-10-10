@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -89,6 +90,11 @@ class Network {
   // in flight and receiver's unread; kStreamRingBytes unless set): smaller socket
   // buffers, so a peer that stops reading blocks its sender sooner.
   void set_stream_ring_bytes(std::size_t bytes) noexcept { ring_bytes_ = bytes; }
+  // A harness's view of each unicast or multicast datagram as it is sent, before loss,
+  // partitions or the receiver: what one process asked another for, even if the sender
+  // dies before the datagram lands. Observes only (no draws), so traces are unchanged.
+  using DatagramTap = std::function<void(NodeId src, env::Endpoint dst, std::span<const std::byte> data)>;
+  void set_datagram_tap(DatagramTap tap) { dg_tap_ = std::move(tap); }
 
   // --- link parameters (drawn lazily per directed link from its own stream) ---
   LinkParams& link_params(NodeId src, NodeId dst);
@@ -245,6 +251,7 @@ class Network {
   Nanos stall_max_ns_ = 0;
   Nanos reset_timeout_ns_ = 1'000'000'000;
   bool fifo_dg_ = false;
+  DatagramTap dg_tap_;
   std::size_t ring_bytes_ = kStreamRingBytes;
 
   struct ActivePartition {
