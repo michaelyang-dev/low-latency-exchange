@@ -3187,6 +3187,10 @@ Report run_exchange_ha_world(const Options& o, bool split) {
     fo.plan.safety_ns = o.plan.safety_ns * static_cast<Nanos>(2 + long_cfg.below(3));
     h.long_faults = fo.plan.safety_ns;
   }
+  // A rollover seed's previous day and quiet gap come first and are not under test (no
+  // faults reach the pair or W before the rollover): the new day gets the whole fault
+  // phase after them.
+  fo.plan.safety_ns += shift;
 
   return finish(
       w, split ? WorldKind::ExchangeHaSplit : WorldKind::ExchangeHa, fo,

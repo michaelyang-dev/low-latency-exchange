@@ -2411,9 +2411,14 @@ Report run_exchange(const Options& o) {
   }
   for (std::size_t i = 0; i < w.node_count(); ++i) w.node(static_cast<NodeId>(i)).boot();
   w.oracles().add_final_check(h.o_stream, [&h] { h.final_checks(); });
+  // A rollover seed's previous day and quiet gap come first and are not under test (no
+  // faults reach the node before the rollover): the new day gets the whole fault phase
+  // after them.
+  Options fo = o;
+  fo.plan.safety_ns += shift;
 
   return finish(
-      w, WorldKind::Exchange, o,
+      w, WorldKind::Exchange, fo,
       [&h, &w] {
         ExchangeProc* xp = h.node_proc();
         if (xp == nullptr || !xp->settled() || xp->shared().day_end_index.load() == 0) return false;
