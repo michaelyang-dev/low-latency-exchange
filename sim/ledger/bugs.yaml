@@ -1009,3 +1009,58 @@ bugs:
       fix applied to it; the mechanism was not predicted. Fixed with a regression test
       that fails without the fix (a divergence alarm and a truncation before the record
       could be read) and checks that the rejoin then truncates to the right point.
+  - id: DST-022
+    title: "journal recovery relied on zeros after the tail that a failed truncation write had left in the page cache only: after the retried truncation and a power cut, the old records came back past the in-flight window and recovery refused the journal at every start"
+    component: journal
+    targets: [T05, T24, T26]
+    category: production
+    found_utc: "2026-10-10T04:28:12Z"
+    campaign_id: 20261010T012359Z-82095b90-536e6ab8c2c6c8a4
+    sha_found: b500278ad13244626d28bc4aa7d3dc224a99a11e
+    seed: "0x536e6ab8c2c6f1c3"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha_split"]
+    swarm_digest: "0x7cc691fc992e2a30"
+    platform: linux-aarch64
+    build: sim-RelWithDebInfo
+    oracle: O-RECOVER
+    signature: "O-RECOVER:644065:0x973ba9bf9fb7b510"
+    root_cause: >-
+      A dsync write that fails leaves its bytes in the page cache but not on the disk, and
+      the kernel marks the pages clean (fsyncgate). Journal recovery (src/journal/recovery.h,
+      06 §7) takes the end of the journal from what reads return. Since DST-002 it rewrites
+      what it relies on before the tail, but it relied on the zeros after the tail without
+      writing them. A rejoin truncation (src/repl/journal_truncate.h) zeroes backwards in
+      durable chunks. When one of those writes fails, reads return zeros where the disk
+      still holds the old records. In the seed (exchange_ha_split), xa's truncation to 379
+      failed at the chunk at offset 1773568 ("zeroing failed"), so xa exited. Its
+      recoveries then read the journal as ending at 1773568 (index 14072) and left the
+      zeros there as they were. The retried truncation zeroed only from 379 to 1773568, so
+      the disk kept the old records at 1773568, past the in-flight window of the new tail
+      (962560). After a power cut (a host crash at 428 ms), recovery refused the journal
+      ("valid record beyond in-flight window: sealed record at offset 1773568, last valid
+      index 379 ends at 962560"), at every start (O-RECOVER). Fix: recovery with repair
+      zeroes the in-flight window after the tail with dsync even when it reads as zeros. A
+      truncation's failed chunk always lies inside that window, and exchanged exits on a
+      failed truncation, so the next start rewrites the chunk before truncating again.
+    fix_sha: b5dbfc84fecc4732b07e73060a2ccd2df111cfc5
+    regression_test: tests/sim_regressions/DST-022_truncation_eio_power_cut
+    counted: true
+    count_reason: >-
+      Production journal recovery, under rejoin truncation (src/journal/recovery.h; the
+      truncation is src/repl/journal_truncate.h, called by exchanged's rejoin).
+      Availability defect under the model's faults (one failed write, then a power cut):
+      the node's journal is refused at every start and needs manual repair. Found by exsim
+      in a 20,000-seed exchange_ha_split campaign on linux-aarch64 (one failure; the
+      campaign ran on a snapshot commit, 82095b9, of the sources at b500278). It
+      reproduces from seed at the found tree on linux-aarch64 and macos-arm64 and passes
+      at the fix. The mechanism was not predicted: it was first taken for a simulator
+      disk-model bug and diagnosed from the disk's history of the offset. It is distinct
+      from DST-002 and DST-012, whose fixes are both in the found tree. DST-002 covers what
+      recovery relies on before the tail and the segment headers, not the zeros after the
+      tail. DST-012 fixed the order of the truncation's writes against crashes and failed
+      writes, but a failed write leaves the cache and the disk different. One root cause,
+      one fix. The seed-independent regression test fails each write of the truncation in
+      turn (MemJournalDevice -EIO: readable, never durable), restarts, truncates again,
+      cuts the power and requires recovery to accept the journal ending at t. At the found
+      tree it refuses at the first failure point; at the fix every failure point
+      recovers.
