@@ -255,6 +255,7 @@ struct Harness {
   int lossy_link = -1;       // a lossy control link: src * 3 + dst (-1: none)
   int bad_snapshots = -1;    // the node whose snapshot files are on a bad region (-1: none)
   Nanos long_faults = 0;     // a longer fault phase (0: the plan's)
+  bool asymmetric = false;   // xb's node-local settings drawn apart from xa's
   Nanos close_linger = 0;    // lazy-reader days: a closing connection's flush bound
   std::size_t ring_bytes = 0;  // lazy-reader days: a stream direction's socket buffer
   // Rollover seeds: the pair runs the previous trading day first (no clients), then the
@@ -3058,17 +3059,46 @@ Report run_exchange_ha_world(const Options& o, bool split) {
   // crashes and follows the journal through a rejoin's truncation. On the others
   // exchanged hosts the follower, which starts after the rejoin. A stream of its own.
   h.snapd_apart = base.follower && w.stream(Stream::Workload, 0xE95).below(2) == 0;
+  // One run in three the nodes are configured apart: what is local to a node (segment
+  // size, L2 and its file, the egress and md rings, the replay ring, the line B packet
+  // size, snapshot cadence and use, the follower, spares, the record log's arena, the
+  // tee) is drawn again for xb, from the same ranges; the day's configuration, the
+  // replication timing and the hash checkpoints stay common. A stream of its own.
+  Rng asym_cfg = w.stream(Stream::Workload, 0xEA3);
+  h.asymmetric = asym_cfg.below(3) == 0;
   for (std::size_t n = 0; n < 2; ++n) {
     NodeParams& p = h.params[n];
     p = base;
+    bool l2_file = l2_files;
+    if (h.asymmetric && n == 1) {
+      Rng& a = asym_cfg;
+      p.segment_bytes = jr::kSegmentHeaderBytes + jr::kBatchBytes * (8 + a.below(24));
+      p.l2_bytes = std::size_t{1} << (20 + a.below(3));
+      while (p.l2_bytes < config_need) p.l2_bytes <<= 1;
+      p.egress_bytes = std::size_t{1} << (17 + a.below(5));
+      if (p.snapshot_every != 0) p.snapshot_every = (50 + a.below(1500)) * (h.clock ? 32 : 1);
+      p.use_snapshots = a.below(8) != 0;
+      p.follower_poll = static_cast<Nanos>(2 * kMs + a.below(20 * kMs));
+      p.follower_keep = a.below(3) == 0 ? 2 : 0;
+      p.replay_ring_msgs = a.below(2) == 0 ? 64 + a.below(512) : std::size_t{1} << 16;
+      p.md_ring_messages = a.below(2) == 0 ? 64 + a.below(1024) : std::size_t{1} << 16;
+      p.max_packet_b = static_cast<std::size_t>(300 + a.below(1173));
+      p.spares = static_cast<std::size_t>(a.below(4));
+      p.repl_log_bytes = std::size_t{1} << (16 + a.below(8));
+      if (split) {
+        p.tee_bytes = h.clock ? std::size_t{1} << (21 + a.below(4)) : std::size_t{1} << (16 + a.below(9));
+        while (p.tee_bytes < config_need) p.tee_bytes <<= 1;
+      }
+      l2_file = a.below(2) == 0;
+    }
     if (h.snapd_apart) p.follower = false;
     p.node_id = static_cast<std::uint16_t>(n);
     p.gw[0] = env::Endpoint{xs[n]->ip(), kGwPort[0]};
     p.gw[1] = env::Endpoint{xs[n]->ip(), kGwPort[1]};
     p.ha_bind = env::Endpoint{xs[n]->ip(), kHaPort};
     p.ha_peer = env::Endpoint{xs[1 - n]->ip(), kHaPort};
-    if (l2_files) p.l2_file = std::make_shared<ex::L2File>();
-    if (l2_files && h.prev_day) h.prev_l2_file[n] = std::make_shared<ex::L2File>();
+    if (l2_file) p.l2_file = std::make_shared<ex::L2File>();
+    if (l2_file && h.prev_day) h.prev_l2_file[n] = std::make_shared<ex::L2File>();
     xs[n]->set_boot([&h, n](Node& nd, BootReason) { nd.emplace_process<NodeProc>(nd, h, n); });
   }
   {
@@ -3335,7 +3365,7 @@ Report run_exchange_ha_world(const Options& o, bool split) {
                " partials=" + std::to_string(partials) + " halts=" + std::to_string(h.halts) +
                " held_halts=" + std::to_string(h.held_halts) + " targeted=" + std::to_string(h.targeted) +
                " join_adv=" + std::to_string(h.join_crashes) + "/" + std::to_string(h.join_cuts) +
-               " w_starts=" + std::to_string(h.witness_starts) +
+               " w_starts=" + std::to_string(h.witness_starts) + (h.asymmetric ? " asymmetric=1" : "") +
                " partial_takeovers=" + std::to_string(h.partial_takeovers) +
                " halt_spans=" + std::to_string(h.halt_spans) +
                " cod_fills_before_down=" + std::to_string(h.cod_fills_before_down) +
