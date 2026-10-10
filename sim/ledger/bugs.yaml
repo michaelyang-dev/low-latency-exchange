@@ -1064,3 +1064,52 @@ bugs:
       cuts the power and requires recovery to accept the journal ending at t. At the found
       tree it refuses at the first failure point; at the fix every failure point
       recovers.
+  - id: DST-023
+    title: "a restart left the records it had journaled from its L2 file valid in the ring, so after the incomplete-day-start runbook moved the journal aside every start journaled them again and refused: the node never rejoined"
+    component: exchanged
+    targets: [T05, T24, T26]
+    category: production
+    found_utc: "2026-10-10T11:36:00Z"
+    campaign_id: 20261010T095548Z-4eb2b8c0-579302fb1082f8bf
+    sha_found: 4eb2b8c0b73166dd52322d54b110b302534ad304
+    seed: "0x579302fb10833078"
+    exsim_args: ["--mode=swarm", "--world=exchange_ha_split"]
+    swarm_digest: "0xdb1450a651f3b484"
+    platform: macos-arm64
+    build: sim-RelWithDebInfo
+    oracle: O-LIVE
+    signature: "O-LIVE:4605907:0x77fd32fd4725b7f4"
+    root_cause: >-
+      With L2 in a file ([journal] l2_path), a restart journals what the ring holds beyond
+      L3 (apps/exchanged/node.cpp, Node::restore_l2). L2Ring::restore re-publishes that
+      chain at position 0, and the ring kept its nonce, so the records stayed valid: the
+      code assumed a later restore only ever looks for a chain from durable + 1. That holds
+      until the journal shrinks below what was restored, and the runbook for an incomplete
+      day start (exchange-node.md §8, named in exchanged's refusal) moves the journal's
+      segments aside. In the seed (exchange_ha_split, L2 files, a fault phase of 1 s), xa,
+      joining from an empty journal after an earlier runbook, stopped on a disk error with
+      records 1..4 copied to L2 only. Its restart journaled them ("L2: restored 4 records
+      (1..4)"), found the day start without an EpochStart and refused. The operator moved
+      the segments aside as the refusal says; the next start journaled records 1..4 from L2
+      again and refused again, at every start: 539 refusals, and xa never rejoined (O-LIVE).
+      Fix: once the restart has journaled what the ring held, the ring gets a fresh nonce
+      (L2Storage::renew, written to the control block), so nothing it held validates
+      again; the simulator's copy of Node::restore_l2 (sim/exchange/exchange_node.cpp)
+      does the same.
+    fix_sha: a436c2813c4d4f6084e1c36cd4d6a48507e3ef74
+    regression_test: tests/sim_regressions/DST-023_l2_refills_moved_journal
+    counted: true
+    count_reason: >-
+      Production code (exchanged's start-up, apps/exchanged/node.cpp, and
+      src/journal/l2_storage). Availability defect under the model's faults (disk errors
+      during a rejoin): a node with an L2 file, as every lab configuration has, cannot be
+      brought back by the documented runbook and needs a repair the runbook does not name.
+      Found by exsim in a 20,000-seed exchange_ha_split campaign at 4eb2b8c (one failure),
+      the first after the exchange_ha gate stopped excluding faults during catch-ups and a
+      quarter of the runs kept faults on longer. It reproduces from seed at the found tree
+      with the recorded signature on macos-arm64 and linux-aarch64 and passes at the fix.
+      The mechanism was not predicted: the run was first read as a runbook that kept being
+      applied, then as stale records in L2. One root cause, one fix. The regression test
+      runs the exchanged binary with an L2 file and moves its journal aside twice: at the
+      found tree the third start journals the day start's 34 records from L2 again; at the
+      fix it starts the day afresh. A unit test covers L2Storage::renew.
